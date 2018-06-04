@@ -340,11 +340,12 @@ fn do_sub<'a>(mut lhs: &'a Decimal, mut rhs: &'a Decimal) -> Res<Decimal> {
         while r_idx > r_stop {
             idx_to -= 1;
             r_idx -= 1;
+            let res_len = res.word_buf.len();
             sub(
                 0,
-                rhs.word_buf[r_idx],
+                *rhs.word_buf.get(r_idx).unwrap_or_else(|| get_out_of_bounds(rhs.word_buf.len(), r_idx, lhs, rhs)),
                 &mut carry,
-                &mut res.word_buf[idx_to],
+                &mut res.word_buf.get_mut(idx_to).unwrap_or_else(|| get_out_of_bounds(res_len, idx_to, lhs, rhs)),
             );
         }
     }
@@ -353,22 +354,24 @@ fn do_sub<'a>(mut lhs: &'a Decimal, mut rhs: &'a Decimal) -> Res<Decimal> {
         idx_to -= 1;
         l_idx -= 1;
         r_idx -= 1;
+        let res_len = res.word_buf.len();
         sub(
-            lhs.word_buf[l_idx],
-            rhs.word_buf[r_idx],
+            *lhs.word_buf.get(l_idx).unwrap_or_else(|| get_out_of_bounds(lhs.word_buf.len(), l_idx, lhs, rhs)),
+            *rhs.word_buf.get(r_idx).unwrap_or_else(|| get_out_of_bounds(rhs.word_buf.len(), r_idx, lhs, rhs)),
             &mut carry,
-            &mut res.word_buf[idx_to],
+            &mut res.word_buf.get_mut(idx_to).unwrap_or_else(|| get_out_of_bounds(res_len, idx_to, lhs, rhs)),
         );
     }
 
     while carry > 0 && l_idx > l_start {
         idx_to -= 1;
         l_idx -= 1;
+        let res_len = res.word_buf.len();
         sub(
-            lhs.word_buf[l_idx],
+            *lhs.word_buf.get(l_idx).unwrap_or_else(|| get_out_of_bounds(lhs.word_buf.len(), l_idx, lhs, rhs)),
             0,
             &mut carry,
-            &mut res.word_buf[idx_to],
+            &mut res.word_buf.get_mut(idx_to).unwrap_or_else(|| get_out_of_bounds(res_len, idx_to, lhs, rhs)),
         );
     }
     while l_idx > l_start {
@@ -377,6 +380,10 @@ fn do_sub<'a>(mut lhs: &'a Decimal, mut rhs: &'a Decimal) -> Res<Decimal> {
         res.word_buf[idx_to] = lhs.word_buf[l_idx];
     }
     res
+}
+
+fn get_out_of_bounds(len: usize, index: usize, lhs: &Decimal, rhs: &Decimal) -> ! {
+    panic!("get out of bounds: len: {}, index: {}, lhs: {:?}, rhs: {:?}", len, index, lhs, rhs)
 }
 
 /// Get the max possible decimal with giving precision and fraction digit count.
