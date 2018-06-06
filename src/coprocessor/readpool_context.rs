@@ -20,6 +20,7 @@ use util::worker;
 use super::dag::executor::ExecutorMetrics;
 use super::local_metrics::{BasicLocalMetrics, ExecLocalMetrics};
 
+/// A context for `ReadPool`.
 pub struct Context {
     // TODO: ExecLocalMetrics can be merged into this file.
     pub exec_local_metrics: ExecLocalMetrics,
@@ -33,6 +34,7 @@ impl fmt::Debug for Context {
 }
 
 impl Context {
+    /// Creates a `Context`.
     pub fn new(pd_sender: worker::FutureScheduler<pd::PdTask>) -> Self {
         Context {
             exec_local_metrics: ExecLocalMetrics::new(pd_sender),
@@ -40,6 +42,7 @@ impl Context {
         }
     }
 
+    /// Collects executor's metrics.
     pub fn collect(&mut self, region_id: u64, scan_tag: &str, metrics: ExecutorMetrics) {
         self.exec_local_metrics
             .collect(scan_tag, region_id, metrics);
@@ -48,6 +51,7 @@ impl Context {
 
 impl futurepool::Context for Context {
     fn on_tick(&mut self) {
+        // Flush local metrics periodically.
         self.exec_local_metrics.flush();
         self.basic_local_metrics.flush();
     }

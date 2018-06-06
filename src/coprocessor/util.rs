@@ -46,6 +46,7 @@ pub fn is_point(range: &coppb::KeyRange) -> bool {
     range.get_end() == &*prefix_next(range.get_start())
 }
 
+/// Get primary key of the column info.
 #[inline]
 pub fn get_pk(col: &ColumnInfo, h: i64) -> Datum {
     if mysql::has_unsigned_flag(col.get_flag() as u64) {

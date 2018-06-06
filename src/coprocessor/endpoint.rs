@@ -48,16 +48,18 @@ use super::metrics::*;
 use super::statistics::analyze::AnalyzeContext;
 use super::*;
 
-// If a request has been handled for more than 60 seconds, the client should
-// be timeout already, so it can be safely aborted.
+/// If a request has been handled for more than 60 seconds, the client should
+/// be timeout already, so it can be safely aborted.
 pub const DEFAULT_REQUEST_MAX_HANDLE_SECS: u64 = 60;
-// If handle time is larger than the lower bound, the query is considered as slow query.
+/// If handle time is larger than the lower bound, the query is considered as slow query.
 const SLOW_QUERY_LOWER_BOUND: f64 = 1.0; // 1 second.
 
+/// The error message of outdated.
 const OUTDATED_ERROR_MSG: &str = "request outdated.";
-
+/// The error message of busy endpoint.
 const ENDPOINT_IS_BUSY: &str = "endpoint is busy";
 
+/// A `Host` computes responses of requests.
 pub struct Host {
     engine: Box<Engine>,
     sched: Scheduler<Task>,
@@ -73,6 +75,7 @@ pub struct Host {
 }
 
 impl Host {
+    /// Create a `Host`.
     pub fn new(
         engine: Box<Engine>,
         sched: Scheduler<Task>,
@@ -94,6 +97,7 @@ impl Host {
         }
     }
 
+    /// Total number of running tasks.
     #[inline]
     fn running_task_count(&self) -> usize {
         self.running_task_count.load(Ordering::Acquire)
@@ -708,16 +712,12 @@ pub fn err_resp(e: Error, metrics: &mut BasicLocalMetrics) -> Response {
     err_multi_resp(e, 1, metrics)
 }
 
-pub const STR_REQ_PRI_LOW: &str = "low";
-pub const STR_REQ_PRI_NORMAL: &str = "normal";
-pub const STR_REQ_PRI_HIGH: &str = "high";
-
 #[inline]
 pub fn get_req_pri_str(pri: CommandPri) -> &'static str {
     match pri {
-        CommandPri::Low => STR_REQ_PRI_LOW,
-        CommandPri::Normal => STR_REQ_PRI_NORMAL,
-        CommandPri::High => STR_REQ_PRI_HIGH,
+        CommandPri::Low => "low",
+        CommandPri::Normal => "normal",
+        CommandPri::High => "high",
     }
 }
 
