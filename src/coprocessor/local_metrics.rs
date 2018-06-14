@@ -35,7 +35,7 @@ impl CopFlowStatistics {
         }
     }
 
-    pub fn add(&mut self, region_id: u64, stats: &Statistics) {
+    pub fn collect(&mut self, region_id: u64, stats: &Statistics) {
         let flow_stats = self.data.entry(region_id).or_default();
         flow_stats.add(&stats.write.flow_stats);
         flow_stats.add(&stats.data.flow_stats);
@@ -84,11 +84,49 @@ impl ExecLocalMetrics {
             }
         }
         // flow statistics group by region
-        self.flow_stats.add(region_id, stats);
+        self.flow_stats.collect(region_id, stats);
         // scan count
-        metrics.scan_counter.consume(&mut self.scan_counter);
+        if metrics.scan_counter.point > 0 {
+            self.scan_counter
+                .with_label_values(&["point"])
+                .inc_by(metrics.scan_counter.point as i64);
+        }
+        if metrics.scan_counter.range > 0 {
+            self.scan_counter
+                .with_label_values(&["range"])
+                .inc_by(metrics.scan_counter.range as i64);
+        }
         // exec count
-        metrics.executor_count.consume(&mut self.exec_counter);
+        if metrics.executor_count.table_scan > 0 {
+            self.exec_counter
+                .with_label_values(&["tblscan"])
+                .inc_by(metrics.executor_count.table_scan);
+        }
+        if metrics.executor_count.index_scan > 0 {
+            self.exec_counter
+                .with_label_values(&["idxscan"])
+                .inc_by(metrics.executor_count.index_scan);
+        }
+        if metrics.executor_count.selection > 0 {
+            self.exec_counter
+                .with_label_values(&["selection"])
+                .inc_by(metrics.executor_count.selection);
+        }
+        if metrics.executor_count.topn > 0 {
+            self.exec_counter
+                .with_label_values(&["topn"])
+                .inc_by(metrics.executor_count.topn);
+        }
+        if metrics.executor_count.limit > 0 {
+            self.exec_counter
+                .with_label_values(&["limit"])
+                .inc_by(metrics.executor_count.limit);
+        }
+        if metrics.executor_count.aggregation > 0 {
+            self.exec_counter
+                .with_label_values(&["aggregation"])
+                .inc_by(metrics.executor_count.aggregation);
+        }
     }
 
     pub fn flush(&mut self) {
