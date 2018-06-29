@@ -63,6 +63,8 @@ fn test_prevote<T: Simulator>(
     detect_during_recovery: (u64, bool),
 ) {
     cluster.cfg.raft_store.prevote = true;
+    let election_timeout = cluster.cfg.raft_store.raft_base_tick_interval.0
+        * cluster.cfg.raft_store.raft_election_timeout_ticks as u32;
 
     let leader_id = 1;
 
@@ -84,7 +86,7 @@ fn test_prevote<T: Simulator>(
     };
 
     // Once we see a response on the wire we know a prevote round is happening.
-    let received = rx.recv_timeout(Duration::from_secs(5));
+    let received = rx.recv_timeout(election_timeout * 2);
     assert_eq!(
         received.is_ok(),
         detect_during_failure.1,
@@ -110,7 +112,7 @@ fn test_prevote<T: Simulator>(
     }
 
     // Once we see a response on the wire we know a prevote round is happening.
-    let received = rx.recv_timeout(Duration::from_secs(5));
+    let received = rx.recv_timeout(election_timeout * 2);
 
     cluster.must_put(b"k3", b"v3");
     assert_eq!(cluster.must_get(b"k1"), Some(b"v1".to_vec()));
