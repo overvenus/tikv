@@ -32,7 +32,7 @@ use raftstore::store::{
     cmd_resp, Msg as StoreMsg, Peer, ReadExecutor, ReadResponse, RequestInspector, RequestPolicy,
 };
 use raftstore::Result;
-use util::collections::HashMap;
+use util::collections::{HashMap, HashSet};
 use util::time::duration_to_sec;
 use util::timer::Timer;
 use util::transport::{NotifyError, Sender};
@@ -48,6 +48,7 @@ pub struct ReadDelegate {
     term: u64,
     applied_index_term: u64,
     leader_lease: Option<RemoteLease>,
+    ready_requsets: Vec<(Instant, RaftCmdRequest, Callback)>,
 
     tag: String,
 }
@@ -63,6 +64,7 @@ impl ReadDelegate {
             term: peer.term(),
             applied_index_term: peer.get_store().applied_index_term,
             leader_lease: None,
+            ready_requsets: Vec::new(),
             tag: format!("[region {}] {}", region_id, peer_id),
         }
     }
@@ -109,6 +111,51 @@ impl ReadDelegate {
             }
         }
         None
+    }
+
+    fn handle_ready_read(
+        &mut self,
+        send_time: Instant,
+        request: RaftCmdRequest,
+        callback: Callback,
+    ) {
+        self.ready_requsets.push((send_time, request, callback));
+    }
+
+    fn handle_reads<C: Sender<StoreMsg>>(
+        &mut self,
+        kv_engine: &Arc<DB>,
+        ch: &C,
+        metrics: &mut ReadMetrics,
+    ) {
+        let mut executor = ReadExecutor::new(&self.region, kv_engine, &self.tag);
+        let mut skip = false;
+        // TODO: gc.
+        while let Some((send_time, request, callback)) = self.ready_requsets.pop() {
+            if !skip {
+                if let Ok(mut resp) = executor.execute(&request, false) {
+                    if let Some(ref lease) = self.leader_lease {
+                        if lease.inspect(None) == LeaseState::Valid {
+                            // Leader can read local if and only if it is in lease.
+                            cmd_resp::bind_term(&mut resp.response, self.term);
+                            callback.invoke_read(resp);
+                            continue;
+                        }
+                    }
+                }
+            }
+            skip = true;
+            metrics.rejected_by_lease_expire += 1;
+            redirect(
+                ch,
+                StoreMsg::RaftCmd {
+                    send_time,
+                    request,
+                    callback,
+                },
+                metrics,
+            )
+        }
     }
 }
 
@@ -250,6 +297,7 @@ pub struct LocalReader<C: Sender<StoreMsg>> {
     metrics: ReadMetrics,
     // region id -> ReadDelegate
     delegates: HashMap<u64, ReadDelegate>,
+    ready_set: HashSet<u64>,
     // A channel to raftstore.
     ch: C,
     tag: String,
@@ -269,8 +317,12 @@ impl LocalReader<mio::Sender<StoreMsg>> {
         }
         let store_id = store.store_id();
         LocalReader {
-            delegates,
             store_id,
+            delegates,
+            ready_set: HashSet::with_capacity_and_hasher(
+                store.get_peers().len(),
+                Default::default(),
+            ),
             kv_engine: store.kv_engine(),
             ch: store.get_sendch().into_inner(),
             metrics: ReadMetrics::default(),
@@ -282,6 +334,19 @@ impl LocalReader<mio::Sender<StoreMsg>> {
         let mut timer = Timer::new(1);
         timer.add_task(Duration::from_millis(METRICS_FLUSH_INTERVAL), ());
         worker.start_with_timer(self, timer)
+    }
+}
+
+fn redirect<C: Sender<StoreMsg>>(ch: &C, cmd: StoreMsg, metrics: &mut ReadMetrics) {
+    match ch.send(cmd) {
+        Ok(()) => (),
+        Err(NotifyError::Full(cmd)) => {
+            metrics.rejected_by_channel_full += 1;
+            handle_busy(cmd)
+        }
+        Err(err) => {
+            panic!("localreader redirect failed: {:?}", err);
+        }
     }
 }
 
@@ -388,16 +453,11 @@ impl<C: Sender<StoreMsg>> LocalReader<C> {
             }
         }
 
-        if let Some(resp) = self.delegates[&region_id].handle_read(&req, &self.kv_engine) {
-            callback.invoke_read(resp)
-        } else {
-            self.metrics.rejected_by_lease_expire += 1;
-            self.redirect(StoreMsg::RaftCmd {
-                send_time,
-                request: req,
-                callback,
-            })
-        }
+        self.delegates
+            .get_mut(&region_id)
+            .unwrap()
+            .handle_ready_read(send_time, req, callback);
+        self.ready_set.insert(region_id);
     }
 
     fn propose_batch_raft_snapshot_command(
@@ -435,6 +495,15 @@ impl<C: Sender<StoreMsg>> LocalReader<C> {
         }
 
         on_finished.invoke_batch_read(ret);
+    }
+
+    fn on_read_ready(&mut self) {
+        // TODO: gc.
+        for id in self.ready_set.drain() {
+            if let Some(delegate) = self.delegates.get_mut(&id) {
+                delegate.handle_reads(&self.kv_engine, &self.ch, &mut self.metrics);
+            }
+        }
     }
 }
 
@@ -513,12 +582,16 @@ impl<C: Sender<StoreMsg>> Runnable<Task> for LocalReader<C> {
                             region_id, progress
                         );
                     }
+                    self.on_read_ready();
                 }
                 Task::Destroy(region_id) => {
                     self.delegates.remove(&region_id);
+                    self.on_read_ready();
                 }
             }
         }
+
+        self.on_read_ready();
     }
 }
 
@@ -668,6 +741,7 @@ mod tests {
             kv_engine: Arc::new(db),
             delegates: HashMap::default(),
             metrics: ReadMetrics::default(),
+            ready_set: HashSet::default(),
             tag: "foo".to_owned(),
         };
         (path, reader, rx)
@@ -766,6 +840,7 @@ mod tests {
             term: term6,
             applied_index_term: term6 - 1,
             leader_lease: Some(remote),
+            ready_requsets: Vec::new(),
         });
         reader.run_batch(&mut vec![register_region1]);
         assert!(reader.delegates.get(&1).is_some());

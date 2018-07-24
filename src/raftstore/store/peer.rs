@@ -37,7 +37,7 @@ use raft::{
     NO_LIMIT,
 };
 use raftstore::coprocessor::CoprocessorHost;
-use raftstore::store::engine::{Peekable, Snapshot};
+use raftstore::store::engine::{Peekable, Snapshot, SyncSnapshot};
 use raftstore::store::worker::apply::ApplyMetrics;
 use raftstore::store::worker::{
     apply, Apply, ApplyTask, Proposal, ReadProgress, ReadTask, RegionProposal,
@@ -2014,6 +2014,8 @@ impl RequestInspector for Peer {
 pub struct ReadExecutor<'r, 'e, 't> {
     region: &'r metapb::Region,
     engine: &'e Arc<DB>,
+    snapshot: Option<SyncSnapshot>,
+
     tag: &'t str,
 }
 
@@ -2022,6 +2024,7 @@ impl<'r, 'e, 't> ReadExecutor<'r, 'e, 't> {
         ReadExecutor {
             region,
             engine,
+            snapshot: None,
             tag,
         }
     }
@@ -2057,19 +2060,21 @@ impl<'r, 'e, 't> ReadExecutor<'r, 'e, 't> {
         Ok(resp)
     }
 
-    pub fn execute(&self, msg: &RaftCmdRequest, check_epoch: bool) -> Result<ReadResponse> {
+    pub fn execute(&mut self, msg: &RaftCmdRequest, check_epoch: bool) -> Result<ReadResponse> {
         if check_epoch {
             check_region_epoch(msg, self.region, true)?;
         }
         let mut need_snapshot = false;
-        let snapshot = Snapshot::new(Arc::clone(self.engine));
+        if self.snapshot.is_none() {
+            self.snapshot = Some(SyncSnapshot::new(Arc::clone(self.engine)));
+        }
         let requests = msg.get_requests();
         let mut responses = Vec::with_capacity(requests.len());
 
         for req in requests {
             let cmd_type = req.get_cmd_type();
             let mut resp = match cmd_type {
-                CmdType::Get => self.do_get(req, &snapshot)?,
+                CmdType::Get => self.do_get(req, self.snapshot.as_ref().unwrap())?,
                 CmdType::Snap => {
                     need_snapshot = true;
                     raft_cmdpb::Response::new()
@@ -2089,7 +2094,7 @@ impl<'r, 'e, 't> ReadExecutor<'r, 'e, 't> {
         response.set_responses(protobuf::RepeatedField::from_vec(responses));
         let snapshot = if need_snapshot {
             Some(RegionSnapshot::from_snapshot(
-                snapshot.into_sync(),
+                self.snapshot.as_ref().unwrap().clone(),
                 self.region.to_owned(),
             ))
         } else {
