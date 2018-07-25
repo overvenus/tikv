@@ -283,13 +283,15 @@ fn tune_dboptions_for_bulk_load(opts: &DbConfig) -> (DBOptions, CFOptions) {
 mod tests {
     use super::*;
 
+    use std::fs::File;
+    use std::io::Write;
+
     use kvproto::kvrpcpb::IsolationLevel;
     use kvproto::metapb::{Peer, Region};
     use rocksdb::IngestExternalFileOptions;
-    use std::fs::File;
-    use std::io::Write;
     use tempdir::TempDir;
 
+    use raftstore::store::engine::Snapshot;
     use raftstore::store::RegionSnapshot;
     use storage::mvcc::MvccReader;
     use util::rocksdb::new_engine_opt;
@@ -385,7 +387,11 @@ mod tests {
         let mut region = Region::new();
         region.set_id(1);
         region.mut_peers().push(Peer::new());
-        let snap = RegionSnapshot::from_raw(Arc::clone(&db), region);
+
+        let snap = RegionSnapshot::from_snapshot(
+            Snapshot::new(Arc::clone(&db)).into_sync(),
+            Arc::new(region),
+        );
 
         let mut reader = MvccReader::new(snap, None, false, None, None, IsolationLevel::SI);
         // Make sure that all kvs are right.

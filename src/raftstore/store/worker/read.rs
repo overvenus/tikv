@@ -761,7 +761,7 @@ mod tests {
         // But the applied_index_term is stale.
         let register_region1 = Task::Register(ReadDelegate {
             tag: String::new(),
-            region: region1.clone(),
+            region: Arc::new(region1.clone()),
             peer: leader2.clone(),
             term: term6,
             applied_index_term: term6 - 1,

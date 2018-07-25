@@ -164,7 +164,7 @@ fn bench_async_snapshot(b: &mut test::Bencher) {
     region.mut_region_epoch().set_version(2);
     region.mut_region_epoch().set_conf_ver(5);
     let (_tmp, db) = new_engine();
-    let kv = RaftKv::new(SyncBenchRouter::new(region.clone(), db));
+    let kv = RaftKv::new(SyncBenchRouter::new(Arc::new(region.clone()), db));
 
     let mut ctx = Context::new();
     ctx.set_region_id(region.get_id());
@@ -189,7 +189,7 @@ fn bench_async_write(b: &mut test::Bencher) {
     region.mut_region_epoch().set_version(2);
     region.mut_region_epoch().set_conf_ver(5);
     let (_tmp, db) = new_engine();
-    let kv = RaftKv::new(SyncBenchRouter::new(region.clone(), db));
+    let kv = RaftKv::new(SyncBenchRouter::new(Arc::new(region.clone()), db));
 
     let mut ctx = Context::new();
     ctx.set_region_id(region.get_id());

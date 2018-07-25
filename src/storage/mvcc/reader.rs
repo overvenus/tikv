@@ -703,8 +703,10 @@ impl<S: Snapshot> MvccReader<S> {
 
 #[cfg(test)]
 mod tests {
+    use super::REVERSE_SEEK_BOUND;
     use kvproto::kvrpcpb::IsolationLevel;
     use kvproto::metapb::{Peer, Region};
+    use raftstore::store::engine::Snapshot;
     use raftstore::store::keys;
     use raftstore::store::RegionSnapshot;
     use rocksdb::{self, Writable, WriteBatch, DB};
@@ -716,8 +718,6 @@ mod tests {
     use tempdir::TempDir;
     use util::properties::{MvccProperties, MvccPropertiesCollectorFactory};
     use util::rocksdb::{self as rocksdb_util, CFOptions};
-
-    use super::REVERSE_SEEK_BOUND;
 
     struct RegionEngine {
         db: Arc<DB>,
@@ -751,7 +751,10 @@ mod tests {
         }
 
         fn prewrite(&mut self, m: Mutation, pk: &[u8], start_ts: u64) {
-            let snap = RegionSnapshot::from_raw(Arc::clone(&self.db), self.region.clone());
+            let snap = RegionSnapshot::from_snapshot(
+                Snapshot::new(Arc::clone(&self.db)).into_sync(),
+                Arc::new(self.region.clone()),
+            );
             let mut txn = MvccTxn::new(snap, start_ts, None, IsolationLevel::SI, true);
             txn.prewrite(m, pk, &Options::default()).unwrap();
             self.write(txn.into_modifies());
@@ -759,7 +762,10 @@ mod tests {
 
         fn commit(&mut self, pk: &[u8], start_ts: u64, commit_ts: u64) {
             let k = make_key(pk);
-            let snap = RegionSnapshot::from_raw(Arc::clone(&self.db), self.region.clone());
+            let snap = RegionSnapshot::from_snapshot(
+                Snapshot::new(Arc::clone(&self.db)).into_sync(),
+                Arc::new(self.region.clone()),
+            );
             let mut txn = MvccTxn::new(snap, start_ts, None, IsolationLevel::SI, true);
             txn.commit(&k, commit_ts).unwrap();
             self.write(txn.into_modifies());
@@ -767,7 +773,10 @@ mod tests {
 
         fn rollback(&mut self, pk: &[u8], start_ts: u64) {
             let k = make_key(pk);
-            let snap = RegionSnapshot::from_raw(Arc::clone(&self.db), self.region.clone());
+            let snap = RegionSnapshot::from_snapshot(
+                Snapshot::new(Arc::clone(&self.db)).into_sync(),
+                Arc::new(self.region.clone()),
+            );
             let mut txn = MvccTxn::new(snap, start_ts, None, IsolationLevel::SI, true);
             txn.collapse_rollback(false);
             txn.rollback(&k).unwrap();
@@ -777,7 +786,10 @@ mod tests {
         fn gc(&mut self, pk: &[u8], safe_point: u64) {
             let k = make_key(pk);
             loop {
-                let snap = RegionSnapshot::from_raw(Arc::clone(&self.db), self.region.clone());
+                let snap = RegionSnapshot::from_snapshot(
+                    Snapshot::new(Arc::clone(&self.db)).into_sync(),
+                    Arc::new(self.region.clone()),
+                );
                 let mut txn = MvccTxn::new(snap, safe_point, None, IsolationLevel::SI, true);
                 txn.gc(&k, safe_point).unwrap();
                 let modifies = txn.into_modifies();
@@ -864,7 +876,10 @@ mod tests {
         safe_point: u64,
         need_gc: bool,
     ) -> Option<MvccProperties> {
-        let snap = RegionSnapshot::from_raw(Arc::clone(&db), region.clone());
+        let snap = RegionSnapshot::from_snapshot(
+            Snapshot::new(Arc::clone(&db)).into_sync(),
+            Arc::new(region.clone()),
+        );
         let reader = MvccReader::new(snap, None, false, None, None, IsolationLevel::SI);
         assert_eq!(reader.need_gc(safe_point, 1.0), need_gc);
         reader.get_mvcc_properties(safe_point)
@@ -1000,7 +1015,10 @@ mod tests {
             engine.prewrite(m, pk, start_ts);
         }
 
-        let snap = RegionSnapshot::from_raw(Arc::clone(&db), region.clone());
+        let snap = RegionSnapshot::from_snapshot(
+            Snapshot::new(Arc::clone(&db)).into_sync(),
+            Arc::new(region),
+        );
         let mut reader = MvccReader::new(
             snap,
             Some(ScanMode::Backward),
@@ -1100,7 +1118,10 @@ mod tests {
             engine.commit(k, ts, ts);
         }
 
-        let snap = RegionSnapshot::from_raw(Arc::clone(&db), region.clone());
+        let snap = RegionSnapshot::from_snapshot(
+            Snapshot::new(Arc::clone(&db)).into_sync(),
+            Arc::new(region.clone()),
+        );
         let mut reader = MvccReader::new(
             snap,
             Some(ScanMode::Backward),
