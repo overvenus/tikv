@@ -43,7 +43,7 @@ use super::metrics::*;
 /// A read only delegate of `Peer`.
 #[derive(Debug)]
 pub struct ReadDelegate {
-    region: metapb::Region,
+    region: Arc<metapb::Region>,
     peer: metapb::Peer,
     term: u64,
     applied_index_term: u64,
@@ -54,7 +54,7 @@ pub struct ReadDelegate {
 
 impl ReadDelegate {
     fn from_peer(peer: &Peer) -> ReadDelegate {
-        let region = peer.region().clone();
+        let region = Arc::new(peer.region().clone());
         let region_id = region.get_id();
         let peer_id = peer.peer.get_id();
         ReadDelegate {
@@ -69,7 +69,7 @@ impl ReadDelegate {
 
     fn update(&mut self, progress: Progress) {
         if let Some(region) = progress.region {
-            self.region = region;
+            self.region = Arc::new(region);
         }
         if let Some(term) = progress.term {
             if self.term <= term {
