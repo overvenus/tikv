@@ -1722,7 +1722,8 @@ impl Peer {
     }
 
     fn handle_read(&mut self, req: RaftCmdRequest) -> ReadResponse {
-        let mut resp = ReadExecutor::new(self.region(), &self.engines.kv, &self.tag)
+        let region = Arc::new(self.region().to_owned());
+        let mut resp = ReadExecutor::new(&region, &self.engines.kv, &self.tag)
             .execute(&req)
             .unwrap_or_else(|e| {
                 match e {
@@ -1967,13 +1968,13 @@ impl RequestInspector for Peer {
 
 #[derive(Debug)]
 struct ReadExecutor<'r, 'e, 't> {
-    region: &'r metapb::Region,
+    region: &'r Arc<metapb::Region>,
     engine: &'e Arc<DB>,
     tag: &'t str,
 }
 
 impl<'r, 'e, 't> ReadExecutor<'r, 'e, 't> {
-    fn new(region: &'r metapb::Region, engine: &'e Arc<DB>, tag: &'t str) -> Self {
+    fn new(region: &'r Arc<metapb::Region>, engine: &'e Arc<DB>, tag: &'t str) -> Self {
         ReadExecutor {
             region,
             engine,
@@ -2043,7 +2044,7 @@ impl<'r, 'e, 't> ReadExecutor<'r, 'e, 't> {
         let snapshot = if need_snapshot {
             Some(RegionSnapshot::from_snapshot(
                 snapshot.into_sync(),
-                self.region.to_owned(),
+                self.region.clone(),
             ))
         } else {
             None

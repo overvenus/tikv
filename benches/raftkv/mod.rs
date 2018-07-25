@@ -34,11 +34,11 @@ use tikv::util::rocksdb;
 #[derive(Clone)]
 struct SyncBenchRouter {
     db: Arc<DB>,
-    region: Region,
+    region: Arc<Region>,
 }
 
 impl SyncBenchRouter {
-    fn new(region: Region, db: Arc<DB>) -> SyncBenchRouter {
+    fn new(region: Arc<Region>, db: Arc<DB>) -> SyncBenchRouter {
         SyncBenchRouter { db, region }
     }
 }
@@ -53,7 +53,7 @@ impl SyncBenchRouter {
             } => match callback {
                 Callback::Read(cb) => {
                     let snapshot = engine::Snapshot::new(Arc::clone(&self.db));
-                    let region = self.region.to_owned();
+                    let region = self.region.clone();
                     cb(ReadResponse {
                         response,
                         snapshot: Some(RegionSnapshot::from_snapshot(snapshot.into_sync(), region)),
@@ -70,7 +70,7 @@ impl SyncBenchRouter {
             },
             Msg::BatchRaftSnapCmds { on_finished, .. } => {
                 let snapshot = engine::Snapshot::new(Arc::clone(&self.db));
-                let region = self.region.to_owned();
+                let region = self.region.clone();
                 match on_finished {
                     Callback::BatchRead(on_finished) => on_finished(vec![Some(ReadResponse {
                         response,
@@ -118,7 +118,7 @@ fn bench_async_batch_snapshots(b: &mut test::Bencher) {
     region.mut_region_epoch().set_version(2);
     region.mut_region_epoch().set_conf_ver(5);
     let (_tmp, db) = new_engine();
-    let kv = RaftKv::new(SyncBenchRouter::new(region.clone(), db));
+    let kv = RaftKv::new(SyncBenchRouter::new(Arc::new(region.clone()), db));
 
     b.iter(|| {
         let mut ctx = Context::new();
