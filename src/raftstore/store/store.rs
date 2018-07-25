@@ -148,7 +148,9 @@ pub struct Store<T, C: 'static> {
     consistency_check_worker: Worker<ConsistencyCheckTask>,
     cleanup_sst_worker: Worker<CleanupSSTTask>,
     pub apply_worker: Worker<ApplyTask>,
-    local_reader: Worker<ReadTask>,
+    local_reader_sendch: mio::Sender<ReadTask>,
+    local_reader_handle: Option<thread::JoinHandle<()>>,
+
     apply_res_receiver: Option<StdReceiver<ApplyTaskRes>>,
 
     last_compact_checked_key: Key,
@@ -200,7 +202,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         pd_client: Arc<C>,
         mgr: SnapManager,
         pd_worker: FutureWorker<PdTask>,
-        local_reader: Worker<ReadTask>,
+        local_reader_sendch: mio::Sender<ReadTask>,
         mut coprocessor_host: CoprocessorHost,
         importer: Arc<SSTImporter>,
     ) -> Result<Store<T, C>> {
@@ -233,7 +235,8 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             cleanup_sst_worker: Worker::new("cleanup sst worker"),
             apply_worker: Worker::new("apply worker"),
             apply_res_receiver: None,
-            local_reader,
+            local_reader_sendch,
+            local_reader_handle: None,
             last_compact_checked_key: keys::DATA_MIN_KEY.to_vec(),
             region_ranges: BTreeMap::new(),
             pending_snapshot_regions: vec![],
@@ -431,8 +434,8 @@ impl<T, C> Store<T, C> {
         self.apply_worker.scheduler()
     }
 
-    pub fn read_scheduler(&self) -> Scheduler<ReadTask> {
-        self.local_reader.scheduler()
+    pub fn read_scheduler(&self) -> mio::Sender<ReadTask> {
+        self.local_reader_sendch.clone()
     }
 
     pub fn engines(&self) -> Engines {
@@ -515,7 +518,11 @@ impl<T, C> Store<T, C> {
 }
 
 impl<T: Transport, C: PdClient> Store<T, C> {
-    pub fn run(&mut self, event_loop: &mut EventLoop<Self>) -> Result<()> {
+    pub fn run(
+        &mut self,
+        event_loop: &mut EventLoop<Self>,
+        read_event_loop: EventLoop<LocalReader<mio::Sender<Msg>>>,
+    ) -> Result<()> {
         self.snap_mgr.init()?;
 
         self.register_raft_base_tick(event_loop);
@@ -583,8 +590,13 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         self.apply_res_receiver = Some(rx);
         box_try!(self.apply_worker.start(apply_runner));
 
-        let local_reader = LocalReader::new(self);
-        box_try!(local_reader.start(&mut self.local_reader));
+        let mut local_reader = LocalReader::new(self);
+        let handle = thread::Builder::new()
+            .name("localreader".to_owned())
+            .spawn(move || {
+                local_reader.start(read_event_loop);
+            })?;
+        self.local_reader_handle = Some(handle);
 
         if let Err(e) = util_sys::pri::set_priority(util_sys::HIGH_PRI) {
             warn!("set priority for raftstore failed, error: {:?}", e);
@@ -612,7 +624,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         handles.push(self.consistency_check_worker.stop());
         handles.push(self.cleanup_sst_worker.stop());
         handles.push(self.apply_worker.stop());
-        handles.push(self.local_reader.stop());
+        // handles.push(self.local_reader_handle);
 
         for h in handles {
             if let Some(h) = h {
@@ -1370,8 +1382,8 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             self.apply_worker
                 .schedule(ApplyTask::destroy(job.region_id))
                 .unwrap();
-            self.local_reader
-                .schedule(ReadTask::destroy(job.region_id))
+            self.local_reader_sendch
+                .send(ReadTask::destroy(job.region_id))
                 .unwrap();
         }
         if job.async_remove {

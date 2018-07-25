@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use kvproto::errorpb;
 use kvproto::metapb;
 use kvproto::raft_cmdpb::{CmdType, RaftCmdRequest, RaftCmdResponse};
-use mio;
+use mio::{self, EventLoop, EventLoopConfig, Sender as MioSender};
 use prometheus::local::LocalHistogram;
 use rocksdb::DB;
 
@@ -28,6 +28,7 @@ use raftstore::errors::RAFTSTORE_IS_BUSY;
 use raftstore::store::msg::Callback;
 use raftstore::store::store::Store;
 use raftstore::store::util::{self, LeaseState, RemoteLease};
+use raftstore::store::Config;
 use raftstore::store::{
     cmd_resp, Msg as StoreMsg, Peer, ReadExecutor, ReadResponse, RequestInspector, RequestPolicy,
 };
@@ -255,6 +256,16 @@ pub struct LocalReader<C: Sender<StoreMsg>> {
     tag: String,
 }
 
+pub fn create_read_event_loop(
+    cfg: &Config,
+) -> Result<EventLoop<LocalReader<mio::Sender<StoreMsg>>>> {
+    let mut config = EventLoopConfig::new();
+    config.notify_capacity(cfg.local_read_batch_size as usize * 10);
+    config.messages_per_tick(cfg.local_read_batch_size as _);
+    let event_loop = EventLoop::configured(config)?;
+    Ok(event_loop)
+}
+
 impl LocalReader<mio::Sender<StoreMsg>> {
     pub fn new<T, P>(store: &Store<T, P>) -> Self {
         let mut delegates =
@@ -278,12 +289,15 @@ impl LocalReader<mio::Sender<StoreMsg>> {
         }
     }
 
-    pub fn start(self, worker: &mut Worker<Task>) -> StdResult<(), io::Error> {
-        let mut timer = Timer::new(1);
-        timer.add_task(Duration::from_millis(METRICS_FLUSH_INTERVAL), ());
-        worker.start_with_timer(self, timer)
+    pub fn start(&mut self, mut event_loop: EventLoop<Self>) {
+        if let Err(e) = event_loop.timeout_ms((), METRICS_FLUSH_INTERVAL) {
+            panic!("failed to register timeout");
+        }
+        event_loop.run(self);
     }
 }
+
+use std::thread;
 
 impl<C: Sender<StoreMsg>> LocalReader<C> {
     fn redirect(&mut self, cmd: StoreMsg) {
@@ -477,55 +491,48 @@ impl<'r, 'm> RequestInspector for Inspector<'r, 'm> {
     }
 }
 
-impl<C: Sender<StoreMsg>> Runnable<Task> for LocalReader<C> {
-    fn run(&mut self, _: Task) {
-        unreachable!()
-    }
+impl<C: Sender<StoreMsg>> mio::Handler for LocalReader<C> {
+    type Timeout = ();
+    type Message = Task;
 
-    fn run_batch(&mut self, tasks: &mut Vec<Task>) {
-        self.metrics.batch_requests_size.observe(tasks.len() as _);
-        for task in tasks.drain(..) {
-            match task {
-                Task::Register(delegate) => {
+    fn notify(&mut self, event_loop: &mut EventLoop<Self>, task: Task) {
+        // self.metrics.batch_requests_size.observe(tasks.len() as _);
+        match task {
+            Task::Register(delegate) => {
+                debug!(
+                    "{} register ReadDelegate for {:?}",
+                    delegate.tag, delegate.peer
+                );
+                self.delegates.insert(delegate.region.get_id(), delegate);
+            }
+            Task::Read(StoreMsg::RaftCmd {
+                send_time,
+                request,
+                callback,
+            }) => self.propose_raft_command(request, callback, send_time),
+            Task::Read(StoreMsg::BatchRaftSnapCmds {
+                batch, on_finished, ..
+            }) => self.propose_batch_raft_snapshot_command(batch, on_finished),
+            Task::Read(other) => {
+                unimplemented!("unsupported Msg {:?}", other);
+            }
+            Task::Update((region_id, progress)) => {
+                if let Some(delegate) = self.delegates.get_mut(&region_id) {
+                    delegate.update(progress);
+                } else {
                     debug!(
-                        "{} register ReadDelegate for {:?}",
-                        delegate.tag, delegate.peer
+                        "unregistered ReadDelegate, region_id: {}, {:?}",
+                        region_id, progress
                     );
-                    self.delegates.insert(delegate.region.get_id(), delegate);
                 }
-                Task::Read(StoreMsg::RaftCmd {
-                    send_time,
-                    request,
-                    callback,
-                }) => self.propose_raft_command(request, callback, send_time),
-                Task::Read(StoreMsg::BatchRaftSnapCmds {
-                    batch, on_finished, ..
-                }) => self.propose_batch_raft_snapshot_command(batch, on_finished),
-                Task::Read(other) => {
-                    unimplemented!("unsupported Msg {:?}", other);
-                }
-                Task::Update((region_id, progress)) => {
-                    if let Some(delegate) = self.delegates.get_mut(&region_id) {
-                        delegate.update(progress);
-                    } else {
-                        debug!(
-                            "unregistered ReadDelegate, region_id: {}, {:?}",
-                            region_id, progress
-                        );
-                    }
-                }
-                Task::Destroy(region_id) => {
-                    self.delegates.remove(&region_id);
-                }
+            }
+            Task::Destroy(region_id) => {
+                self.delegates.remove(&region_id);
             }
         }
     }
-}
 
-const METRICS_FLUSH_INTERVAL: u64 = 15; // 15s
-
-impl<C: Sender<StoreMsg>> RunnableWithTimer<Task, ()> for LocalReader<C> {
-    fn on_timeout(&mut self, timer: &mut Timer<()>, _: ()) {
+    fn timeout(&mut self, event_loop: &mut EventLoop<Self>, _: ()) {
         self.metrics.flush();
         let count = self.delegates.values().fold(0i64, |mut acc, delegate| {
             if let Some(ref lease) = delegate.leader_lease {
@@ -536,9 +543,13 @@ impl<C: Sender<StoreMsg>> RunnableWithTimer<Task, ()> for LocalReader<C> {
             acc
         });
         LOCAL_READ_LEADER.set(count);
-        timer.add_task(Duration::from_secs(METRICS_FLUSH_INTERVAL), ());
+        if let Err(e) = event_loop.timeout_ms((), METRICS_FLUSH_INTERVAL) {
+            panic!("failed to register timeout");
+        }
     }
 }
+
+const METRICS_FLUSH_INTERVAL: u64 = 15000; // 15s
 
 struct ReadMetrics {
     requests_wait_duration: LocalHistogram,

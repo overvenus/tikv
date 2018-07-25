@@ -120,14 +120,13 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     let (significant_msg_sender, significant_msg_receiver) = mpsc::channel();
 
     // Create Local Reader.
-    let local_reader = Builder::new("local-reader")
-        .batch_size(cfg.raft_store.local_read_batch_size as usize)
-        .create();
-    let local_ch = local_reader.scheduler();
+    let read_event_loop = store::create_read_event_loop(&cfg.raft_store)
+        .unwrap_or_else(|e| fatal!("failed to create read event loop: {:?}", e));
+    let local_sendch = read_event_loop.channel();
 
     // Create router.
     let raft_router =
-        ServerRaftStoreRouter::new(store_sendch.clone(), significant_msg_sender, local_ch);
+        ServerRaftStoreRouter::new(store_sendch.clone(), significant_msg_sender, local_sendch);
     let compaction_listener = new_compaction_listener(store_sendch.clone());
 
     // Create pd client and pd worker
@@ -215,7 +214,7 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
         snap_mgr,
         significant_msg_receiver,
         pd_worker,
-        local_reader,
+        read_event_loop,
         coprocessor_host,
         importer,
     ).unwrap_or_else(|e| fatal!("failed to start node: {:?}", e));

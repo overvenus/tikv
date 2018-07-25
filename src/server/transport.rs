@@ -84,18 +84,20 @@ pub trait RaftStoreRouter: Send + Clone {
     }
 }
 
+use mio;
+
 #[derive(Clone)]
 pub struct ServerRaftStoreRouter {
     pub ch: SendCh<StoreMsg>,
     pub significant_msg_sender: Sender<SignificantMsg>,
-    local_reader_ch: Scheduler<ReadTask>,
+    local_reader_ch: mio::Sender<ReadTask>,
 }
 
 impl ServerRaftStoreRouter {
     pub fn new(
         raftstore_ch: SendCh<StoreMsg>,
         significant_msg_sender: Sender<SignificantMsg>,
-        local_reader_ch: Scheduler<ReadTask>,
+        local_reader_ch: mio::Sender<ReadTask>,
     ) -> ServerRaftStoreRouter {
         ServerRaftStoreRouter {
             ch: raftstore_ch,
@@ -109,7 +111,7 @@ impl RaftStoreRouter for ServerRaftStoreRouter {
     fn try_send(&self, msg: StoreMsg) -> RaftStoreResult<()> {
         if ReadTask::acceptable(&msg) {
             self.local_reader_ch
-                .schedule(ReadTask::Read(msg))
+                .send(ReadTask::Read(msg))
                 .map_err(|e| box_err!(e))
         } else {
             self.ch.try_send(msg).map_err(RaftStoreError::Transport)
@@ -119,7 +121,7 @@ impl RaftStoreRouter for ServerRaftStoreRouter {
     fn send(&self, msg: StoreMsg) -> RaftStoreResult<()> {
         if ReadTask::acceptable(&msg) {
             self.local_reader_ch
-                .schedule(ReadTask::Read(msg))
+                .send(ReadTask::Read(msg))
                 .map_err(|e| box_err!(e))
         } else {
             self.ch.send(msg).map_err(RaftStoreError::Transport)

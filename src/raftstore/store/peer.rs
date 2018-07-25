@@ -25,6 +25,7 @@ use kvproto::raft_cmdpb::{
     TransferLeaderRequest, TransferLeaderResponse,
 };
 use kvproto::raft_serverpb::{MergeState, PeerState, RaftApplyState, RaftMessage};
+use mio;
 use protobuf::{self, Message};
 use raft::eraftpb::{self, ConfChangeType, EntryType, MessageType};
 use rocksdb::rocksdb_options::WriteOptions;
@@ -260,7 +261,7 @@ pub struct Peer {
     pub raft_entry_max_size: u64,
 
     apply_scheduler: Scheduler<ApplyTask>,
-    read_scheduler: Scheduler<ReadTask>,
+    read_scheduler: mio::Sender<ReadTask>,
 
     pub pending_remove: bool,
 
@@ -422,7 +423,7 @@ impl Peer {
             .schedule(ApplyTask::register(self))
             .unwrap();
         self.read_scheduler
-            .schedule(ReadTask::register(self))
+            .send(ReadTask::register(self))
             .unwrap();
     }
 
@@ -1195,7 +1196,7 @@ impl Peer {
             progress.set_term(self.term());
             let update = ReadTask::update(self.region_id, progress);
             debug!("{} update {}", self.tag, update);
-            self.read_scheduler.schedule(update).unwrap();
+            self.read_scheduler.send(update).unwrap();
         }
     }
 

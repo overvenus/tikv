@@ -55,7 +55,7 @@ pub use self::snap::{
 pub use self::store::{create_event_loop, new_compaction_listener, Store, StoreChannel, StoreStat};
 pub use self::transport::Transport;
 pub use self::util::Engines;
-pub use self::worker::ReadTask;
+pub use self::worker::{create_read_event_loop, LocalReader, ReadTask};
 
 // Only used in tests
 #[cfg(test)]

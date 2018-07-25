@@ -17,7 +17,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
-use mio::EventLoop;
+use mio::{self, EventLoop};
 
 use super::transport::RaftStoreRouter;
 use super::Result;
@@ -28,8 +28,8 @@ use pd::{Error as PdError, PdClient, PdTask, INVALID_ID};
 use protobuf::RepeatedField;
 use raftstore::coprocessor::dispatcher::CoprocessorHost;
 use raftstore::store::{
-    self, keys, Config as StoreConfig, Engines, Msg, Peekable, ReadTask, SignificantMsg,
-    SnapManager, Store, StoreChannel, Transport,
+    self, keys, Config as StoreConfig, Engines, LocalReader, Msg, Peekable, ReadTask,
+    SignificantMsg, SnapManager, Store, StoreChannel, Transport,
 };
 use server::readpool::ReadPool;
 use server::Config as ServerConfig;
@@ -136,7 +136,7 @@ where
         snap_mgr: SnapManager,
         significant_msg_receiver: Receiver<SignificantMsg>,
         pd_worker: FutureWorker<PdTask>,
-        local_read_worker: Worker<ReadTask>,
+        read_event_loop: EventLoop<LocalReader<mio::Sender<Msg>>>,
         coprocessor_host: CoprocessorHost,
         importer: Arc<SSTImporter>,
     ) -> Result<()>
@@ -177,7 +177,7 @@ where
             snap_mgr,
             significant_msg_receiver,
             pd_worker,
-            local_read_worker,
+            read_event_loop,
             coprocessor_host,
             importer,
         )?;
@@ -328,7 +328,7 @@ where
         snap_mgr: SnapManager,
         significant_msg_receiver: Receiver<SignificantMsg>,
         pd_worker: FutureWorker<PdTask>,
-        local_read_worker: Worker<ReadTask>,
+        read_event_loop: EventLoop<LocalReader<mio::Sender<Msg>>>,
         coprocessor_host: CoprocessorHost,
         importer: Arc<SSTImporter>,
     ) -> Result<()>
@@ -345,6 +345,7 @@ where
         let pd_client = Arc::clone(&self.pd_client);
         let store = self.store.clone();
         let sender = event_loop.channel();
+        let local_reader_sender = read_event_loop.channel();
 
         let (tx, rx) = mpsc::channel();
         let builder = thread::Builder::new().name(thd_name!(format!("raftstore-{}", store_id)));
@@ -362,7 +363,7 @@ where
                 pd_client,
                 snap_mgr,
                 pd_worker,
-                local_read_worker,
+                local_reader_sender,
                 coprocessor_host,
                 importer,
             ) {
@@ -370,7 +371,7 @@ where
                 Ok(s) => s,
             };
             tx.send(0).unwrap();
-            if let Err(e) = store.run(&mut event_loop) {
+            if let Err(e) = store.run(&mut event_loop, read_event_loop) {
                 error!("store {} run err {:?}", store_id, e);
             };
         })?;
