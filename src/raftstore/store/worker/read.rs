@@ -576,8 +576,8 @@ impl Default for ReadMetrics {
 
 impl ReadMetrics {
     fn flush(&mut self) {
-        // self.requests_wait_duration.flush();
-        // self.batch_requests_size.flush();
+        self.requests_wait_duration.flush();
+        self.batch_requests_size.flush();
         if self.rejected_by_store_id_mismatch > 0 {
             LOCAL_READ_REJECT
                 .with_label_values(&["store_id_mismatch"])
