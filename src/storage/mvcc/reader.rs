@@ -1260,7 +1260,10 @@ mod tests {
         engine.prewrite(m, k, 35);
         engine.commit(k, 35, 40);
 
-        let snap = RegionSnapshot::from_raw(Arc::clone(&db), region.clone());
+        let snap = RegionSnapshot::from_snapshot(
+            Snapshot::new(db.clone()).into_sync(),
+            Arc::new(region),
+        );
         let mut reader = MvccReader::new(snap, None, false, None, None, IsolationLevel::SI);
 
         // Let's assume `40_35 PUT` means a commit version with start ts is 35 and commit ts

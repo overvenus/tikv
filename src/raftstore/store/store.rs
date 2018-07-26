@@ -1979,7 +1979,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                 None => return Err(box_err!("target region doesn't exist.")),
                 Some(p) => p,
             };
-            if peer.region() != target_region {
+            if peer.region().as_ref() != target_region {
                 return Err(box_err!("target region not matched, skip proposing."));
             }
             if !util::is_sibling_regions(target_region, region) {
@@ -2002,7 +2002,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                 peer.tag,
                 source_peer.tag
             );
-            assert_eq!(source_region, source_peer.region());
+            assert_eq!(source_region, source_peer.region().as_ref());
             assert!(
                 util::is_sibling_regions(source_region, region),
                 "{:?} {:?} should be sibling",
@@ -2063,7 +2063,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                 let sibling_region_id = self.find_sibling_region(peer.region());
                 if let Some(sibling_region_id) = sibling_region_id {
                     let sibling_region = self.region_peers[&sibling_region_id].region();
-                    new_regions.push(sibling_region.to_owned());
+                    new_regions.push(sibling_region.as_ref().to_owned());
                 }
                 Err(Error::StaleEpoch(msg, new_regions))
             }
@@ -2332,7 +2332,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             {
                 continue;
             }
-            let task = SplitCheckTask::new(peer.region().clone(), true, CheckPolicy::SCAN);
+            let task = SplitCheckTask::new(peer.region().as_ref().clone(), true, CheckPolicy::SCAN);
             if let Err(e) = self.split_check_worker.schedule(task) {
                 error!("{} failed to schedule split check: {}", self.tag, e);
             }
@@ -2420,7 +2420,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         let peer = &self.region_peers[&region_id];
         let region = peer.region();
         let task = PdTask::AskSplit {
-            region: region.clone(),
+            region: region.as_ref().clone(),
             split_key,
             peer: peer.peer.clone(),
             right_derive: self.cfg.right_derive_when_split,
@@ -2491,7 +2491,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                     "{} epoch changed {:?} != {:?}, retry later",
                     peer.tag, latest_epoch, epoch
                 ),
-                vec![region.to_owned()],
+                vec![region.as_ref().to_owned()],
             ));
         }
         Ok(())
@@ -2555,7 +2555,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             return;
         }
 
-        let task = SplitCheckTask::new(region.clone(), false, policy);
+        let task = SplitCheckTask::new(region.as_ref().clone(), false, policy);
         if let Err(e) = self.split_check_worker.schedule(task) {
             error!("{} failed to schedule split check: {}", self.tag, e);
         }
@@ -2817,7 +2817,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                     );
                     let task = PdTask::ValidatePeer {
                         peer: peer.peer.clone(),
-                        region: peer.region().clone(),
+                        region: peer.region().as_ref().clone(),
                         merge_source: None,
                     };
                     if let Err(e) = self.pd_worker.schedule(task) {
@@ -2858,8 +2858,8 @@ fn report_split_pd(
     // Now pd only uses ReportSplit for history operation show,
     // so we send it independently here.
     let task = PdTask::ReportSplit {
-        left: left.region().clone(),
-        right: right.region().clone(),
+        left: left.region().as_ref().clone(),
+        right: right.region().as_ref().clone(),
     };
 
     pd_worker.schedule(task)
@@ -3364,7 +3364,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             return Err(Error::RegionNotInitialized(region_id));
         }
         let mut resp = StatusResponse::new();
-        resp.mut_region_detail().set_region(peer.region().clone());
+        resp.mut_region_detail().set_region(peer.region().as_ref().clone());
         if let Some(leader) = peer.get_peer_from_cache(peer.leader_id()) {
             resp.mut_region_detail().set_leader(leader);
         }

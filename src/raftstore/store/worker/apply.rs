@@ -1918,7 +1918,7 @@ impl Registration {
             term: peer.term(),
             apply_state: peer.get_store().apply_state.clone(),
             applied_index_term: peer.get_store().applied_index_term,
-            region: peer.region().clone(),
+            region: peer.region().as_ref().clone(),
         }
     }
 }

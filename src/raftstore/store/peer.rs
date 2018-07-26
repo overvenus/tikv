@@ -460,7 +460,6 @@ impl Peer {
         fail_point!("raft_store_skip_destroy_peer", |_| Ok(()));
         let t = Instant::now();
 
-        let region = self.region().clone();
         info!("{} begin to destroy", self.tag);
 
         // Set Tombstone state explicitly
@@ -470,7 +469,7 @@ impl Peer {
         write_peer_state(
             &self.engines.kv,
             &kv_wb,
-            &region,
+            self.region(),
             PeerState::Tombstone,
             self.pending_merge_state.clone(),
         )?;
@@ -490,12 +489,12 @@ impl Peer {
 
         for mut read in self.pending_reads.reads.drain(..) {
             for (_, cb) in read.cmds.drain(..) {
-                apply::notify_req_region_removed(region.get_id(), cb);
+                apply::notify_req_region_removed(self.region_id, cb);
             }
         }
 
         for proposal in self.apply_proposals.drain(..) {
-            apply::notify_req_region_removed(region.get_id(), proposal.cb);
+            apply::notify_req_region_removed(self.region_id, proposal.cb);
         }
 
         info!("{} destroy itself, takes {:?}", self.tag, t.elapsed());
@@ -512,7 +511,7 @@ impl Peer {
     }
 
     #[inline]
-    pub fn region(&self) -> &metapb::Region {
+    pub fn region(&self) -> &Arc<metapb::Region> {
         self.get_store().region()
     }
 
@@ -1722,8 +1721,7 @@ impl Peer {
     }
 
     fn handle_read(&mut self, req: RaftCmdRequest) -> ReadResponse {
-        let region = Arc::new(self.region().to_owned());
-        let mut resp = ReadExecutor::new(&region, &self.engines.kv, &self.tag)
+        let mut resp = ReadExecutor::new(&self.region(), &self.engines.kv, &self.tag)
             .execute(&req)
             .unwrap_or_else(|e| {
                 match e {
@@ -1779,7 +1777,7 @@ impl Peer {
 
     pub fn heartbeat_pd(&mut self, worker: &FutureWorker<PdTask>) {
         let task = PdTask::Heartbeat {
-            region: self.region().clone(),
+            region: self.region().as_ref().clone(),
             peer: self.peer.clone(),
             down_peers: self.collect_down_peers(self.cfg.max_peer_down_duration.0),
             pending_peers: self.collect_pending_peers(),

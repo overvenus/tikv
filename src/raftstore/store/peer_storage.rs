@@ -255,7 +255,7 @@ impl CacheQueryStats {
 pub struct PeerStorage {
     pub engines: Engines,
 
-    region: metapb::Region,
+    region: Arc<metapb::Region>,
     pub raft_state: RaftLocalState,
     pub apply_state: RaftApplyState,
     pub applied_index_term: u64,
@@ -286,8 +286,8 @@ impl From<Error> for RaftError {
 
 pub struct ApplySnapResult {
     // prev_region is the region before snapshot applied.
-    pub prev_region: metapb::Region,
-    pub region: metapb::Region,
+    pub prev_region: Arc<metapb::Region>,
+    pub region: Arc<metapb::Region>,
 }
 
 pub struct InvokeContext {
@@ -475,10 +475,11 @@ impl PeerStorage {
             );
         }
         let last_term = init_last_term(&engines.raft, region, &raft_state, &apply_state)?;
+        let region = Arc::new(region.clone());
 
         Ok(PeerStorage {
             engines,
-            region: region.clone(),
+            region,
             raft_state,
             apply_state,
             snap_state: RefCell::new(SnapState::Relax),
@@ -625,12 +626,12 @@ impl PeerStorage {
         self.apply_state.get_truncated_state().get_term()
     }
 
-    pub fn region(&self) -> &metapb::Region {
+    pub fn region(&self) -> &Arc<metapb::Region> {
         &self.region
     }
 
     pub fn set_region(&mut self, region: metapb::Region) {
-        self.region = region;
+        self.region = Arc::new(region);
     }
 
     pub fn raw_snapshot(&self) -> DbSnapshot {
@@ -1110,7 +1111,7 @@ impl PeerStorage {
 
         self.schedule_applying_snapshot();
         let prev_region = self.region().clone();
-        self.region = snap_region;
+        self.region = Arc::new(snap_region);
 
         Some(ApplySnapResult {
             prev_region,
