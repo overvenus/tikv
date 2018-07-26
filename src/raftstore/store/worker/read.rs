@@ -360,9 +360,9 @@ impl<C: Sender<StoreMsg>> LocalReader<C> {
         callback: Callback,
         send_time: Instant,
     ) {
-        // self.metrics
-        //     .requests_wait_duration
-        //     .observe(duration_to_sec(send_time.elapsed()));
+        self.metrics
+            .requests_wait_duration
+            .observe(duration_to_sec(send_time.elapsed()));
         let region_id = req.get_header().get_region_id();
         match self.pre_propose_raft_command(&req) {
             Ok(true) => (),
@@ -483,7 +483,7 @@ impl<C: Sender<StoreMsg>> Runnable<Task> for LocalReader<C> {
     }
 
     fn run_batch(&mut self, tasks: &mut Vec<Task>) {
-        // self.metrics.batch_requests_size.observe(tasks.len() as _);
+        self.metrics.batch_requests_size.observe(tasks.len() as _);
         for task in tasks.drain(..) {
             match task {
                 Task::Register(delegate) => {
