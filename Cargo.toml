@@ -87,12 +87,12 @@ git = "https://github.com/pingcap/rust-rocksdb.git"
 
 [dependencies.kvproto]
 git = "https://github.com/pingcap/kvproto.git"
-branch = "upgrade-1.10-1"
+branch = "call-kick"
 
 [dependencies.grpcio]
 git = "https://github.com/pingcap/grpc-rs.git"
 features = [ "secure" ]
-branch = "upgrade-1.10-1"
+branch = "call-kick"
 
 [dependencies.tipb]
 git = "https://github.com/pingcap/tipb.git"
