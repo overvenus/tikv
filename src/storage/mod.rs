@@ -47,7 +47,7 @@ pub use self::engine::{
     Modify, RocksEngine, ScanMode, Snapshot, Statistics, StatisticsSummary, TEMP_DIR,
 };
 pub use self::readpool_context::Context as ReadPoolContext;
-pub use self::txn::{Msg, Scheduler, SnapshotStore, StoreScanner};
+pub use self::txn::{Msg, RawCmd, Scheduler, SnapshotStore, StoreScanner};
 pub use self::types::{Key, KvPair, MvccInfo, Value};
 pub type Callback<T> = Box<FnBox(Result<T>) + Send>;
 
@@ -478,7 +478,10 @@ impl<E: Engine> Storage<E> {
 
     fn schedule(&self, cmd: Command, cb: StorageCb) -> Result<()> {
         fail_point!("storage_drop_message", |_| Ok(()));
-        box_try!(self.worker_scheduler.schedule(Msg::RawCmd { cmd, cb }));
+        box_try!(
+            self.worker_scheduler
+                .schedule(Msg::RawCmd(Some(RawCmd { cmd, cb })))
+        );
         Ok(())
     }
 

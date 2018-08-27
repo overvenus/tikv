@@ -41,10 +41,7 @@ use kvproto::kvrpcpb::{CommandPri, Context, LockInfo};
 use prometheus::local::LocalHistogramVec;
 use prometheus::HistogramTimer;
 
-use storage::engine::{
-     Callback as EngineCallback, CbContext,  Modify,
-    Result as EngineResult,
-};
+use storage::engine::{Callback as EngineCallback, CbContext, Modify, Result as EngineResult};
 use storage::mvcc::{
     Error as MvccError, Lock as MvccLock, MvccReader, MvccTxn, Write, MAX_TXN_WRITE_SIZE,
 };
@@ -82,13 +79,15 @@ pub enum ProcessResult {
     Failed { err: StorageError },
 }
 
+pub struct RawCmd {
+    pub cmd: Command,
+    pub cb: StorageCb,
+}
+
 /// Message types for the scheduler event loop.
 pub enum Msg<E: Engine> {
     Quit,
-    RawCmd {
-        cmd: Command,
-        cb: StorageCb,
-    },
+    RawCmd(Option<RawCmd>),
     SnapshotFinished {
         cid: u64,
         cb_ctx: CbContext,
@@ -122,10 +121,9 @@ impl<E: Engine> Debug for Msg<E> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match *self {
             Msg::Quit => write!(f, "Quit"),
-            Msg::RawCmd { ref cmd, .. } => write!(f, "RawCmd {:?}", cmd),
-            Msg::SnapshotFinished { ref cid, .. } => {
-                write!(f, "SnapshotFinished [cid={}]", cid)
-            }
+            Msg::RawCmd(Some(RawCmd { ref cmd, .. })) => write!(f, "RawCmd {:?}", cmd),
+            Msg::RawCmd(None) => write!(f, "RawCmd None"),
+            Msg::SnapshotFinished { ref cid, .. } => write!(f, "SnapshotFinished [cid={}]", cid),
             Msg::ReadFinished { cid, .. } => write!(f, "ReadFinished [cid={}]", cid),
             Msg::WritePrepareFinished { cid, ref cmd, .. } => {
                 write!(f, "WritePrepareFinished [cid={}, cmd={:?}]", cid, cmd)
@@ -143,10 +141,9 @@ impl<E: Engine> Display for Msg<E> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match *self {
             Msg::Quit => write!(f, "Quit"),
-            Msg::RawCmd { ref cmd, .. } => write!(f, "RawCmd {:?}", cmd),
-            Msg::SnapshotFinished { cid, .. } => {
-                write!(f, "SnapshotFinished [cid={}]", cid)
-            }
+            Msg::RawCmd(Some(RawCmd { ref cmd, .. })) => write!(f, "RawCmd {:?}", cmd),
+            Msg::RawCmd(None) => write!(f, "RawCmd None"),
+            Msg::SnapshotFinished { cid, .. } => write!(f, "SnapshotFinished [cid={}]", cid),
             Msg::ReadFinished { cid, .. } => write!(f, "ReadFinished [cid={}]", cid),
             Msg::WritePrepareFinished { cid, ref cmd, .. } => {
                 write!(f, "WritePrepareFinished [cid={}, cmd={:?}]", cid, cmd)
@@ -1004,7 +1001,7 @@ impl<E: Engine> Scheduler<E> {
                     .with_label_values(&[self.get_ctx_tag(cid), "snapshot_ok"])
                     .inc();
                 self.process_by_worker(cid, cb_ctx, snapshot);
-            },
+            }
             Err(e) => {
                 error!("get snapshot failed for cid={}, error {:?}", cid, e);
                 SCHED_STAGE_COUNTER_VEC
@@ -1130,13 +1127,17 @@ impl<E: Engine> Runnable<Msg<E>> for Scheduler<E> {
     }
 
     fn run_batch(&mut self, msgs: &mut Vec<Msg<E>>) {
+        for msg in msgs.iter_mut() {
+            if let Msg::RawCmd(m) = msg {
+                if let Some(RawCmd { cmd, cb }) = m.take() {
+                    self.on_receive_new_cmd(cmd, cb);
+                }
+            }
+        }
+
         for msg in msgs.drain(..) {
             match msg {
-                Msg::Quit => {
-                    self.shutdown();
-                    return;
-                }
-                Msg::RawCmd { cmd, cb } => self.on_receive_new_cmd(cmd, cb),
+                Msg::RawCmd(_) => (),
                 Msg::SnapshotFinished {
                     cid,
                     cb_ctx,
@@ -1154,6 +1155,10 @@ impl<E: Engine> Runnable<Msg<E>> for Scheduler<E> {
                 Msg::WriteFinished {
                     cid, pr, result, ..
                 } => self.on_write_finished(cid, pr, result),
+                Msg::Quit => {
+                    self.shutdown();
+                    return;
+                }
             }
         }
     }
