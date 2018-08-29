@@ -37,11 +37,11 @@ use std::thread;
 use std::time::Duration;
 use std::u64;
 
-use kvproto::kvrpcpb::{CommandPri, Context, LockInfo};
+use kvproto::kvrpcpb::{CommandPri, LockInfo};
 use prometheus::local::LocalHistogramVec;
 use prometheus::HistogramTimer;
 
-use storage::engine::{Callback as EngineCallback, CbContext, Modify, Result as EngineResult};
+use storage::engine::{CbContext, Modify, Result as EngineResult};
 use storage::mvcc::{
     Error as MvccError, Lock as MvccLock, MvccReader, MvccTxn, Write, MAX_TXN_WRITE_SIZE,
 };
@@ -52,7 +52,8 @@ use storage::{
 use storage::{Key, KvPair, MvccInfo, Value};
 use util::collections::HashMap;
 use util::threadpool::{
-    Context as ThreadContext, Scheduler as PoolScheduler, ThreadPool, ThreadPoolBuilder,
+    Context as ThreadContext, ContextFactory, Scheduler as PoolScheduler, ThreadPool,
+    ThreadPoolBuilder,
 };
 use util::time::SlowTimer;
 use util::worker::{self, Runnable, ScheduleError};
@@ -92,13 +93,6 @@ pub enum Msg {
         rctx: RunningCtx,
         pr: ProcessResult,
     },
-    WritePrepareFinished {
-        rctx: RunningCtx,
-        cmd: Command,
-        pr: ProcessResult,
-        to_be_write: Vec<Modify>,
-        rows: usize,
-    },
     WriteFinished {
         rctx: RunningCtx,
         pr: ProcessResult,
@@ -118,9 +112,6 @@ impl Debug for Msg {
             Msg::Quit => write!(f, "Quit"),
             Msg::RawCmd { ref cmd, .. } => write!(f, "RawCmd {:?}", cmd),
             Msg::ReadFinished { ref rctx, .. } => write!(f, "ReadFinished [cid={}]", rctx.cid),
-            Msg::WritePrepareFinished {
-                ref rctx, ref cmd, ..
-            } => write!(f, "WritePrepareFinished [cid={}, cmd={:?}]", rctx.cid, cmd),
             Msg::WriteFinished { ref rctx, .. } => write!(f, "WriteFinished [cid={}]", rctx.cid),
             Msg::FinishedWithErr { ref rctx, .. } => write!(f, "WriteFinished [cid={}]", rctx.cid),
         }
@@ -234,36 +225,36 @@ impl Drop for RunningCtx {
 }
 
 /// Creates a callback to receive async results of write prepare from the storage engine.
-fn make_engine_cb(
-    cmd: &'static str,
-    rctx: RunningCtx,
-    pr: ProcessResult,
-    scheduler: worker::Scheduler<Msg>,
-    rows: usize,
-) -> EngineCallback<()> {
-    let cid = rctx.cid;
-    Box::new(move |(cb_ctx, result)| {
-        match scheduler.schedule(Msg::WriteFinished {
-            rctx,
-            pr,
-            cb_ctx,
-            result,
-        }) {
-            Ok(_) => {
-                KV_COMMAND_KEYWRITE_HISTOGRAM_VEC
-                    .with_label_values(&[cmd])
-                    .observe(rows as f64);
-            }
-            e @ Err(ScheduleError::Stopped(_)) => info!("scheduler worker stopped, {:?}", e),
-            Err(e) => {
-                panic!(
-                    "schedule WriteFinished msg failed, cid={}, err:{:?}",
-                    cid, e
-                );
-            }
-        }
-    })
-}
+// fn make_engine_cb(
+//     cmd: &'static str,
+//     rctx: RunningCtx,
+//     pr: ProcessResult,
+//     scheduler: worker::Scheduler<Msg>,
+//     rows: usize,
+// ) -> EngineCallback<()> {
+//     let cid = rctx.cid;
+//     Box::new(move |(cb_ctx, result)| {
+//         match scheduler.schedule(Msg::WriteFinished {
+//             rctx,
+//             pr,
+//             cb_ctx,
+//             result,
+//         }) {
+//             Ok(_) => {
+//                 KV_COMMAND_KEYWRITE_HISTOGRAM_VEC
+//                     .with_label_values(&[cmd])
+//                     .observe(rows as f64);
+//             }
+//             e @ Err(ScheduleError::Stopped(_)) => info!("scheduler worker stopped, {:?}", e),
+//             Err(e) => {
+//                 panic!(
+//                     "schedule WriteFinished msg failed, cid={}, err:{:?}",
+//                     cid, e
+//                 );
+//             }
+//         }
+//     })
+// }
 
 /// Scheduler which schedules the execution of `storage::Command`s.
 pub struct Scheduler<E: Engine> {
@@ -286,10 +277,10 @@ pub struct Scheduler<E: Engine> {
     sched_pending_write_threshold: usize,
 
     // worker pool
-    worker_pool: ThreadPool<SchedContext>,
+    worker_pool: ThreadPool<SchedContext<E>>,
 
     // high priority commands will be delivered to this pool
-    high_priority_pool: ThreadPool<SchedContext>,
+    high_priority_pool: ThreadPool<SchedContext<E>>,
 
     // used to control write flow
     running_write_bytes: usize,
@@ -322,6 +313,23 @@ fn find_mvcc_infos_by_key<S: Snapshot>(
     Ok((lock, writes, values))
 }
 
+#[derive(Clone)]
+struct PoolFactory<E: Clone> {
+    engine: E,
+}
+
+impl<E: Engine + Clone> ContextFactory<SchedContext<E>> for PoolFactory<E> {
+    fn create(&self) -> SchedContext<E> {
+        SchedContext {
+            stats: HashMap::default(),
+            processing_read_duration: SCHED_PROCESSING_READ_HISTOGRAM_VEC.local(),
+            processing_write_duration: SCHED_PROCESSING_WRITE_HISTOGRAM_VEC.local(),
+            command_keyread_duration: KV_COMMAND_KEYREAD_HISTOGRAM_VEC.local(),
+            engine: self.engine.clone(),
+        }
+    }
+}
+
 impl<E: Engine> Scheduler<E> {
     /// Creates a scheduler.
     pub fn new(
@@ -331,6 +339,9 @@ impl<E: Engine> Scheduler<E> {
         worker_pool_size: usize,
         sched_pending_write_threshold: usize,
     ) -> Self {
+        let factory = PoolFactory {
+            engine: engine.clone(),
+        };
         Scheduler {
             engine,
             cmd_ctxs: Default::default(),
@@ -338,12 +349,11 @@ impl<E: Engine> Scheduler<E> {
             id_alloc: 0,
             latches: Latches::new(concurrency),
             sched_pending_write_threshold,
-            worker_pool: ThreadPoolBuilder::with_default_factory(thd_name!("sched-worker-pool"))
+            worker_pool: ThreadPoolBuilder::new(thd_name!("sched-worker-pool"), factory.clone())
                 .thread_count(worker_pool_size)
                 .build(),
-            high_priority_pool: ThreadPoolBuilder::with_default_factory(thd_name!(
-                "sched-high-pri-pool"
-            )).build(),
+            high_priority_pool: ThreadPoolBuilder::new(thd_name!("sched-high-pri-pool"), factory)
+                .build(),
             running_write_bytes: 0,
         }
     }
@@ -351,12 +361,12 @@ impl<E: Engine> Scheduler<E> {
 
 /// Processes a read command within a worker thread, then posts `ReadFinished` message back to the
 /// event loop.
-fn process_read<S: Snapshot>(
-    sched_ctx: &mut SchedContext,
+fn process_read<E: Engine>(
+    sched_ctx: &mut SchedContext<E>,
     rctx: RunningCtx,
     cmd: Command,
     scheduler: worker::Scheduler<Msg>,
-    snapshot: S,
+    snapshot: E::Snap,
 ) -> Statistics {
     fail_point!("txn_before_process_read");
     debug!("process read cmd(cid={}) in worker pool.", rctx.cid);
@@ -373,10 +383,10 @@ fn process_read<S: Snapshot>(
     statistics
 }
 
-fn process_read_impl<S: Snapshot>(
-    sched_ctx: &mut SchedContext,
+fn process_read_impl<E: Engine>(
+    sched_ctx: &mut SchedContext<E>,
     mut cmd: Command,
-    snapshot: S,
+    snapshot: E::Snap,
     statistics: &mut Statistics,
 ) -> Result<ProcessResult> {
     let tag = cmd.tag();
@@ -517,23 +527,63 @@ fn process_read_impl<S: Snapshot>(
 
 /// Processes a write command within a worker thread, then posts either a `WritePrepareFinished`
 /// message if successful or a `WritePrepareFailed` message back to the event loop.
-fn process_write<S: Snapshot>(
+fn process_write<E: Engine>(
     rctx: RunningCtx,
+    cb_ctx: CbContext,
     cmd: Command,
     scheduler: worker::Scheduler<Msg>,
-    snapshot: S,
+    snapshot: E::Snap,
+    sched_ctx: &SchedContext<E>,
 ) -> Statistics {
     fail_point!("txn_before_process_write");
     let cid = rctx.cid;
     let mut statistics = Statistics::default();
+    let cmd_tag = cmd.tag();
     let msg = match process_write_impl(cmd, snapshot, &mut statistics) {
-        Ok((cmd, pr, to_be_write, rows)) => Msg::WritePrepareFinished {
-            rctx,
-            cmd,
-            pr,
-            to_be_write,
-            rows,
-        },
+        Ok((cmd, pr, to_be_write, rows)) => {
+            // WritePrepareFinished
+            SCHED_STAGE_COUNTER_VEC
+                .with_label_values(&[rctx.tag, "write"])
+                .inc();
+            if to_be_write.is_empty() {
+                Msg::WriteFinished {
+                    rctx,
+                    pr,
+                    cb_ctx,
+                    result: Ok(()),
+                }
+            } else {
+                let engine_cb = Box::new(move |(cb_ctx, result)| {
+                    match scheduler.schedule(Msg::WriteFinished {
+                        rctx,
+                        pr,
+                        cb_ctx,
+                        result,
+                    }) {
+                        Ok(_) => {
+                            KV_COMMAND_KEYWRITE_HISTOGRAM_VEC
+                                .with_label_values(&[cmd_tag])
+                                .observe(rows as f64);
+                        }
+                        e @ Err(ScheduleError::Stopped(_)) => {
+                            info!("scheduler worker stopped, {:?}", e)
+                        }
+                        Err(e) => {
+                            panic!(
+                                "schedule WriteFinished msg failed, cid={}, err:{:?}",
+                                cid, e
+                            );
+                        }
+                    }
+                });
+
+                sched_ctx
+                    .engine
+                    .async_write(cmd.get_context(), to_be_write, engine_cb)
+                    .unwrap();
+                return statistics;
+            }
+        }
         Err(err) => {
             // WritePrepareFailed
             debug!("write command(cid={}) failed at prewrite.", cid);
@@ -725,32 +775,22 @@ fn process_write_impl<S: Snapshot>(
     Ok((cmd, pr, modifies, rows))
 }
 
-struct SchedContext {
+struct SchedContext<E: Engine> {
     stats: HashMap<&'static str, StatisticsSummary>,
     processing_read_duration: LocalHistogramVec,
     processing_write_duration: LocalHistogramVec,
     command_keyread_duration: LocalHistogramVec,
+    engine: E,
 }
 
-impl Default for SchedContext {
-    fn default() -> SchedContext {
-        SchedContext {
-            stats: HashMap::default(),
-            processing_read_duration: SCHED_PROCESSING_READ_HISTOGRAM_VEC.local(),
-            processing_write_duration: SCHED_PROCESSING_WRITE_HISTOGRAM_VEC.local(),
-            command_keyread_duration: KV_COMMAND_KEYREAD_HISTOGRAM_VEC.local(),
-        }
-    }
-}
-
-impl SchedContext {
+impl<E: Engine> SchedContext<E> {
     fn add_statistics(&mut self, cmd_tag: &'static str, stat: &Statistics) {
         let entry = self.stats.entry(cmd_tag).or_insert_with(Default::default);
         entry.add_statistics(stat);
     }
 }
 
-impl ThreadContext for SchedContext {
+impl<E: Engine> ThreadContext for SchedContext<E> {
     fn on_tick(&mut self) {
         for (cmd, stat) in self.stats.drain() {
             for (cf, details) in stat.stat.details() {
@@ -802,7 +842,7 @@ impl<E: Engine> Scheduler<E> {
     //     ctx.tag
     // }
 
-    fn fetch_worker_pool(&self, priority: CommandPri) -> &ThreadPool<SchedContext> {
+    fn fetch_worker_pool(&self, priority: CommandPri) -> &ThreadPool<SchedContext<E>> {
         match priority {
             CommandPri::Low | CommandPri::Normal => &self.worker_pool,
             CommandPri::High => &self.high_priority_pool,
@@ -815,7 +855,7 @@ impl<E: Engine> Scheduler<E> {
         cmd: Command,
         cb_ctx: CbContext,
         snapshot: E::Snap,
-        pool_scheduler: PoolScheduler<SchedContext>,
+        pool_scheduler: PoolScheduler<SchedContext<E>>,
         scheduler: worker::Scheduler<Msg>,
     ) {
         SCHED_STAGE_COUNTER_VEC
@@ -828,7 +868,7 @@ impl<E: Engine> Scheduler<E> {
         let readcmd = cmd.readonly();
         let tag = cmd.tag();
         if readcmd {
-            pool_scheduler.schedule(move |ctx: &mut SchedContext| {
+            pool_scheduler.schedule(move |ctx: &mut SchedContext<E>| {
                 let _processing_read_timer = ctx
                     .processing_read_duration
                     .with_label_values(&[tag])
@@ -838,13 +878,13 @@ impl<E: Engine> Scheduler<E> {
                 ctx.add_statistics(tag, &s);
             });
         } else {
-            pool_scheduler.schedule(move |ctx: &mut SchedContext| {
+            pool_scheduler.schedule(move |ctx: &mut SchedContext<E>| {
                 let _processing_write_timer = ctx
                     .processing_write_duration
                     .with_label_values(&[tag])
                     .start_coarse_timer();
 
-                let s = process_write(rctx, cmd, scheduler, snapshot);
+                let s = process_write(rctx, cb_ctx, cmd, scheduler, snapshot, ctx);
                 ctx.add_statistics(tag, &s);
             });
         }
@@ -977,7 +1017,7 @@ impl<E: Engine> Scheduler<E> {
         mut rctx: RunningCtx,
         cb_ctx: CbContext,
         snapshot: EngineResult<E::Snap>,
-        pool_scheduler: PoolScheduler<SchedContext>,
+        pool_scheduler: PoolScheduler<SchedContext<E>>,
         scheduler: worker::Scheduler<Msg>,
     ) {
         fail_point!("scheduler_async_snapshot_finish");
@@ -1052,31 +1092,31 @@ impl<E: Engine> Scheduler<E> {
     ///
     /// Initiates an async write operation on the storage engine, there'll be a `WriteFinished`
     /// message when it finishes.
-    fn on_write_prepare_finished(
-        &mut self,
-        rctx: RunningCtx,
-        cmd: Command,
-        pr: ProcessResult,
-        to_be_write: Vec<Modify>,
-        rows: usize,
-    ) {
-        SCHED_STAGE_COUNTER_VEC
-            .with_label_values(&[rctx.tag, "write"])
-            .inc();
-        if to_be_write.is_empty() {
-            return self.on_write_finished(rctx, pr, Ok(()));
-        }
-        let engine_cb = make_engine_cb(cmd.tag(), rctx, pr, self.scheduler.clone(), rows);
-        self.engine
-            .async_write(cmd.get_context(), to_be_write, engine_cb)
-            .unwrap();
-        // {
-        //     SCHED_STAGE_COUNTER_VEC
-        //         .with_label_values(&[rctx.tag, "async_write_err"])
-        //         .inc();
-        //     self.finish_with_err(rctx, Error::from(e));
-        // }
-    }
+    // fn on_write_prepare_finished(
+    //     &mut self,
+    //     rctx: RunningCtx,
+    //     cmd: Command,
+    //     pr: ProcessResult,
+    //     to_be_write: Vec<Modify>,
+    //     rows: usize,
+    // ) {
+    //     SCHED_STAGE_COUNTER_VEC
+    //         .with_label_values(&[rctx.tag, "write"])
+    //         .inc();
+    //     if to_be_write.is_empty() {
+    //         return self.on_write_finished(rctx, pr, Ok(()));
+    //     }
+    //     let engine_cb = make_engine_cb(cmd.tag(), rctx, pr, self.scheduler.clone(), rows);
+    //     self.engine
+    //         .async_write(cmd.get_context(), to_be_write, engine_cb)
+    //         .unwrap();
+    //     // {
+    //     //     SCHED_STAGE_COUNTER_VEC
+    //     //         .with_label_values(&[rctx.tag, "async_write_err"])
+    //     //         .inc();
+    //     //     self.finish_with_err(rctx, Error::from(e));
+    //     // }
+    // }
 
     /// Event handler for the success of write.
     fn on_write_finished(
@@ -1140,13 +1180,6 @@ impl<E: Engine> Runnable<Msg> for Scheduler<E> {
                 }
                 Msg::RawCmd { cmd, cb } => self.on_receive_new_cmd(cmd, cb),
                 Msg::ReadFinished { rctx, pr } => self.on_read_finished(rctx, pr),
-                Msg::WritePrepareFinished {
-                    rctx,
-                    cmd,
-                    pr,
-                    to_be_write,
-                    rows,
-                } => self.on_write_prepare_finished(rctx, cmd, pr, to_be_write, rows),
                 Msg::WriteFinished {
                     rctx, pr, result, ..
                 } => self.on_write_finished(rctx, pr, result),
