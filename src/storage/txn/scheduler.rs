@@ -234,7 +234,7 @@ impl Drop for RunningCtx {
 }
 
 /// Creates a callback to receive async results of write prepare from the storage engine.
-fn make_engine_cb<E: Engine>(
+fn make_engine_cb(
     cmd: &'static str,
     rctx: RunningCtx,
     pr: ProcessResult,
@@ -351,17 +351,17 @@ impl<E: Engine> Scheduler<E> {
 
 /// Processes a read command within a worker thread, then posts `ReadFinished` message back to the
 /// event loop.
-fn process_read<E: Engine>(
+fn process_read<S: Snapshot>(
     sched_ctx: &mut SchedContext,
     rctx: RunningCtx,
     cmd: Command,
     scheduler: worker::Scheduler<Msg>,
-    snapshot: E::Snap,
+    snapshot: S,
 ) -> Statistics {
     fail_point!("txn_before_process_read");
     debug!("process read cmd(cid={}) in worker pool.", rctx.cid);
     let mut statistics = Statistics::default();
-    let pr = match process_read_impl::<E>(sched_ctx, cmd, snapshot, &mut statistics) {
+    let pr = match process_read_impl(sched_ctx, cmd, snapshot, &mut statistics) {
         Err(e) => ProcessResult::Failed { err: e.into() },
         Ok(pr) => pr,
     };
@@ -373,10 +373,10 @@ fn process_read<E: Engine>(
     statistics
 }
 
-fn process_read_impl<E: Engine>(
+fn process_read_impl<S: Snapshot>(
     sched_ctx: &mut SchedContext,
     mut cmd: Command,
-    snapshot: E::Snap,
+    snapshot: S,
     statistics: &mut Statistics,
 ) -> Result<ProcessResult> {
     let tag = cmd.tag();
@@ -517,16 +517,16 @@ fn process_read_impl<E: Engine>(
 
 /// Processes a write command within a worker thread, then posts either a `WritePrepareFinished`
 /// message if successful or a `WritePrepareFailed` message back to the event loop.
-fn process_write<E: Engine>(
+fn process_write<S: Snapshot>(
     rctx: RunningCtx,
     cmd: Command,
     scheduler: worker::Scheduler<Msg>,
-    snapshot: E::Snap,
+    snapshot: S,
 ) -> Statistics {
     fail_point!("txn_before_process_write");
     let cid = rctx.cid;
     let mut statistics = Statistics::default();
-    let msg = match process_write_impl::<E>(cmd, snapshot, &mut statistics) {
+    let msg = match process_write_impl(cmd, snapshot, &mut statistics) {
         Ok((cmd, pr, to_be_write, rows)) => Msg::WritePrepareFinished {
             rctx,
             cmd,
@@ -550,9 +550,9 @@ fn process_write<E: Engine>(
     statistics
 }
 
-fn process_write_impl<E: Engine>(
+fn process_write_impl<S: Snapshot>(
     mut cmd: Command,
-    snapshot: E::Snap,
+    snapshot: S,
     statistics: &mut Statistics,
 ) -> Result<(Command, ProcessResult, Vec<Modify>, usize)> {
     let (pr, modifies, rows) = match cmd {
@@ -834,7 +834,7 @@ impl<E: Engine> Scheduler<E> {
                     .with_label_values(&[tag])
                     .start_coarse_timer();
 
-                let s = process_read::<E>(ctx, rctx, cmd, scheduler, snapshot);
+                let s = process_read(ctx, rctx, cmd, scheduler, snapshot);
                 ctx.add_statistics(tag, &s);
             });
         } else {
@@ -844,7 +844,7 @@ impl<E: Engine> Scheduler<E> {
                     .with_label_values(&[tag])
                     .start_coarse_timer();
 
-                let s = process_write::<E>(rctx, cmd, scheduler, snapshot);
+                let s = process_write(rctx, cmd, scheduler, snapshot);
                 ctx.add_statistics(tag, &s);
             });
         }
@@ -1066,7 +1066,7 @@ impl<E: Engine> Scheduler<E> {
         if to_be_write.is_empty() {
             return self.on_write_finished(rctx, pr, Ok(()));
         }
-        let engine_cb = make_engine_cb::<E>(cmd.tag(), rctx, pr, self.scheduler.clone(), rows);
+        let engine_cb = make_engine_cb(cmd.tag(), rctx, pr, self.scheduler.clone(), rows);
         self.engine
             .async_write(cmd.get_context(), to_be_write, engine_cb)
             .unwrap();
@@ -1079,7 +1079,12 @@ impl<E: Engine> Scheduler<E> {
     }
 
     /// Event handler for the success of write.
-    fn on_write_finished(&mut self, mut rctx: RunningCtx, pr: ProcessResult, result: EngineResult<()>) {
+    fn on_write_finished(
+        &mut self,
+        mut rctx: RunningCtx,
+        pr: ProcessResult,
+        result: EngineResult<()>,
+    ) {
         SCHED_STAGE_COUNTER_VEC
             .with_label_values(&[rctx.tag, "write_finish"])
             .inc();
