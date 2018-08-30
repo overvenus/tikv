@@ -244,6 +244,27 @@ impl<S: RaftStoreRouter> RaftKv<S> {
             .map_err(From::from)
     }
 
+    fn exec_read_requests_fn<T>(&self, ctx: &Context, reqs: Vec<Request>, cb: T) -> Result<()>
+    where
+        T: FnOnce((CbContext, engine::Result<CmdRes>)) + Send + 'static,
+    {
+        let len = reqs.len();
+        let header = self.new_request_header(ctx);
+        let mut cmd = RaftCmdRequest::new();
+        cmd.set_header(header);
+        cmd.set_requests(RepeatedField::from_vec(reqs));
+
+        self.router
+            .send_command(
+                cmd,
+                StoreCallback::Read(box move |resp| {
+                    let (cb_ctx, res) = on_read_result(resp, len);
+                    cb((cb_ctx, res.map_err(Error::into)));
+                }),
+            )
+            .map_err(From::from)
+    }
+
     fn exec_write_requests(
         &self,
         ctx: &Context,
@@ -517,7 +538,7 @@ impl<S: RaftStoreRouter> Engine for RaftKv<S> {
         ASYNC_REQUESTS_COUNTER_VEC.snapshot.all.inc();
         let req_timer = ASYNC_REQUESTS_DURATIONS_VEC.snapshot.start_coarse_timer();
 
-        self.exec_read_requests(ctx, vec![req], box move |(cb_ctx, res)| match res {
+        self.exec_read_requests_fn(ctx, vec![req], move |(cb_ctx, res)| match res {
             Ok(CmdRes::Resp(r)) => cb((
                 cb_ctx,
                 Err(invalid_resp_type(CmdType::Snap, r[0].get_cmd_type()).into()),
