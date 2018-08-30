@@ -88,6 +88,13 @@ pub trait Engine: Send + Debug + Clone + Sized + 'static {
         unimplemented!();
     }
     fn async_snapshot(&self, ctx: &Context, callback: Callback<Self::Snap>) -> Result<()>;
+    fn async_snapshot_fn<T: FnOnce((CbContext, Result<Self::Snap>)) + Send + 'static>(
+        &self,
+        _ctx: &Context,
+        _callback: T,
+    ) -> Result<()> {
+        unimplemented!()
+    }
     /// Snapshots are token by `Context`s, the results are send to the `on_finished` callback,
     /// with the same order. If a read-index is occurred, a `None` is placed in the corresponding
     /// slot, and the caller is responsible for reissuing it again, in `async_snapshot`.

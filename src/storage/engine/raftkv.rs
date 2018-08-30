@@ -505,6 +505,40 @@ impl<S: RaftStoreRouter> Engine for RaftKv<S> {
         })
     }
 
+    fn async_snapshot_fn<T: FnOnce((CbContext, engine::Result<Self::Snap>)) + Send + 'static>(
+        &self,
+        ctx: &Context,
+        cb: T,
+    ) -> engine::Result<()> {
+        fail_point!("raftkv_async_snapshot");
+        let mut req = Request::new();
+        req.set_cmd_type(CmdType::Snap);
+
+        ASYNC_REQUESTS_COUNTER_VEC.snapshot.all.inc();
+        let req_timer = ASYNC_REQUESTS_DURATIONS_VEC.snapshot.start_coarse_timer();
+
+        self.exec_read_requests(ctx, vec![req], box move |(cb_ctx, res)| match res {
+            Ok(CmdRes::Resp(r)) => cb((
+                cb_ctx,
+                Err(invalid_resp_type(CmdType::Snap, r[0].get_cmd_type()).into()),
+            )),
+            Ok(CmdRes::Snap(s)) => {
+                req_timer.observe_duration();
+                ASYNC_REQUESTS_COUNTER_VEC.snapshot.success.inc();
+                cb((cb_ctx, Ok(s)))
+            }
+            Err(e) => {
+                let status_kind = get_status_kind_from_engine_error(&e);
+                ASYNC_REQUESTS_COUNTER_VEC.snapshot.get(status_kind).inc();
+                cb((cb_ctx, Err(e)))
+            }
+        }).map_err(|e| {
+            let status_kind = get_status_kind_from_error(&e);
+            ASYNC_REQUESTS_COUNTER_VEC.snapshot.get(status_kind).inc();
+            e.into()
+        })
+    }
+
     fn async_batch_snapshot(
         &self,
         batch: Vec<Context>,

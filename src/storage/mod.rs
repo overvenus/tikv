@@ -488,8 +488,8 @@ impl<E: Engine> Storage<E> {
     }
 
     fn async_snapshot(engine: E, ctx: &Context) -> impl Future<Item = E::Snap, Error = Error> {
-        let (callback, future) = util::future::paired_future_callback();
-        let val = engine.async_snapshot(ctx, callback);
+        let (callback, future) = util::future::paired_future_callback_fn();
+        let val = engine.async_snapshot_fn(ctx, callback);
 
         future::result(val)
             .and_then(|_| future.map_err(|cancel| EngineError::Other(box_err!(cancel))))
