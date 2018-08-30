@@ -286,6 +286,32 @@ impl<S: RaftStoreRouter> RaftKv<S> {
 
         self.batch_call_snap_commands(batch.collect(), on_finished)
     }
+
+    fn exec_write_requests_fn<T: FnOnce((CbContext, engine::Result<CmdRes>)) + Send + 'static>(
+        &self,
+        ctx: &Context,
+        reqs: Vec<Request>,
+        cb: T,
+    ) -> Result<()> {
+        fail_point!("raftkv_early_error_report", |_| Err(
+            RaftServerError::RegionNotFound(ctx.get_region_id()).into()
+        ));
+        let len = reqs.len();
+        let header = self.new_request_header(ctx);
+        let mut cmd = RaftCmdRequest::new();
+        cmd.set_header(header);
+        cmd.set_requests(RepeatedField::from_vec(reqs));
+
+        self.router
+            .send_command(
+                cmd,
+                StoreCallback::Write(box move |resp| {
+                    let (cb_ctx, res) = on_write_result(resp, len);
+                    cb((cb_ctx, res.map_err(Error::into)));
+                }),
+            )
+            .map_err(From::from)
+    }
 }
 
 fn invalid_resp_type(exp: CmdType, act: CmdType) -> Error {
@@ -304,6 +330,78 @@ impl<S: RaftStoreRouter> Debug for RaftKv<S> {
 impl<S: RaftStoreRouter> Engine for RaftKv<S> {
     type Iter = RegionIterator;
     type Snap = RegionSnapshot;
+
+    fn async_write_fn<T: FnOnce((CbContext, engine::Result<()>)) + Send + 'static>(
+        &self,
+        ctx: &Context,
+        modifies: Vec<Modify>,
+        cb: T,
+    ) -> engine::Result<()> {
+        fail_point!("raftkv_async_write");
+        if modifies.is_empty() {
+            return Err(engine::Error::EmptyRequest);
+        }
+
+        let mut reqs = Vec::with_capacity(modifies.len());
+        for m in modifies {
+            let mut req = Request::new();
+            match m {
+                Modify::Delete(cf, k) => {
+                    let mut delete = DeleteRequest::new();
+                    delete.set_key(k.into_encoded());
+                    if cf != CF_DEFAULT {
+                        delete.set_cf(cf.to_string());
+                    }
+                    req.set_cmd_type(CmdType::Delete);
+                    req.set_delete(delete);
+                }
+                Modify::Put(cf, k, v) => {
+                    let mut put = PutRequest::new();
+                    put.set_key(k.into_encoded());
+                    put.set_value(v);
+                    if cf != CF_DEFAULT {
+                        put.set_cf(cf.to_string());
+                    }
+                    req.set_cmd_type(CmdType::Put);
+                    req.set_put(put);
+                }
+                Modify::DeleteRange(cf, start_key, end_key) => {
+                    let mut delete_range = DeleteRangeRequest::new();
+                    delete_range.set_cf(cf.to_string());
+                    delete_range.set_start_key(start_key.into_encoded());
+                    delete_range.set_end_key(end_key.into_encoded());
+                    req.set_cmd_type(CmdType::DeleteRange);
+                    req.set_delete_range(delete_range);
+                }
+            }
+            reqs.push(req);
+        }
+
+        ASYNC_REQUESTS_COUNTER_VEC.write.all.inc();
+        let req_timer = ASYNC_REQUESTS_DURATIONS_VEC.write.start_coarse_timer();
+
+        self.exec_write_requests_fn(ctx, reqs, move |(cb_ctx, res)| match res {
+            Ok(CmdRes::Resp(_)) => {
+                req_timer.observe_duration();
+                ASYNC_REQUESTS_COUNTER_VEC.write.success.inc();
+                fail_point!("raftkv_async_write_finish");
+                cb((cb_ctx, Ok(())))
+            }
+            Ok(CmdRes::Snap(_)) => cb((
+                cb_ctx,
+                Err(box_err!("unexpect snapshot, should mutate instead.")),
+            )),
+            Err(e) => {
+                let status_kind = get_status_kind_from_engine_error(&e);
+                ASYNC_REQUESTS_COUNTER_VEC.write.get(status_kind).inc();
+                cb((cb_ctx, Err(e)))
+            }
+        }).map_err(|e| {
+            let status_kind = get_status_kind_from_error(&e);
+            ASYNC_REQUESTS_COUNTER_VEC.write.get(status_kind).inc();
+            e.into()
+        })
+    }
 
     fn async_write(
         &self,

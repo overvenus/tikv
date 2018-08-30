@@ -38,7 +38,7 @@ use storage::mvcc::{Error as MvccError, LockType, Write as MvccWrite, WriteType}
 use storage::txn::Error as TxnError;
 use storage::{self, Engine, Key, Mutation, Options, Storage, Value};
 use util::collections::HashMap;
-use util::future::{paired_future_callback, AndThenWith};
+use util::future::{paired_future_callback, paired_future_callback_fn, AndThenWith};
 use util::worker::Scheduler;
 
 const SCHEDULER_IS_BUSY: &str = "scheduler is busy";
@@ -645,8 +645,8 @@ impl<T: RaftStoreRouter + 'static, E: Engine> tikvpb_grpc::Tikv for Service<T, E
     fn raw_put(&self, ctx: RpcContext, mut req: RawPutRequest, sink: UnarySink<RawPutResponse>) {
         let timer = GRPC_MSG_HISTOGRAM_VEC.raw_put.start_coarse_timer();
 
-        let (cb, f) = paired_future_callback();
-        let res = self.storage.async_raw_put(
+        let (cb, f) = paired_future_callback_fn();
+        let res = self.storage.async_raw_put_fn(
             req.take_context(),
             req.take_cf(),
             req.take_key(),

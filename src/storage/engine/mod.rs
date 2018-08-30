@@ -79,6 +79,14 @@ pub trait Engine: Send + Debug + Clone + Sized + 'static {
     type Snap: Snapshot<Iter = Self::Iter>;
 
     fn async_write(&self, ctx: &Context, batch: Vec<Modify>, callback: Callback<()>) -> Result<()>;
+    fn async_write_fn<T: FnOnce((CbContext, Result<()>)) + Send + 'static>(
+        &self,
+        _ctx: &Context,
+        _batch: Vec<Modify>,
+        _callback: T,
+    ) -> Result<()> {
+        unimplemented!();
+    }
     fn async_snapshot(&self, ctx: &Context, callback: Callback<Self::Snap>) -> Result<()>;
     /// Snapshots are token by `Context`s, the results are send to the `on_finished` callback,
     /// with the same order. If a read-index is occurred, a `None` is placed in the corresponding

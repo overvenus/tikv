@@ -997,6 +997,31 @@ impl<E: Engine> Storage<E> {
         Ok(())
     }
 
+    pub fn async_raw_put_fn<T: FnOnce(Result<()>) + Send + 'static>(
+        &self,
+        ctx: Context,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        callback: T,
+    ) -> Result<()> {
+        if key.len() > self.max_key_size {
+            callback(Err(Error::KeyTooLarge(key.len(), self.max_key_size)));
+            return Ok(());
+        }
+        self.engine.async_write_fn(
+            &ctx,
+            vec![Modify::Put(
+                Self::rawkv_cf(&cf)?,
+                Key::from_encoded(key),
+                value,
+            )],
+            move |(_, res): (_, engine::Result<_>)| callback(res.map_err(Error::from)),
+        )?;
+        KV_COMMAND_COUNTER_VEC.with_label_values(&["raw_put"]).inc();
+        Ok(())
+    }
+
     pub fn async_raw_batch_put(
         &self,
         ctx: Context,
