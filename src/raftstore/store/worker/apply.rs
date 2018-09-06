@@ -50,7 +50,7 @@ use raftstore::store::{cmd_resp, keys, util, Engines, Store};
 use raftstore::{Error, Result};
 use storage::{ALL_CFS, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE};
 use util::collections::HashMap;
-use util::time::{duration_to_sec, Instant, SlowTimer};
+use util::time::{duration_to_ms, duration_to_sec, Instant, SlowTimer};
 use util::worker::Runnable;
 use util::{escape, rocksdb, MustConsumeVec};
 
@@ -252,6 +252,7 @@ struct ApplyContextCore<'a> {
     sync_log_hint: bool,
     exec_ctx: Option<ExecContext>,
     use_delete_range: bool,
+    disable_wal: bool,
 }
 
 impl<'a> ApplyContextCore<'a> {
@@ -271,6 +272,7 @@ impl<'a> ApplyContextCore<'a> {
             sync_log_hint: false,
             exec_ctx: None,
             use_delete_range: false,
+            disable_wal: false,
         }
     }
 
@@ -330,9 +332,17 @@ impl<'a> ApplyContextCore<'a> {
     /// Write all the changes into rocksdb.
     pub fn write_to_db(&mut self, engine: &DB, observe: bool) {
         if self.wb.as_ref().map_or(false, |wb| !wb.is_empty()) {
-            let now = if observe { Some(Instant::now()) } else { None };
+            let (now, _perf) = if observe {
+                (Some(Instant::now()), Some(WritePerfContext::new("apply")))
+            } else {
+                (None, None)
+            };
             let mut write_opts = WriteOptions::new();
-            write_opts.set_sync(self.enable_sync_log && self.sync_log_hint);
+            if self.disable_wal {
+                write_opts.disable_wal(true);
+            } else {
+                write_opts.set_sync(self.enable_sync_log && self.sync_log_hint);
+            }
             engine
                 .write_opt(self.wb.take().unwrap(), &write_opts)
                 .unwrap_or_else(|e| {
@@ -885,16 +895,22 @@ impl ApplyDelegate {
         &mut self,
         ctx: &mut ApplyContext,
     ) -> Result<(RaftCmdResponse, Option<ExecResult>)> {
+        let timer = Instant::now();
         let req = Rc::clone(&ctx.exec_ctx.as_ref().unwrap().req);
         // Include region for stale epoch after merge may cause key not in range.
         let include_region =
             req.get_header().get_region_epoch().get_version() >= self.last_merge_version;
         check_region_epoch(&req, &self.region, include_region)?;
-        if req.has_admin_request() {
+        let res = if req.has_admin_request() {
             self.exec_admin_cmd(ctx, req.get_admin_request())
         } else {
             self.exec_write_cmd(ctx, req.get_requests())
+        };
+        let elapsed = duration_to_ms(timer.elapsed());
+        if elapsed > 1 {
+            warn!("{} - raftstore apply time: request = {:?}", elapsed, req);
         }
+        res
     }
 
     fn exec_admin_cmd(
@@ -2112,7 +2128,7 @@ impl Runner {
         // take raft log gc for example, we write kv WAL first, then write raft WAL,
         // if power failure happen, raft WAL may synced to disk, but kv WAL may not.
         // so we use sync-log flag here.
-        core.write_to_db(&self.engines.kv, self.apply_count % 512 == 0);
+        core.write_to_db(&self.engines.kv, self.apply_count % 32 == 0);
         self.apply_count += 1;
 
         for region_id in core.merged_regions.drain(..) {

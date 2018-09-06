@@ -11,7 +11,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Instant;
+
 use prometheus::*;
+use rocksdb::{set_perf_level, PerfContext, PerfLevel};
+use util::time::duration_to_ms;
 
 lazy_static! {
     pub static ref PEER_PROPOSAL_COUNTER_VEC: IntCounterVec =
@@ -256,4 +260,72 @@ lazy_static! {
             "Bucketed histogram of raftstore mio run once duration.",
             exponential_buckets(0.000001, 2.0, 20).unwrap()
         ).unwrap();
+    pub static ref STORE_WRITE_TIME: HistogramVec =
+        register_histogram_vec!(
+            "tikv_raftstore_write_time_micros",
+            "Bucketed histogram of rocksdb write time",
+            &["tag", "state"],
+            exponential_buckets(1.0, 2.0, 20).unwrap()
+        ).unwrap();
+}
+
+pub struct WritePerfContext {
+    tag: &'static str,
+    start: Instant,
+    wal: u64,
+    memtable: u64,
+    lock: u64,
+    delay: u64,
+    process: u64,
+}
+
+impl WritePerfContext {
+    pub fn new(tag: &'static str) -> WritePerfContext {
+        set_perf_level(PerfLevel::EnableTime);
+        let ctx = PerfContext::get();
+        WritePerfContext {
+            tag,
+            start: Instant::now(),
+            wal: ctx.write_wal_time(),
+            memtable: ctx.write_memtable_time(),
+            lock: ctx.db_mutex_lock_nanos(),
+            delay: ctx.write_delay_time(),
+            process: ctx.write_pre_and_post_process_time(),
+        }
+    }
+}
+
+impl Drop for WritePerfContext {
+    fn drop(&mut self) {
+        let end = PerfContext::get();
+        let wal = end.write_wal_time() - self.wal;
+        let memtable = end.write_memtable_time() - self.memtable;
+        let lock = end.db_mutex_lock_nanos() - self.lock;
+        let delay = end.write_delay_time() - self.delay;
+        let process = end.write_pre_and_post_process_time() - self.process;
+
+        let elapsed = duration_to_ms(self.start.elapsed());
+        if elapsed > 1 {
+            info!(
+                "{} - {} wal {} memtable {} lock {} delay {} process {}",
+                elapsed, self.tag, wal, memtable, lock, delay, process
+            );
+        }
+
+        STORE_WRITE_TIME
+            .with_label_values(&[self.tag, "wal"])
+            .observe(wal as f64 / 1000.0);
+        STORE_WRITE_TIME
+            .with_label_values(&[self.tag, "memtable"])
+            .observe(memtable as f64 / 1000.0);
+        STORE_WRITE_TIME
+            .with_label_values(&[self.tag, "lock"])
+            .observe(lock as f64 / 1000.0);
+        STORE_WRITE_TIME
+            .with_label_values(&[self.tag, "delay"])
+            .observe(delay as f64 / 1000.0);
+        STORE_WRITE_TIME
+            .with_label_values(&[self.tag, "process"])
+            .observe(process as f64 / 1000.0);
+    }
 }
