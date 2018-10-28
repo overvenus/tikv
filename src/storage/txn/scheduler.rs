@@ -32,23 +32,25 @@
 //! to the scheduler.
 
 use std::fmt::{self, Debug, Display, Formatter};
+use std::time::Duration;
 use std::u64;
 
+use futures::Future;
 use kvproto::kvrpcpb::CommandPri;
 use prometheus::HistogramTimer;
 
-use storage::engine::Result as EngineResult;
+use storage::engine::Statistics;
 use storage::Key;
 use storage::{Command, Engine, Error as StorageError, StorageCb};
 use util::collections::HashMap;
-use util::threadpool::{ThreadPool, ThreadPoolBuilder};
+use util::config::ReadableSize;
+use util::future::paired_future_callback;
+use util::futurepool::FuturePool;
 use util::worker::{self, Runnable};
 
 use super::super::metrics::*;
 use super::latch::{Latches, Lock};
-use super::process::{
-    execute_callback, Executor, ProcessResult, SchedContext, SchedContextFactory, Task,
-};
+use super::process::{execute_callback, ProcessResult, Task};
 use super::Error;
 
 pub const CMD_BATCH_SIZE: usize = 256;
@@ -60,21 +62,17 @@ pub enum Msg {
         cmd: Command,
         cb: StorageCb,
     },
-    ReadFinished {
+    Done {
         cid: u64,
-        pr: ProcessResult,
-        tag: &'static str,
+        lock: Lock,
+        statistics: Option<Statistics>,
     },
-    WriteFinished {
+    Next {
         cid: u64,
-        pr: ProcessResult,
-        result: EngineResult<()>,
-        tag: &'static str,
-    },
-    FinishedWithErr {
-        cid: u64,
-        err: Error,
-        tag: &'static str,
+        lock: Lock,
+        cmd: Command,
+        cb: StorageCb,
+        statistics: Option<Statistics>,
     },
 }
 
@@ -91,19 +89,15 @@ impl Display for Msg {
         match *self {
             Msg::Quit => write!(f, "Quit"),
             Msg::RawCmd { ref cmd, .. } => write!(f, "RawCmd {:?}", cmd),
-            Msg::ReadFinished { cid, .. } => write!(f, "ReadFinished [cid={}]", cid),
-            Msg::WriteFinished { cid, .. } => write!(f, "WriteFinished [cid={}]", cid),
-            Msg::FinishedWithErr { cid, .. } => write!(f, "FinishedWithErr [cid={}]", cid),
+            Msg::Done { cid, .. } => write!(f, "Done [cid={}]", cid),
+            Msg::Next { cid, .. } => write!(f, "WriteFinished [cid={}]", cid),
         }
     }
 }
 
 // It stores context of a task.
 struct TaskContext {
-    lock: Lock,
-    cb: StorageCb,
     write_bytes: usize,
-    tag: &'static str,
     // How long it waits on latches.
     latch_timer: Option<HistogramTimer>,
     // Total duration of a command.
@@ -111,18 +105,12 @@ struct TaskContext {
 }
 
 impl TaskContext {
-    fn new(lock: Lock, cb: StorageCb, cmd: &Command) -> TaskContext {
-        let write_bytes = if lock.is_write_lock() {
-            cmd.write_bytes()
-        } else {
-            0
-        };
+    fn new(is_write_lock: bool, cmd: &Command) -> TaskContext {
+        let write_bytes =
+            if is_write_lock { cmd.write_bytes() } else { 0 };
 
         TaskContext {
-            lock,
-            cb,
             write_bytes,
-            tag: cmd.tag(),
             latch_timer: Some(
                 SCHED_LATCH_HISTOGRAM_VEC
                     .with_label_values(&[cmd.tag()])
@@ -163,10 +151,10 @@ pub struct Scheduler<E: Engine> {
     sched_pending_write_threshold: usize,
 
     // worker pool
-    worker_pool: ThreadPool<SchedContext<E>>,
+    worker_pool: FuturePool<()>,
 
     // high priority commands will be delivered to this pool
-    high_priority_pool: ThreadPool<SchedContext<E>>,
+    high_priority_pool: FuturePool<()>,
 
     // used to control write flow
     running_write_bytes: usize,
@@ -181,7 +169,6 @@ impl<E: Engine> Scheduler<E> {
         worker_pool_size: usize,
         sched_pending_write_threshold: usize,
     ) -> Self {
-        let factory = SchedContextFactory::new(engine.clone());
         Scheduler {
             engine,
             // TODO: GC these two maps.
@@ -191,11 +178,20 @@ impl<E: Engine> Scheduler<E> {
             id_alloc: 0,
             latches: Latches::new(concurrency),
             sched_pending_write_threshold,
-            worker_pool: ThreadPoolBuilder::new(thd_name!("sched-worker-pool"), factory.clone())
-                .thread_count(worker_pool_size)
-                .build(),
-            high_priority_pool: ThreadPoolBuilder::new(thd_name!("sched-high-pri-pool"), factory)
-                .build(),
+            worker_pool: FuturePool::new(
+                worker_pool_size,
+                ReadableSize::mb(10).0 as _,
+                &thd_name!("sched-worker-pool"),
+                Duration::from_secs(15),
+                || {},
+            ),
+            high_priority_pool: FuturePool::new(
+                worker_pool_size,
+                ReadableSize::mb(10).0 as _,
+                &thd_name!("sched-high-pri-pool"),
+                Duration::from_secs(15),
+                || {},
+            ),
             running_write_bytes: 0,
         }
     }
@@ -212,13 +208,13 @@ impl<E: Engine> Scheduler<E> {
         task
     }
 
-    fn enqueue_task(&mut self, task: Task, callback: StorageCb) {
+    fn enqueue_task(&mut self, task: Task) {
         let cid = task.cid;
 
         let tctx = {
             let cmd = task.cmd();
-            let lock = self.gen_lock(cmd);
-            TaskContext::new(lock, callback, cmd)
+            let is_write_lock = task.lock.is_write_lock();
+            TaskContext::new(is_write_lock, cmd)
         };
 
         self.running_write_bytes += tctx.write_bytes;
@@ -243,14 +239,11 @@ impl<E: Engine> Scheduler<E> {
         tctx
     }
 
-    pub fn fetch_executor(&self, priority: CommandPri) -> Executor<E> {
-        let pool = match priority {
+    pub fn fetch_pool(&self, priority: CommandPri) -> &FuturePool<()> {
+        match priority {
             CommandPri::Low | CommandPri::Normal => &self.worker_pool,
             CommandPri::High => &self.high_priority_pool,
-        };
-        let pool_scheduler = pool.scheduler();
-        let scheduler = self.scheduler.clone();
-        Executor::new(scheduler, pool_scheduler)
+        }
     }
 
     /// Event handler for new command.
@@ -269,9 +262,10 @@ impl<E: Engine> Scheduler<E> {
 
         let tag = cmd.tag();
         let priority_tag = cmd.priority_tag();
-        let task = Task::new(cid, cmd);
+        let lock = self.gen_lock(&cmd);
+        let task = Task::new(cid, cmd, lock, callback);
         // TODO: enqueue_task should return an reference of the tctx.
-        self.enqueue_task(task, callback);
+        self.enqueue_task(task);
         self.try_to_wake_up(cid);
 
         SCHED_STAGE_COUNTER_VEC
@@ -321,98 +315,50 @@ impl<E: Engine> Scheduler<E> {
     /// Initiates an async operation to get a snapshot from the storage engine, then posts a
     /// `SnapshotFinished` message back to the event loop when it finishes.
     fn get_snapshot(&mut self, cid: u64) {
-        let task = self.dequeue_task(cid);
+        let mut task = self.dequeue_task(cid);
         let tag = task.tag;
         let ctx = task.context().clone();
-        let executor = self.fetch_executor(task.priority());
 
-        let cb = box move |(cb_ctx, snapshot)| {
-            executor.execute(cb_ctx, snapshot, task);
-        };
+        let (cb, fut) = paired_future_callback();
         if let Err(e) = self.engine.async_snapshot(&ctx, cb) {
             SCHED_STAGE_COUNTER_VEC
                 .with_label_values(&[tag, "async_snapshot_err"])
                 .inc();
 
-            error!("engine async_snapshot failed, err: {:?}", e);
-            self.finish_with_err(cid, e.into());
+            error!(
+                "command cid={}, engine async_snapshot failed, err: {:?}",
+                cid, e
+            );
+
+            SCHED_STAGE_COUNTER_VEC
+                .with_label_values(&[tag, "error"])
+                .inc();
+
+            let pr = ProcessResult::Failed {
+                err: StorageError::from(e),
+            };
+            execute_callback(task.cb.take().unwrap(), pr);
+
+            self.dequeue_task_context(cid);
+            self.release_lock(&task.lock, cid);
         } else {
             SCHED_STAGE_COUNTER_VEC
                 .with_label_values(&[tag, "snapshot"])
                 .inc();
+
+            let pool = self.fetch_pool(task.priority());
+            let scheduler = self.scheduler.clone();
+            let engine = Some(self.engine.clone());
+            pool.spawn(move |_| {
+                fut.then(move |res| {
+                    fail_point!("scheduler_async_snapshot_finish");
+                    match res {
+                        Ok((cb_ctx, snapshot)) => task.execute(cb_ctx, snapshot, engine),
+                        Err(err) => task.fail(Error::Other(box_err!(err))),
+                    }
+                }).map(move |msg| notify_scheduler(&scheduler, msg))
+            }).forget()
         }
-    }
-
-    /// Calls the callback with an error.
-    fn finish_with_err(&mut self, cid: u64, err: Error) {
-        debug!("command cid={}, finished with error", cid);
-        let tctx = self.dequeue_task_context(cid);
-
-        SCHED_STAGE_COUNTER_VEC
-            .with_label_values(&[tctx.tag, "error"])
-            .inc();
-
-        let pr = ProcessResult::Failed {
-            err: StorageError::from(err),
-        };
-        execute_callback(tctx.cb, pr);
-
-        self.release_lock(&tctx.lock, cid);
-    }
-
-    /// Event handler for the success of read.
-    ///
-    /// If a next command is present, continues to execute; otherwise, delivers the result to the
-    /// callback.
-    fn on_read_finished(&mut self, cid: u64, pr: ProcessResult, tag: &str) {
-        SCHED_STAGE_COUNTER_VEC
-            .with_label_values(&[tag, "read_finish"])
-            .inc();
-
-        debug!("read command(cid={}) finished", cid);
-        let tctx = self.dequeue_task_context(cid);
-        if let ProcessResult::NextCommand { cmd } = pr {
-            SCHED_STAGE_COUNTER_VEC
-                .with_label_values(&[tag, "next_cmd"])
-                .inc();
-            self.schedule_command(cmd, tctx.cb);
-        } else {
-            execute_callback(tctx.cb, pr);
-        }
-
-        self.release_lock(&tctx.lock, cid);
-    }
-
-    /// Event handler for the success of write.
-    fn on_write_finished(
-        &mut self,
-        cid: u64,
-        pr: ProcessResult,
-        result: EngineResult<()>,
-        tag: &str,
-    ) {
-        SCHED_STAGE_COUNTER_VEC
-            .with_label_values(&[tag, "write_finish"])
-            .inc();
-
-        debug!("write finished for command, cid={}", cid);
-        let tctx = self.dequeue_task_context(cid);
-        let pr = match result {
-            Ok(()) => pr,
-            Err(e) => ProcessResult::Failed {
-                err: ::storage::Error::from(e),
-            },
-        };
-        if let ProcessResult::NextCommand { cmd } = pr {
-            SCHED_STAGE_COUNTER_VEC
-                .with_label_values(&[tag, "next_cmd"])
-                .inc();
-            self.schedule_command(cmd, tctx.cb);
-        } else {
-            execute_callback(tctx.cb, pr);
-        }
-
-        self.release_lock(&tctx.lock, cid);
     }
 
     /// Generates the lock for a command.
@@ -427,9 +373,9 @@ impl<E: Engine> Scheduler<E> {
     ///
     /// Returns `Some(TaskContext)` if successful; returns `None` otherwise.
     fn acquire_lock(&mut self, cid: u64) -> Option<&mut TaskContext> {
-        let tctx = self.task_contexts.get_mut(&cid).unwrap();
-        if self.latches.acquire(&mut tctx.lock, cid) {
-            Some(tctx)
+        let task = self.pending_tasks.get_mut(&cid).unwrap();
+        if self.latches.acquire(&mut task.lock, cid) {
+            Some(self.task_contexts.get_mut(&cid).unwrap())
         } else {
             None
         }
@@ -449,30 +395,23 @@ impl<E: Engine> Runnable<Msg> for Scheduler<E> {
         for msg in msgs.drain(..) {
             match msg {
                 Msg::Quit => {
-                    self.shutdown();
+                    // pools are closed by dropping.
+                    info!("scheduler stopped");
                     return;
                 }
                 Msg::RawCmd { cmd, cb } => self.on_receive_new_cmd(cmd, cb),
-                Msg::ReadFinished { cid, tag, pr } => self.on_read_finished(cid, pr, tag),
-                Msg::WriteFinished {
-                    cid,
-                    tag,
-                    pr,
-                    result,
-                } => self.on_write_finished(cid, pr, result, tag),
-                Msg::FinishedWithErr { cid, err, .. } => self.finish_with_err(cid, err),
+                Msg::Done { cid, lock, .. } => {
+                    self.dequeue_task_context(cid);
+                    self.release_lock(&lock, cid);
+                }
+                Msg::Next {
+                    cid, lock, cmd, cb, ..
+                } => {
+                    self.release_lock(&lock, cid);
+                    self.schedule_command(cmd, cb);
+                }
             }
         }
-    }
-
-    fn shutdown(&mut self) {
-        if let Err(e) = self.worker_pool.stop() {
-            error!("scheduler run err when worker pool stop:{:?}", e);
-        }
-        if let Err(e) = self.high_priority_pool.stop() {
-            error!("scheduler run err when high priority pool stop:{:?}", e);
-        }
-        info!("scheduler stopped");
     }
 }
 
@@ -492,6 +431,18 @@ fn gen_command_lock(latches: &Latches, cmd: &Command) -> Lock {
         Command::Cleanup { ref key, .. } => latches.gen_lock(&[key]),
         Command::Pause { ref keys, .. } => latches.gen_lock(keys),
         _ => Lock::new(vec![]),
+    }
+}
+
+fn notify_scheduler(scheduler: &worker::Scheduler<Msg>, msg: Msg) {
+    match scheduler.schedule(msg) {
+        Ok(_) => (),
+        e @ Err(worker::ScheduleError::Stopped(_)) => {
+            info!("scheduler stopped, {:?}", e);
+        }
+        Err(e) => {
+            panic!("schedule msg failed, err:{:?}", e);
+        }
     }
 }
 
