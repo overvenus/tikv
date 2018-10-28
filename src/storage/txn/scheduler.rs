@@ -39,14 +39,15 @@ use futures::Future;
 use kvproto::kvrpcpb::CommandPri;
 use prometheus::HistogramTimer;
 
-use storage::engine::Statistics;
-use storage::Key;
-use storage::{Command, Engine, Error as StorageError, StorageCb};
-use util::collections::HashMap;
+use storage::{
+    Command, Engine, Error as StorageError, Key, Statistics, StatisticsSummary, StorageCb,
+};
+use util::collections::{HashMap, HashMapEntry};
 use util::config::ReadableSize;
 use util::future::paired_future_callback;
 use util::futurepool::FuturePool;
-use util::worker::{self, Runnable};
+use util::timer::Timer;
+use util::worker::{self, Runnable, RunnableWithTimer};
 
 use super::super::metrics::*;
 use super::latch::{Latches, Lock};
@@ -54,6 +55,7 @@ use super::process::{execute_callback, ProcessResult, Task};
 use super::Error;
 
 pub const CMD_BATCH_SIZE: usize = 256;
+const METRICS_FLUSH_INTERVAL: u64 = 15; // 15s
 
 /// Message types for the scheduler event loop.
 pub enum Msg {
@@ -64,15 +66,17 @@ pub enum Msg {
     },
     Done {
         cid: u64,
+        tag: &'static str,
         lock: Lock,
-        statistics: Option<Statistics>,
+        write_bytes: usize,
+        stats: Option<Statistics>,
     },
     Next {
         cid: u64,
         lock: Lock,
         cmd: Command,
         cb: StorageCb,
-        statistics: Option<Statistics>,
+        stats: Option<Statistics>,
     },
 }
 
@@ -90,40 +94,33 @@ impl Display for Msg {
             Msg::Quit => write!(f, "Quit"),
             Msg::RawCmd { ref cmd, .. } => write!(f, "RawCmd {:?}", cmd),
             Msg::Done { cid, .. } => write!(f, "Done [cid={}]", cid),
-            Msg::Next { cid, .. } => write!(f, "WriteFinished [cid={}]", cid),
+            Msg::Next { cid, .. } => write!(f, "Next [cid={}]", cid),
         }
     }
 }
 
 // It stores context of a task.
-struct TaskContext {
-    write_bytes: usize,
+struct PendingTask {
+    task: Task,
     // How long it waits on latches.
     latch_timer: Option<HistogramTimer>,
-    // Total duration of a command.
-    _cmd_timer: HistogramTimer,
 }
 
-impl TaskContext {
-    fn new(is_write_lock: bool, cmd: &Command) -> TaskContext {
-        let write_bytes =
-            if is_write_lock { cmd.write_bytes() } else { 0 };
-
-        TaskContext {
-            write_bytes,
+impl PendingTask {
+    fn new(task: Task) -> PendingTask {
+        PendingTask {
             latch_timer: Some(
                 SCHED_LATCH_HISTOGRAM_VEC
-                    .with_label_values(&[cmd.tag()])
+                    .with_label_values(&[task.tag])
                     .start_coarse_timer(),
             ),
-            _cmd_timer: SCHED_HISTOGRAM_VEC
-                .with_label_values(&[cmd.tag()])
-                .start_coarse_timer(),
+            task,
         }
     }
 
-    fn on_schedule(&mut self) {
+    fn on_schedule(mut self) -> Task {
         self.latch_timer.take();
+        self.task
     }
 }
 
@@ -131,11 +128,8 @@ impl TaskContext {
 pub struct Scheduler<E: Engine> {
     engine: E,
 
-    // cid -> Task
-    pending_tasks: HashMap<u64, Task>,
-
-    // cid -> TaskContext
-    task_contexts: HashMap<u64, TaskContext>,
+    // cid -> PendingTask
+    pending_tasks: HashMap<u64, PendingTask>,
 
     // actual scheduler to schedule the execution of commands
     scheduler: worker::Scheduler<Msg>,
@@ -158,6 +152,9 @@ pub struct Scheduler<E: Engine> {
 
     // used to control write flow
     running_write_bytes: usize,
+
+    // Statistics for various commands
+    stats: HashMap<&'static str, StatisticsSummary>,
 }
 
 impl<E: Engine> Scheduler<E> {
@@ -171,9 +168,9 @@ impl<E: Engine> Scheduler<E> {
     ) -> Self {
         Scheduler {
             engine,
-            // TODO: GC these two maps.
+            // TODO: GC pending_tasks.
             pending_tasks: Default::default(),
-            task_contexts: Default::default(),
+            stats: Default::default(),
             scheduler,
             id_alloc: 0,
             latches: Latches::new(concurrency),
@@ -196,47 +193,33 @@ impl<E: Engine> Scheduler<E> {
         }
     }
 
+    pub fn new_timer(&self) -> Timer<()> {
+        let mut timer = Timer::new(1);
+        timer.add_task(Duration::from_millis(METRICS_FLUSH_INTERVAL), ());
+        timer
+    }
+
     /// Generates the next command ID.
     fn gen_id(&mut self) -> u64 {
         self.id_alloc += 1;
         self.id_alloc
     }
 
-    fn dequeue_task(&mut self, cid: u64) -> Task {
-        let task = self.pending_tasks.remove(&cid).unwrap();
-        assert_eq!(task.cid, cid);
-        task
-    }
-
     fn enqueue_task(&mut self, task: Task) {
         let cid = task.cid;
+        self.running_write_bytes += task.write_bytes;
 
-        let tctx = {
-            let cmd = task.cmd();
-            let is_write_lock = task.lock.is_write_lock();
-            TaskContext::new(is_write_lock, cmd)
-        };
-
-        self.running_write_bytes += tctx.write_bytes;
-        SCHED_WRITING_BYTES_GAUGE.set(self.running_write_bytes as i64);
-
-        if self.pending_tasks.insert(cid, task).is_some() {
+        let pt = PendingTask::new(task);
+        if self.pending_tasks.insert(cid, pt).is_some() {
             panic!("command cid={} shouldn't exist", cid);
-        }
-        SCHED_CONTEX_GAUGE.set(self.pending_tasks.len() as i64);
-        if self.task_contexts.insert(cid, tctx).is_some() {
-            panic!("TaskContext cid={} shouldn't exist", cid);
         }
     }
 
-    fn dequeue_task_context(&mut self, cid: u64) -> TaskContext {
-        let tctx = self.task_contexts.remove(&cid).unwrap();
-
-        self.running_write_bytes -= tctx.write_bytes;
-        SCHED_WRITING_BYTES_GAUGE.set(self.running_write_bytes as i64);
-        SCHED_CONTEX_GAUGE.set(self.pending_tasks.len() as i64);
-
-        tctx
+    fn collect_statistics(&mut self, tag: &'static str, stats: Option<Statistics>) {
+        if let Some(stats) = stats {
+            let entry = self.stats.entry(tag).or_insert_with(Default::default);
+            entry.add_statistics(&stats);
+        }
     }
 
     pub fn fetch_pool(&self, priority: CommandPri) -> &FuturePool<()> {
@@ -279,14 +262,13 @@ impl<E: Engine> Scheduler<E> {
     /// Tries to acquire all the necessary latches. If all the necessary latches are acquired,
     /// the method initiates a get snapshot operation for furthur processing.
     fn try_to_wake_up(&mut self, cid: u64) {
-        let wake = if let Some(tctx) = self.acquire_lock(cid) {
-            tctx.on_schedule();
-            true
+        let task = if let Some(pending_task) = self.acquire_lock(cid) {
+            Some(pending_task.on_schedule())
         } else {
-            false
+            None
         };
-        if wake {
-            self.get_snapshot(cid);
+        if let Some(task) = task {
+            self.get_snapshot(task)
         }
     }
 
@@ -314,8 +296,8 @@ impl<E: Engine> Scheduler<E> {
 
     /// Initiates an async operation to get a snapshot from the storage engine, then posts a
     /// `SnapshotFinished` message back to the event loop when it finishes.
-    fn get_snapshot(&mut self, cid: u64) {
-        let mut task = self.dequeue_task(cid);
+    fn get_snapshot(&mut self, mut task: Task) {
+        let cid = task.cid;
         let tag = task.tag;
         let ctx = task.context().clone();
 
@@ -339,7 +321,6 @@ impl<E: Engine> Scheduler<E> {
             };
             execute_callback(task.cb.take().unwrap(), pr);
 
-            self.dequeue_task_context(cid);
             self.release_lock(&task.lock, cid);
         } else {
             SCHED_STAGE_COUNTER_VEC
@@ -371,13 +352,16 @@ impl<E: Engine> Scheduler<E> {
 
     /// Tries to acquire all the required latches for a command.
     ///
-    /// Returns `Some(TaskContext)` if successful; returns `None` otherwise.
-    fn acquire_lock(&mut self, cid: u64) -> Option<&mut TaskContext> {
-        let task = self.pending_tasks.get_mut(&cid).unwrap();
-        if self.latches.acquire(&mut task.lock, cid) {
-            Some(self.task_contexts.get_mut(&cid).unwrap())
+    /// Returns `Some(PendingTask)` if successful; returns `None` otherwise.
+    fn acquire_lock(&mut self, cid: u64) -> Option<PendingTask> {
+        if let HashMapEntry::Occupied(mut entry) = self.pending_tasks.entry(cid) {
+            if self.latches.acquire(&mut entry.get_mut().task.lock, cid) {
+                Some(entry.remove())
+            } else {
+                None
+            }
         } else {
-            None
+            panic!("invalid cid {}", cid);
         }
     }
 
@@ -400,18 +384,49 @@ impl<E: Engine> Runnable<Msg> for Scheduler<E> {
                     return;
                 }
                 Msg::RawCmd { cmd, cb } => self.on_receive_new_cmd(cmd, cb),
-                Msg::Done { cid, lock, .. } => {
-                    self.dequeue_task_context(cid);
+                Msg::Done {
+                    cid,
+                    lock,
+                    tag,
+                    stats,
+                    write_bytes,
+                } => {
+                    self.running_write_bytes -= write_bytes;
+                    self.collect_statistics(tag, stats);
                     self.release_lock(&lock, cid);
                 }
                 Msg::Next {
-                    cid, lock, cmd, cb, ..
+                    cid,
+                    lock,
+                    cmd,
+                    cb,
+                    stats,
                 } => {
+                    self.collect_statistics(cmd.tag(), stats);
                     self.release_lock(&lock, cid);
                     self.schedule_command(cmd, cb);
                 }
             }
         }
+    }
+}
+
+impl<E: Engine> RunnableWithTimer<Msg, ()> for Scheduler<E> {
+    fn on_timeout(&mut self, timer: &mut Timer<()>, _: ()) {
+        // TODO: Flush more metrics.
+        for (cmd, stat) in self.stats.drain() {
+            for (cf, details) in stat.stat.details() {
+                for (tag, count) in details {
+                    KV_COMMAND_SCAN_DETAILS
+                        .with_label_values(&[cmd, cf, tag])
+                        .inc_by(count as i64);
+                }
+            }
+        }
+        SCHED_WRITING_BYTES_GAUGE.set(self.running_write_bytes as i64);
+        SCHED_CONTEX_GAUGE.set(self.pending_tasks.len() as i64);
+
+        timer.add_task(Duration::from_secs(METRICS_FLUSH_INTERVAL), ());
     }
 }
 

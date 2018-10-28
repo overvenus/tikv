@@ -19,6 +19,7 @@ use std::u64;
 
 use futures::{Async, Future, Poll};
 use kvproto::kvrpcpb::{CommandPri, Context, LockInfo};
+use prometheus::HistogramTimer;
 
 use storage::engine::{CbContext, Modify, Result as EngineResult};
 use storage::mvcc::{
@@ -91,21 +92,35 @@ pub struct Task {
 
     pub cb: Option<StorageCb>,
     pub cmd: Option<Command>,
+    pub write_bytes: usize,
     ts: u64,
     region_id: u64,
+
+    // Total duration of a command.
+    _cmd_timer: HistogramTimer,
 }
 
 impl Task {
     /// Creates a task for a running command.
     pub fn new(cid: u64, cmd: Command, lock: Lock, callback: StorageCb) -> Task {
+        let tag = cmd.tag();
+        let write_bytes = if lock.is_write_lock() {
+            cmd.write_bytes()
+        } else {
+            0
+        };
         Task {
             cid,
-            tag: cmd.tag(),
+            tag,
             region_id: cmd.get_context().get_region_id(),
             ts: cmd.ts(),
             cb: Some(callback),
             cmd: Some(cmd),
             lock,
+            write_bytes,
+            _cmd_timer: SCHED_HISTOGRAM_VEC
+                .with_label_values(&[tag])
+                .start_coarse_timer(),
         }
     }
 
@@ -140,7 +155,7 @@ impl Task {
             task: self,
             state: Some(ExecState::Done {
                 pr: ProcessResult::Failed { err },
-                statistics: None,
+                stats: None,
             }),
             engine: None,
         }
@@ -160,15 +175,15 @@ enum ExecState<E: Engine> {
     },
     AsyncWrite {
         fut: Box<Future<Item = ProcessResult, Error = ()> + Send + 'static>,
-        statistics: Option<Statistics>,
+        stats: Option<Statistics>,
     },
     Next {
         cmd: Command,
-        statistics: Option<Statistics>,
+        stats: Option<Statistics>,
     },
     Done {
         pr: ProcessResult,
-        statistics: Option<Statistics>,
+        stats: Option<Statistics>,
     },
 }
 
@@ -199,19 +214,16 @@ impl<E: Engine> Future for Execution<E> {
                 ExecState::ProcessWrite { snapshot } => {
                     self.process_write(snapshot);
                 }
-                ExecState::AsyncWrite {
-                    mut fut,
-                    statistics,
-                } => {
+                ExecState::AsyncWrite { mut fut, stats } => {
                     match fut.poll() {
                         Ok(Async::Ready(ProcessResult::NextCommand { cmd })) => {
-                            self.state = Some(ExecState::Next { cmd, statistics });
+                            self.state = Some(ExecState::Next { cmd, stats });
                         }
                         Ok(Async::Ready(pr)) => {
-                            self.state = Some(ExecState::Done { pr, statistics });
+                            self.state = Some(ExecState::Done { pr, stats });
                         }
                         Ok(Async::NotReady) => {
-                            self.state = Some(ExecState::AsyncWrite { fut, statistics });
+                            self.state = Some(ExecState::AsyncWrite { fut, stats });
                             return Ok(Async::NotReady);
                         }
                         Err(_) => {
@@ -221,7 +233,7 @@ impl<E: Engine> Future for Execution<E> {
                         }
                     };
                 }
-                ExecState::Next { cmd, statistics } => {
+                ExecState::Next { cmd, stats } => {
                     SCHED_STAGE_COUNTER_VEC
                         .with_label_values(&[self.task.tag, "next_cmd"])
                         .inc();
@@ -230,15 +242,17 @@ impl<E: Engine> Future for Execution<E> {
                         lock: self.task.lock.clone(),
                         cmd,
                         cb: self.task.cb.take().unwrap(),
-                        statistics,
+                        stats,
                     }));
                 }
-                ExecState::Done { pr, statistics } => {
+                ExecState::Done { pr, stats } => {
                     execute_callback(self.task.cb.take().unwrap(), pr);
                     return Ok(Async::Ready(Msg::Done {
                         lock: self.task.lock.clone(),
                         cid: self.task.cid,
-                        statistics,
+                        tag: self.task.tag,
+                        write_bytes: self.task.write_bytes,
+                        stats,
                     }));
                 }
             }
@@ -278,10 +292,7 @@ impl<E: Engine> Execution<E> {
                 );
 
                 let pr = ProcessResult::Failed { err: err.into() };
-                self.state = Some(ExecState::Done {
-                    pr,
-                    statistics: None,
-                });
+                self.state = Some(ExecState::Done { pr, stats: None });
             }
         }
     }
@@ -303,20 +314,20 @@ impl<E: Engine> Execution<E> {
         let timer = SlowTimer::new();
 
         debug!("process read cmd(cid={}) in worker pool", self.task.cid);
-        let mut statistics = Some(Statistics::default());
+        let mut stats = Some(Statistics::default());
         match process_read_impl(
             self.task.cmd.take().unwrap(),
             snapshot,
-            statistics.as_mut().unwrap(),
+            stats.as_mut().unwrap(),
         ) {
             Ok(ProcessResult::NextCommand { cmd }) => {
-                self.state = Some(ExecState::Next { cmd, statistics });
+                self.state = Some(ExecState::Next { cmd, stats });
             }
-            Ok(pr) => self.state = Some(ExecState::Done { pr, statistics }),
+            Ok(pr) => self.state = Some(ExecState::Done { pr, stats }),
             Err(e) => {
                 self.state = Some(ExecState::Done {
                     pr: ProcessResult::Failed { err: e.into() },
-                    statistics,
+                    stats,
                 })
             }
         }
@@ -348,8 +359,8 @@ impl<E: Engine> Execution<E> {
         let tag = self.task.tag;
         let cid = self.task.cid;
 
-        let mut statistics = Statistics::default();
-        match process_write_impl(self.task.cmd.take().unwrap(), snapshot, &mut statistics) {
+        let mut stats = Statistics::default();
+        match process_write_impl(self.task.cmd.take().unwrap(), snapshot, &mut stats) {
             // Initiates an async write operation on the storage engine, there'll be a `WriteFinished`
             // message when it finishes.
             Ok((ctx, pr, to_be_write, rows)) => {
@@ -359,7 +370,7 @@ impl<E: Engine> Execution<E> {
                 if to_be_write.is_empty() {
                     self.state = Some(ExecState::Done {
                         pr,
-                        statistics: Some(statistics),
+                        stats: Some(stats),
                     })
                 } else {
                     let (cb, fut) = paired_future_callback();
@@ -391,12 +402,12 @@ impl<E: Engine> Execution<E> {
                         error!("engine async_write failed, cid={}, err={:?}", cid, e);
                         self.state = Some(ExecState::Done {
                             pr: ProcessResult::Failed { err: e.into() },
-                            statistics: Some(statistics),
+                            stats: Some(stats),
                         });
                     } else {
                         self.state = Some(ExecState::AsyncWrite {
                             fut: Box::new(fut),
-                            statistics: Some(statistics),
+                            stats: Some(stats),
                         });
                     }
                 }
@@ -411,7 +422,7 @@ impl<E: Engine> Execution<E> {
                 debug!("write command(cid={}) failed at prewrite.", cid);
                 self.state = Some(ExecState::Done {
                     pr: ProcessResult::Failed { err: err.into() },
-                    statistics: Some(statistics),
+                    stats: Some(stats),
                 })
             }
         };
@@ -429,7 +440,7 @@ impl<E: Engine> Execution<E> {
 fn process_read_impl<S: Snapshot>(
     mut cmd: Command,
     snapshot: S,
-    statistics: &mut Statistics,
+    stats: &mut Statistics,
 ) -> Result<ProcessResult> {
     let tag = cmd.tag();
     match cmd {
@@ -443,7 +454,7 @@ fn process_read_impl<S: Snapshot>(
                 ctx.get_isolation_level(),
             );
             let result = find_mvcc_infos_by_key(&mut reader, key, u64::MAX);
-            statistics.add(reader.get_statistics());
+            stats.add(reader.get_statistics());
             let (lock, writes, values) = result?;
             Ok(ProcessResult::MvccKey {
                 mvcc: MvccInfo {
@@ -465,7 +476,7 @@ fn process_read_impl<S: Snapshot>(
             match reader.seek_ts(start_ts)? {
                 Some(key) => {
                     let result = find_mvcc_infos_by_key(&mut reader, &key, u64::MAX);
-                    statistics.add(reader.get_statistics());
+                    stats.add(reader.get_statistics());
                     let (lock, writes, values) = result?;
                     Ok(ProcessResult::MvccStartTs {
                         mvcc: Some((
@@ -498,7 +509,7 @@ fn process_read_impl<S: Snapshot>(
                 ctx.get_isolation_level(),
             );
             let result = reader.scan_locks(start_key.as_ref(), |lock| lock.ts <= max_ts, limit);
-            statistics.add(reader.get_statistics());
+            stats.add(reader.get_statistics());
             let (kv_pairs, _) = result?;
             let mut locks = Vec::with_capacity(kv_pairs.len());
             for (key, lock) in kv_pairs {
@@ -532,7 +543,7 @@ fn process_read_impl<S: Snapshot>(
                 |lock| txn_status.contains_key(&lock.ts),
                 RESOLVE_LOCK_BATCH_SIZE,
             );
-            statistics.add(reader.get_statistics());
+            stats.add(reader.get_statistics());
             let (kv_pairs, has_remain) = result?;
             KV_COMMAND_KEYREAD_HISTOGRAM_VEC
                 .with_label_values(&[tag])
@@ -564,7 +575,7 @@ fn process_read_impl<S: Snapshot>(
 fn process_write_impl<S: Snapshot>(
     cmd: Command,
     snapshot: S,
-    statistics: &mut Statistics,
+    stats: &mut Statistics,
 ) -> Result<(Context, ProcessResult, Vec<Modify>, usize)> {
     let (pr, modifies, rows, ctx) = match cmd {
         Command::Prewrite {
@@ -588,7 +599,7 @@ fn process_write_impl<S: Snapshot>(
                 }
             }
 
-            statistics.add(&txn.take_statistics());
+            stats.add(&txn.take_statistics());
             if locks.is_empty() {
                 let pr = ProcessResult::MultiRes { results: vec![] };
                 let modifies = txn.into_modifies();
@@ -618,7 +629,7 @@ fn process_write_impl<S: Snapshot>(
                 txn.commit(k, commit_ts)?;
             }
 
-            statistics.add(&txn.take_statistics());
+            stats.add(&txn.take_statistics());
             (ProcessResult::Res, txn.into_modifies(), rows, ctx)
         }
         Command::Cleanup {
@@ -627,7 +638,7 @@ fn process_write_impl<S: Snapshot>(
             let mut txn = MvccTxn::new(snapshot, start_ts, !ctx.get_not_fill_cache())?;
             txn.rollback(key)?;
 
-            statistics.add(&txn.take_statistics());
+            stats.add(&txn.take_statistics());
             (ProcessResult::Res, txn.into_modifies(), 1, ctx)
         }
         Command::Rollback {
@@ -642,7 +653,7 @@ fn process_write_impl<S: Snapshot>(
                 txn.rollback(k)?;
             }
 
-            statistics.add(&txn.take_statistics());
+            stats.add(&txn.take_statistics());
             (ProcessResult::Res, txn.into_modifies(), rows, ctx)
         }
         Command::ResolveLock {
@@ -676,7 +687,7 @@ fn process_write_impl<S: Snapshot>(
                 }
                 write_size += txn.write_size();
 
-                statistics.add(&txn.take_statistics());
+                stats.add(&txn.take_statistics());
                 modifies.append(&mut txn.into_modifies());
 
                 if write_size >= MAX_TXN_WRITE_SIZE {
