@@ -183,7 +183,7 @@ impl<E: Engine> Scheduler<E> {
                 || {},
             ),
             high_priority_pool: FuturePool::new(
-                worker_pool_size,
+                1,
                 ReadableSize::mb(10).0 as _,
                 &thd_name!("sched-high-pri-pool"),
                 Duration::from_secs(15),

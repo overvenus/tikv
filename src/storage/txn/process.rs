@@ -12,11 +12,11 @@
 // limitations under the License.
 
 use std::mem;
-use std::result;
 use std::thread;
 use std::time::Duration;
 use std::u64;
 
+use futures::sync::oneshot::Receiver;
 use futures::{Async, Future, Poll};
 use kvproto::kvrpcpb::{CommandPri, Context, LockInfo};
 use prometheus::HistogramTimer;
@@ -162,6 +162,33 @@ impl Task {
     }
 }
 
+struct AsyncWrite {
+    fut: Receiver<(CbContext, EngineResult<()>)>,
+    pr: Option<ProcessResult>,
+    tag: &'static str,
+    rows: usize,
+}
+
+impl Future for AsyncWrite {
+    type Item = ProcessResult;
+    type Error = StorageError;
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        let (_, res) = try_ready!(
+            self.fut
+                .poll()
+                .map_err(|e| StorageError::Other(box_err!(e)))
+        );
+        KV_COMMAND_KEYWRITE_HISTOGRAM_VEC
+            .with_label_values(&[self.tag])
+            .observe(self.rows as f64);
+
+        match res {
+            Ok(()) => Ok(Async::Ready(self.pr.take().unwrap())),
+            Err(e) => Ok(Async::Ready(ProcessResult::Failed { err: e.into() })),
+        }
+    }
+}
+
 enum ExecState<E: Engine> {
     ProcessSnapshot {
         cb_ctx: CbContext,
@@ -174,7 +201,7 @@ enum ExecState<E: Engine> {
         snapshot: E::Snap,
     },
     AsyncWrite {
-        fut: Box<Future<Item = ProcessResult, Error = ()> + Send + 'static>,
+        write: AsyncWrite,
         stats: Option<Statistics>,
     },
     Next {
@@ -214,8 +241,8 @@ impl<E: Engine> Future for Execution<E> {
                 ExecState::ProcessWrite { snapshot } => {
                     self.process_write(snapshot);
                 }
-                ExecState::AsyncWrite { mut fut, stats } => {
-                    match fut.poll() {
+                ExecState::AsyncWrite { mut write, stats } => {
+                    match write.poll() {
                         Ok(Async::Ready(ProcessResult::NextCommand { cmd })) => {
                             self.state = Some(ExecState::Next { cmd, stats });
                         }
@@ -223,13 +250,12 @@ impl<E: Engine> Future for Execution<E> {
                             self.state = Some(ExecState::Done { pr, stats });
                         }
                         Ok(Async::NotReady) => {
-                            self.state = Some(ExecState::AsyncWrite { fut, stats });
+                            self.state = Some(ExecState::AsyncWrite { write, stats });
                             return Ok(Async::NotReady);
                         }
-                        Err(_) => {
-                            unimplemented!()
-                            // let pr = ProcessResult::Failed { err: e.into() };
-                            // return Ok(Async::Ready((pr, None)));
+                        Err(e) => {
+                            let pr = ProcessResult::Failed { err: e.into() };
+                            self.state = Some(ExecState::Done { pr, stats });
                         }
                     };
                 }
@@ -375,20 +401,12 @@ impl<E: Engine> Execution<E> {
                 } else {
                     let (cb, fut) = paired_future_callback();
                     // The callback to receive async results of write prepare from the storage engine.
-                    let fut = fut.then(
-                        move |res: result::Result<(CbContext, EngineResult<()>), _>| {
-                            KV_COMMAND_KEYWRITE_HISTOGRAM_VEC
-                                .with_label_values(&[tag])
-                                .observe(rows as f64);
-
-                            let pr = match res {
-                                Ok((_, Ok(()))) => pr,
-                                Ok((_, Err(e))) => ProcessResult::Failed { err: e.into() },
-                                Err(e) => ProcessResult::Failed { err: box_err!(e) },
-                            };
-                            Ok(pr)
-                        },
-                    );
+                    let write = AsyncWrite {
+                        fut,
+                        pr: Some(pr),
+                        tag,
+                        rows,
+                    };
 
                     if let Err(e) = self
                         .engine
@@ -406,7 +424,7 @@ impl<E: Engine> Execution<E> {
                         });
                     } else {
                         self.state = Some(ExecState::AsyncWrite {
-                            fut: Box::new(fut),
+                            write,
                             stats: Some(stats),
                         });
                     }
