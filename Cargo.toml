@@ -134,6 +134,10 @@ branch = "dev"
 features = ["profiling"]
 optional = true
 
+[replace]
+"grpcio:0.4.0" = { git = "https://github.com/pingcap/grpc-rs.git", branch = "upgrade-1.17.0" }
+"grpcio-sys:0.4.0" = { git = "https://github.com/pingcap/grpc-rs.git", branch = "upgrade-1.17.0" }
+
 [dev-dependencies]
 test_util = { path = "components/test_util" }
 test_raftstore = { path = "components/test_raftstore" }
