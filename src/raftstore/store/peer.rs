@@ -2156,6 +2156,7 @@ impl ReadExecutor {
         region: &metapb::Region,
         read_index: Option<u64>,
     ) -> ReadResponse {
+        debug!("[region {}] handle msg {:?} with read index {:?}", region.get_id(), msg, read_index);
         if self.check_epoch {
             if let Err(e) = check_region_epoch(msg, region, true) {
                 debug!("[region {}] stale epoch err: {:?}", region.get_id(), e);
