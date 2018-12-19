@@ -13,6 +13,7 @@
 
 #![crate_type = "lib"]
 #![cfg_attr(test, feature(test))]
+#![feature(label_break_value)]
 #![feature(try_from)]
 #![feature(fnbox)]
 #![feature(alloc)]
@@ -27,6 +28,7 @@
 #![feature(const_int_ops)]
 #![feature(use_extern_macros)]
 #![recursion_limit = "200"]
+#![feature(range_contains)]
 // Currently this raises some false positives, so we allow it:
 // https://github.com/rust-lang-nursery/rust-clippy/issues/2638
 #![cfg_attr(feature = "cargo-clippy", allow(nonminimal_bool))]
@@ -40,8 +42,6 @@ extern crate chrono;
 extern crate chrono_tz;
 extern crate crc;
 extern crate crossbeam;
-#[macro_use]
-extern crate crossbeam_channel;
 extern crate crypto;
 #[macro_use]
 extern crate fail;
@@ -50,8 +50,8 @@ extern crate fs2;
 #[macro_use]
 extern crate futures;
 extern crate futures_cpupool;
-extern crate fxhash;
 extern crate grpcio as grpc;
+extern crate hashbrown;
 extern crate hex;
 extern crate indexmap;
 extern crate kvproto;
@@ -64,6 +64,7 @@ extern crate log;
 extern crate mio;
 extern crate murmur3;
 extern crate num;
+extern crate num_traits;
 #[macro_use]
 extern crate prometheus;
 extern crate prometheus_static_metric;
@@ -102,6 +103,7 @@ extern crate tempdir;
 extern crate test;
 extern crate time;
 extern crate tipb;
+extern crate tokio;
 extern crate tokio_core;
 extern crate tokio_timer;
 #[cfg(test)]
@@ -113,7 +115,14 @@ extern crate uuid;
 extern crate zipf;
 #[macro_use]
 extern crate derive_more;
+extern crate safemem;
+extern crate smallvec;
+#[macro_use]
+extern crate more_asserts;
+extern crate base64;
 
+extern crate cop_datatype;
+extern crate flate2;
 extern crate panic_hook;
 
 #[macro_use]

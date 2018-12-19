@@ -52,7 +52,7 @@ use raftstore::store::peer_storage::{
 use raftstore::store::util::check_region_epoch;
 use raftstore::store::{cmd_resp, keys, util, Engines, Store};
 use raftstore::{Error, Result};
-use storage::{ALL_CFS, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE};
+use storage::{ALL_CFS, CF_DEFAULT, CF_RAFT, CF_WRITE};
 use util::collections::HashMap;
 use util::time::{duration_to_sec, Instant, SlowTimer};
 use util::worker::Runnable;
@@ -1080,13 +1080,15 @@ impl ApplyDelegate {
         request: &AdminRequest,
     ) -> Result<(RaftCmdResponse, Option<ExecResult>)> {
         let cmd_type = request.get_cmd_type();
-        info!(
-            "{} execute admin command {:?} at [term: {}, index: {}]",
-            self.tag,
-            request,
-            ctx.exec_ctx.as_ref().unwrap().term,
-            ctx.exec_ctx.as_ref().unwrap().index
-        );
+        if cmd_type != AdminCmdType::CompactLog {
+            info!(
+                "{} execute admin command {:?} at [term: {}, index: {}]",
+                self.tag,
+                request,
+                ctx.exec_ctx.as_ref().unwrap().term,
+                ctx.exec_ctx.as_ref().unwrap().index
+            );
+        }
 
         let (mut response, exec_result) = match cmd_type {
             AdminCmdType::ChangePeer => self.exec_change_peer(ctx, request),
@@ -1345,9 +1347,9 @@ impl ApplyDelegate {
             }
             if req.get_new_peer_ids().len() != derived.get_peers().len() {
                 return Err(box_err!(
-                    "invalid new peer id count, need {}, but got {}",
-                    derived.get_peers().len(),
-                    req.get_new_peer_ids().len()
+                    "invalid new peer id count, need {:?}, but got {:?}",
+                    derived.get_peers(),
+                    req.get_new_peer_ids()
                 ));
             }
             keys.push_back(split_key.to_vec());
@@ -1949,16 +1951,8 @@ impl ApplyDelegate {
             });
 
         // Delete all remaining keys.
-        // If it's not CF_LOCK and use_delete_range is false, skip this step to speed up (#3034)
-        // TODO: Remove the `if` line after apply pool is implemented
-        if cf == CF_LOCK || use_delete_range {
-            util::delete_all_in_range_cf(
-                &self.engines.kv,
-                cf,
-                &start_key,
-                &end_key,
-                use_delete_range,
-            ).unwrap_or_else(|e| {
+        util::delete_all_in_range_cf(&self.engines.kv, cf, &start_key, &end_key, use_delete_range)
+            .unwrap_or_else(|e| {
                 panic!(
                     "{} failed to delete all in range [{}, {}), cf: {}, err: {:?}",
                     self.tag,
@@ -1968,7 +1962,6 @@ impl ApplyDelegate {
                     e
                 );
             });
-        }
 
         ranges.push(Range::new(cf.to_owned(), start_key, end_key));
 
@@ -2254,7 +2247,7 @@ pub struct ApplyRes {
 
 #[derive(Debug)]
 pub enum TaskRes {
-    Applys(Vec<ApplyRes>),
+    Applies(Vec<ApplyRes>),
     Destroy(ApplyDelegate),
 }
 
@@ -2535,7 +2528,7 @@ impl Runner {
             // To apply pending entries as soon as possible, we should kick it.
             self.handle_applies(ApplyTask::Kick(region_id));
         }
-        self.notifier.send(TaskRes::Applys(apply_res)).unwrap();
+        self.notifier.send(TaskRes::Applies(apply_res)).unwrap();
     }
 
     fn handle_proposals(&mut self, proposals: Vec<RegionProposal>) {
@@ -2879,7 +2872,7 @@ mod tests {
             vec![new_entry(5, 4, None)],
         )]));
         let res = match rx.try_recv() {
-            Ok(TaskRes::Applys(res)) => res,
+            Ok(TaskRes::Applies(res)) => res,
             e => panic!("unexpected apply result: {:?}", e),
         };
         assert_eq!(res.len(), 1);
