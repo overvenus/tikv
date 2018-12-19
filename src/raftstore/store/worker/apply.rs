@@ -1782,7 +1782,7 @@ impl ApplyDelegate {
                 // Don't panic here in case there are old entries need to be applied.
                 // It's also safe to skip them here, because a restart must have happened,
                 // hence there is no callback to be called.
-                CmdType::Snap | CmdType::Get => {
+                CmdType::Snap | CmdType::Get | CmdType::ReadIndex => {
                     warn!("{} skip readonly command: {:?}", self.tag, req);
                     continue;
                 }

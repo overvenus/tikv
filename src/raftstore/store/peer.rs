@@ -21,8 +21,8 @@ use std::{cmp, mem, slice, u64};
 use kvproto::metapb;
 use kvproto::pdpb::PeerStats;
 use kvproto::raft_cmdpb::{
-    self, AdminCmdType, AdminResponse, CmdType, RaftCmdRequest, RaftCmdResponse, Request, Response,
-    TransferLeaderRequest, TransferLeaderResponse,
+    self, AdminCmdType, AdminResponse, CmdType, RaftCmdRequest, RaftCmdResponse, ReadIndexResponse,
+    Request, Response, TransferLeaderRequest, TransferLeaderResponse,
 };
 use kvproto::raft_serverpb::{MergeState, PeerState, RaftApplyState, RaftMessage};
 use protobuf::{self, Message};
@@ -64,6 +64,7 @@ struct ReadIndexRequest {
     id: u64,
     cmds: MustConsumeVec<(RaftCmdRequest, Callback)>,
     renew_lease_time: Timespec,
+    read_index: Option<u64>,
 }
 
 impl ReadIndexRequest {
@@ -1106,15 +1107,16 @@ impl Peer {
                 let mut read = self.pending_reads.reads.pop_front().unwrap();
                 assert_eq!(state.request_ctx.as_slice(), read.binary_id());
                 for (req, cb) in read.cmds.drain(..) {
-                    cb.invoke_read(self.handle_read(req, true));
+                    cb.invoke_read(self.handle_read(req, true, Some(state.index)));
                 }
                 propose_time = Some(read.renew_lease_time);
             }
         } else {
             for state in &ready.read_states {
-                let read = &self.pending_reads.reads[self.pending_reads.ready_cnt];
+                let read = &mut self.pending_reads.reads[self.pending_reads.ready_cnt];
                 assert_eq!(state.request_ctx.as_slice(), read.binary_id());
                 self.pending_reads.ready_cnt += 1;
+                read.read_index = Some(state.index);
                 propose_time = Some(read.renew_lease_time);
             }
         }
@@ -1196,7 +1198,7 @@ impl Peer {
             for _ in 0..self.pending_reads.ready_cnt {
                 let mut read = self.pending_reads.reads.pop_front().unwrap();
                 for (req, cb) in read.cmds.drain(..) {
-                    cb.invoke_read(self.handle_read(req, true));
+                    cb.invoke_read(self.handle_read(req, true, read.read_index));
                 }
             }
             self.pending_reads.ready_cnt = 0;
@@ -1367,7 +1369,7 @@ impl Peer {
         match policy {
             Ok(RequestPolicy::ReadLocal) => {
                 metrics.local_read += 1;
-                Some(self.handle_read(req, false))
+                Some(self.handle_read(req, false, None))
             }
             // require to propose again, and use the `propose` above.
             Ok(RequestPolicy::ReadIndex) => None,
@@ -1530,7 +1532,7 @@ impl Peer {
 
     fn read_local(&mut self, req: RaftCmdRequest, cb: Callback, metrics: &mut RaftProposeMetrics) {
         metrics.local_read += 1;
-        cb.invoke_read(self.handle_read(req, false))
+        cb.invoke_read(self.handle_read(req, false, None))
     }
 
     fn pre_read_index(&self) -> Result<()> {
@@ -1602,6 +1604,7 @@ impl Peer {
             id,
             cmds,
             renew_lease_time,
+            read_index: None,
         });
 
         // TimeoutNow has been sent out, so we need to propose explicitly to
@@ -1828,12 +1831,17 @@ impl Peer {
         Ok(propose_index)
     }
 
-    fn handle_read(&mut self, req: RaftCmdRequest, check_epoch: bool) -> ReadResponse {
+    fn handle_read(
+        &mut self,
+        req: RaftCmdRequest,
+        check_epoch: bool,
+        read_index: Option<u64>,
+    ) -> ReadResponse {
         let mut resp = ReadExecutor::new(
             self.engines.kv.clone(),
             check_epoch,
             false, /* we don't need snapshot time */
-        ).execute(&req, self.region());
+        ).execute(&req, self.region(), read_index);
 
         cmd_resp::bind_term(&mut resp.response, self.term());
         resp
@@ -1994,7 +2002,7 @@ pub trait RequestInspector {
         let mut has_write = false;
         for r in req.get_requests() {
             match r.get_cmd_type() {
-                CmdType::Get | CmdType::Snap => has_read = true,
+                CmdType::Get | CmdType::Snap | CmdType::ReadIndex => has_read = true,
                 CmdType::Delete | CmdType::Put | CmdType::DeleteRange | CmdType::IngestSST => {
                     has_write = true
                 }
@@ -2142,7 +2150,12 @@ impl ReadExecutor {
         Ok(resp)
     }
 
-    pub fn execute(&mut self, msg: &RaftCmdRequest, region: &metapb::Region) -> ReadResponse {
+    pub fn execute(
+        &mut self,
+        msg: &RaftCmdRequest,
+        region: &metapb::Region,
+        read_index: Option<u64>,
+    ) -> ReadResponse {
         if self.check_epoch {
             if let Err(e) = check_region_epoch(msg, region, true) {
                 debug!("[region {}] stale epoch err: {:?}", region.get_id(), e);
@@ -2176,6 +2189,17 @@ impl ReadExecutor {
                 CmdType::Snap => {
                     need_snapshot = true;
                     raft_cmdpb::Response::new()
+                }
+                CmdType::ReadIndex => {
+                    let mut resp = raft_cmdpb::Response::new();
+                    if let Some(read_index) = read_index {
+                        let mut res = ReadIndexResponse::new();
+                        res.set_read_index(read_index);
+                        resp.set_read_index(res);
+                    } else {
+                        panic!("[region {}] can not get readindex", region.get_id(),);
+                    }
+                    resp
                 }
                 CmdType::Prewrite
                 | CmdType::Put
