@@ -165,9 +165,16 @@ impl Simulator for ServerCluster {
         });
         let cop = coprocessor::Endpoint::new(&server_cfg, store.get_engine(), cop_read_pool);
         let mut server = None;
+        let env = Arc::new(
+            EnvBuilder::new()
+                .cq_count(server_cfg.grpc_concurrency)
+                .name_prefix(thd_name!("grpc-server"))
+                .build(),
+        );
         for _ in 0..100 {
             server = Some(Server::new(
                 &server_cfg,
+                env.clone(),
                 &security_mgr,
                 store.clone(),
                 cop.clone(),
