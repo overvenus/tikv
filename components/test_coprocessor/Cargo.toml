@@ -10,8 +10,8 @@ test_storage = { path = "../test_storage" }
 futures = "0.1"
 
 [dependencies.kvproto]
-git = "https://github.com/nolouch/kvproto.git"
-branch = "ov/read-index"
+git = "https://github.com/pingcap/kvproto.git"
+branch = "ov/engine"
 
 [dependencies.tipb]
 git = "https://github.com/pingcap/tipb.git"
