@@ -25,7 +25,8 @@ use kvproto::import_sstpb::SSTMeta;
 use kvproto::metapb;
 use kvproto::pdpb::CheckPolicy;
 use kvproto::raft_cmdpb::{
-    AdminCmdType, AdminRequest, RaftCmdRequest, RaftCmdResponse, StatusCmdType, StatusResponse,
+    AdminCmdType, AdminRequest, CmdType, RaftCmdRequest, RaftCmdResponse, StatusCmdType,
+    StatusResponse,
 };
 use kvproto::raft_serverpb::{
     MergeState, PeerState, RaftMessage, RaftSnapshotData, RaftTruncatedState, RegionLocalState,
@@ -201,6 +202,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
     }
 
     pub fn on_raft_message(&mut self, mut msg: RaftMessage) -> Result<()> {
+        debug!("on raft message {:?}", msg);
         if !self.validate_raft_msg(&msg) {
             return Ok(());
         }
@@ -1526,8 +1528,10 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                 return Err(Error::RegionNotFound(region_id));
             }
         };
-
-        if !peer.is_leader() {
+        let request = msg.get_requests();
+        if !peer.is_leader()
+            && !(request.len() == 1 && request[0].get_cmd_type() == CmdType::ReadIndex)
+        {
             self.raft_metrics.invalid_proposal.not_leader += 1;
             return Err(Error::NotLeader(
                 region_id,

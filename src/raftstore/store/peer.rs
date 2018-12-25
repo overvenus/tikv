@@ -97,6 +97,26 @@ impl ReadIndexQueue {
         }
     }
 
+    fn advance(&mut self, id: &[u8], read_index: u64) {
+        if let Some(i) = self.reads.iter().position(|x| x.binary_id() == id) {
+            for pos in 0..=i {
+                let req = &mut self.reads[pos];
+                let index = req.read_index.get_or_insert(read_index);
+                if *index > read_index {
+                    *index = read_index;
+                }
+            }
+            if self.ready_cnt < i + 1 {
+                self.ready_cnt = i + 1;
+            }
+        } else {
+            error!(
+                "cannot find corresponding read from pending reads: {:?}, read_index: {}",
+                id, read_index
+            );
+        }
+    }
+
     fn gc(&mut self) {
         if self.reads.capacity() > SHRINK_CACHE_CAPACITY && self.reads.len() < SHRINK_CACHE_CAPACITY
         {
@@ -1130,10 +1150,46 @@ impl Peer {
         self.proposals.gc();
     }
 
+    fn post_pending_reads(&mut self) {
+        if self.pending_reads.ready_cnt > 0 {
+            for _ in 0..self.pending_reads.ready_cnt {
+                let (read_index, is_read_index_request) = {
+                    let read = self.pending_reads.reads.front().unwrap();
+                    if read.cmds.len() == 1
+                        && read.cmds[0].0.get_requests().len() == 1
+                        && read.cmds[0].0.get_requests()[0].get_cmd_type() == CmdType::ReadIndex
+                    {
+                        (read.read_index, true)
+                    } else {
+                        (read.read_index, false)
+                    }
+                };
+
+                if !self.ready_to_handle_read() && !is_read_index_request {
+                    break;
+                }
+                let mut read = self.pending_reads.reads.pop_front().unwrap();
+                for (req, cb) in read.cmds.drain(..) {
+                    cb.invoke_read(self.handle_read(req, true, read_index));
+                }
+                self.pending_reads.ready_cnt -= 1;
+            }
+        }
+    }
+
     fn apply_reads(&mut self, ready: &Ready) {
         let mut propose_time = None;
+        if !self.is_leader() {
+            for state in &ready.read_states {
+                self.pending_reads
+                    .advance(state.request_ctx.as_slice(), state.index);
+                self.post_pending_reads();
+            }
+            return;
+        }
         if self.ready_to_handle_read() {
             for state in &ready.read_states {
+                debug!("got read {:?}", state);
                 let mut read = self.pending_reads.reads.pop_front().unwrap();
                 assert_eq!(state.request_ctx.as_slice(), read.binary_id());
                 for (req, cb) in read.cmds.drain(..) {
@@ -1149,6 +1205,10 @@ impl Peer {
                 read.read_index = Some(state.index);
                 propose_time = Some(read.renew_lease_time);
             }
+            debug!(
+                "not ready to handle read {}",
+                self.pending_reads.reads.len()
+            );
         }
 
         // Note that only after handle read_states can we identify what requests are
@@ -1223,15 +1283,18 @@ impl Peer {
         if self.has_pending_snapshot() && self.ready_to_handle_pending_snap() {
             self.mark_to_be_checked(groups);
         }
-
-        if self.pending_reads.ready_cnt > 0 && self.ready_to_handle_read() {
-            for _ in 0..self.pending_reads.ready_cnt {
-                let mut read = self.pending_reads.reads.pop_front().unwrap();
-                for (req, cb) in read.cmds.drain(..) {
-                    cb.invoke_read(self.handle_read(req, true, read.read_index));
+        if !self.is_leader() {
+            self.post_pending_reads()
+        } else {
+            if self.pending_reads.ready_cnt > 0 && self.ready_to_handle_read() {
+                for _ in 0..self.pending_reads.ready_cnt {
+                    let mut read = self.pending_reads.reads.pop_front().unwrap();
+                    for (req, cb) in read.cmds.drain(..) {
+                        cb.invoke_read(self.handle_read(req, true, read.read_index));
+                    }
                 }
+                self.pending_reads.ready_cnt = 0;
             }
-            self.pending_reads.ready_cnt = 0;
         }
         self.pending_reads.gc();
 
@@ -1336,6 +1399,7 @@ impl Peer {
         let is_urgent = is_request_urgent(&req);
 
         let policy = self.inspect(&req);
+        debug!("got policy {:?} for req {:?}", policy, req);
         let res = match policy {
             Ok(RequestPolicy::ReadLocal) => {
                 self.read_local(req, cb, metrics);
@@ -1609,10 +1673,13 @@ impl Peer {
         metrics.read_index += 1;
 
         let renew_lease_time = monotonic_raw_now();
-        if let Some(read) = self.pending_reads.reads.back_mut() {
-            if read.renew_lease_time + self.cfg.raft_store_max_leader_lease() > renew_lease_time {
-                read.cmds.push((req, cb));
-                return false;
+        if self.is_leader() {
+            if let Some(read) = self.pending_reads.reads.back_mut() {
+                if read.renew_lease_time + self.cfg.raft_store_max_leader_lease() > renew_lease_time
+                {
+                    read.cmds.push((req, cb));
+                    return false;
+                }
             }
         }
 
@@ -1630,8 +1697,10 @@ impl Peer {
 
         if pending_read_count == last_pending_read_count
             && ready_read_count == last_ready_read_count
+            && self.is_leader()
         {
             // The message gets dropped silently, can't be handled anymore.
+            debug!("drop the statle read {:?}", ctx);
             apply::notify_stale_req(self.term(), cb);
             return false;
         }
@@ -1644,7 +1713,11 @@ impl Peer {
             renew_lease_time,
             read_index: None,
         });
-
+        debug!(
+            "start read index queue {}, and new ctx {:?}",
+            self.pending_reads.reads.len(),
+            ctx
+        );
         // TimeoutNow has been sent out, so we need to propose explicitly to
         // update leader lease.
         if self.leader_lease.inspect(Some(renew_lease_time)) == LeaseState::Suspect {
@@ -1875,6 +1948,10 @@ impl Peer {
         check_epoch: bool,
         read_index: Option<u64>,
     ) -> ReadResponse {
+        debug!(
+            "begin to handle read for req {:?}, read_index {:?}",
+            req, read_index
+        );
         let mut resp = ReadExecutor::new(
             self.engines.kv.clone(),
             check_epoch,
@@ -2194,7 +2271,12 @@ impl ReadExecutor {
         region: &metapb::Region,
         read_index: Option<u64>,
     ) -> ReadResponse {
-        debug!("[region {}] handle msg {:?} with read index {:?}", region.get_id(), msg, read_index);
+        debug!(
+            "[region {}] handle msg {:?} with read index {:?}",
+            region.get_id(),
+            msg,
+            read_index
+        );
         if self.check_epoch {
             if let Err(e) = check_region_epoch(msg, region, true) {
                 debug!("[region {}] stale epoch err: {:?}", region.get_id(), e);
@@ -2261,6 +2343,7 @@ impl ReadExecutor {
         } else {
             None
         };
+        debug!("[region {}] got response {:?}", region.get_id(), response);
         ReadResponse { response, snapshot }
     }
 }
