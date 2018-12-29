@@ -94,7 +94,6 @@ bitflags = "1.0.1"
 fail = "0.2"
 uuid = { version = "0.6", features = [ "serde", "v4" ] }
 grpcio = { version = "0.4", features = [ "secure" ] }
-raft = "0.4"
 crossbeam = "0.5"
 derive_more = "0.11.0"
 num = "0.2"
@@ -115,9 +114,13 @@ git = "https://github.com/pingcap/murmur3.git"
 [dependencies.rocksdb]
 git = "https://github.com/pingcap/rust-rocksdb.git"
 
+[dependencies.raft]
+git = "https://github.com/nolouch/raft-rs.git"
+branch = "fix-read-index"
+
 [dependencies.kvproto]
-git = "https://github.com/pingcap/kvproto.git"
-branch = "ov/engine"
+git = "https://github.com/nolouch/kvproto.git"
+branch = "ov/update-raft"
 
 [dependencies.tipb]
 git = "https://github.com/pingcap/tipb.git"

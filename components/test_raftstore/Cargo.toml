@@ -7,16 +7,19 @@ publish = false
 tikv = { path = "../../" }
 protobuf = "~2.0"
 tempdir = "0.3"
-raft = "0.4"
 futures = "0.1"
 tokio-timer = "0.2"
 grpcio = { version = "0.4", features = [ "secure" ] }
 rand = "0.3"
 log = "0.3.9"
 
+[dependencies.raft]
+git = "https://github.com/nolouch/raft-rs.git"
+branch = "fix-read-index"
+
 [dependencies.kvproto]
-git = "https://github.com/pingcap/kvproto.git"
-branch = "ov/engine"
+git = "https://github.com/nolouch/kvproto.git"
+branch = "ov/update-raft"
 
 [dependencies.rocksdb]
 git = "https://github.com/pingcap/rust-rocksdb.git"
