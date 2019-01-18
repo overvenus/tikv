@@ -14,7 +14,7 @@
 use std::fmt::{self, Debug, Display, Formatter};
 use std::io::Error as IoError;
 use std::result;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kvproto::errorpb;
 use kvproto::kvrpcpb::Context;
@@ -31,6 +31,8 @@ use super::{
 use raftstore::errors::Error as RaftServerError;
 use raftstore::store::engine::IterOption;
 use raftstore::store::engine::Peekable;
+use raftstore::store::fsm::RaftRouter;
+use raftstore::store::LocalReader;
 use raftstore::store::{Callback as StoreCallback, ReadResponse, WriteResponse};
 use raftstore::store::{RegionIterator, RegionSnapshot};
 use rocksdb::TablePropertiesCollection;
@@ -118,6 +120,7 @@ impl From<RaftServerError> for engine::Error {
 #[derive(Clone)]
 pub struct RaftKv<S: RaftStoreRouter + 'static> {
     router: S,
+    reader: LocalReader<RaftRouter>,
 }
 
 pub enum CmdRes {
@@ -170,8 +173,8 @@ fn on_read_result(mut read_resp: ReadResponse, req_cnt: usize) -> (CbContext, Re
 
 impl<S: RaftStoreRouter> RaftKv<S> {
     /// Create a RaftKv using specified configuration.
-    pub fn new(router: S) -> RaftKv<S> {
-        RaftKv { router }
+    pub fn new(router: S, reader: LocalReader<RaftRouter>) -> RaftKv<S> {
+        RaftKv { router, reader }
     }
 
     fn new_request_header(&self, ctx: &Context) -> RaftRequestHeader {
@@ -198,15 +201,15 @@ impl<S: RaftStoreRouter> RaftKv<S> {
         cmd.set_header(header);
         cmd.set_requests(RepeatedField::from_vec(reqs));
 
-        self.router
-            .send_command(
-                cmd,
-                StoreCallback::Read(box move |resp| {
-                    let (cb_ctx, res) = on_read_result(resp, len);
-                    cb((cb_ctx, res.map_err(Error::into)));
-                }),
-            )
-            .map_err(From::from)
+        self.reader.propose_raft_command(
+            cmd,
+            StoreCallback::Read(box move |resp| {
+                let (cb_ctx, res) = on_read_result(resp, len);
+                cb((cb_ctx, res.map_err(Error::into)));
+            }),
+            Instant::now(),
+        );
+        Ok(())
     }
 
     fn exec_write_requests(

@@ -35,6 +35,7 @@ use pd::{PdClient, PdRunner, PdTask};
 use raftstore::coprocessor::split_observer::SplitObserver;
 use raftstore::coprocessor::{CoprocessorHost, RegionChangeEvent};
 use raftstore::store::util::is_initial_msg;
+use raftstore::store::ReadDelegate;
 use raftstore::Result;
 use storage::{CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE};
 use util::collections::{HashMap, HashSet};
@@ -85,6 +86,7 @@ pub struct StoreMeta {
     pub region_ranges: BTreeMap<Vec<u8>, u64>,
     // region_id -> region
     pub regions: HashMap<u64, Region>,
+    pub readers: HashMap<u64, ReadDelegate>,
     // A marker used to indicate if the peer of a region is going to apply a snapshot
     // with different range.
     // It assumes that when a peer is going to accept snapshot, it can never
@@ -98,10 +100,11 @@ pub struct StoreMeta {
 }
 
 impl StoreMeta {
-    fn new(vote_capacity: usize) -> StoreMeta {
+    pub fn new(vote_capacity: usize) -> StoreMeta {
         StoreMeta {
             region_ranges: BTreeMap::default(),
             regions: HashMap::default(),
+            readers: HashMap::new(),
             pending_cross_snap: HashMap::default(),
             pending_votes: RingQueue::with_capacity(vote_capacity),
             pending_snapshot_regions: Vec::default(),
@@ -113,7 +116,6 @@ impl StoreMeta {
     pub fn set_region(
         &mut self,
         host: &CoprocessorHost,
-        reader: &Scheduler<ReadTask>,
         region: Region,
         peer: &mut ::raftstore::store::Peer,
     ) {
@@ -122,6 +124,7 @@ impl StoreMeta {
             // TODO: may not be a good idea to panic when holding a lock.
             panic!("{} region corrupted", peer.tag);
         }
+        let reader = self.readers.get_mut(&region.get_id()).unwrap();
         peer.set_region(host, reader, region);
     }
 }
@@ -238,7 +241,6 @@ pub struct PollContext<T, C: 'static> {
     pub consistency_check_scheduler: Scheduler<ConsistencyCheckTask>,
     pub split_check_scheduler: Scheduler<SplitCheckTask>,
     pub cleanup_sst_scheduler: Scheduler<CleanupSSTTask>,
-    pub local_reader: Scheduler<ReadTask>,
     pub region_scheduler: Scheduler<RegionTask>,
     pub apply_router: ApplyRouter,
     pub router: RaftRouter,
@@ -678,7 +680,6 @@ pub struct RaftPollerBuilder<T, C> {
     consistency_check_scheduler: Scheduler<ConsistencyCheckTask>,
     split_check_scheduler: Scheduler<SplitCheckTask>,
     cleanup_sst_scheduler: Scheduler<CleanupSSTTask>,
-    local_reader: Scheduler<ReadTask>,
     region_scheduler: Scheduler<RegionTask>,
     apply_router: ApplyRouter,
     pub router: RaftRouter,
@@ -872,7 +873,6 @@ where
             consistency_check_scheduler: self.consistency_check_scheduler.clone(),
             split_check_scheduler: self.split_check_scheduler.clone(),
             cleanup_sst_scheduler: self.cleanup_sst_scheduler.clone(),
-            local_reader: self.local_reader.clone(),
             region_scheduler: self.region_scheduler.clone(),
             apply_router: self.apply_router.clone(),
             router: self.router.clone(),
@@ -919,7 +919,6 @@ struct Workers {
     consistency_check_worker: Worker<ConsistencyCheckTask>,
     split_check_worker: Worker<SplitCheckTask>,
     cleanup_sst_worker: Worker<CleanupSSTTask>,
-    local_reader: Worker<ReadTask>,
     region_worker: Worker<RegionTask>,
     compact_worker: Worker<CompactTask>,
     coprocessor_host: Arc<CoprocessorHost>,
@@ -948,7 +947,7 @@ impl RaftBatchSystem {
         pd_client: Arc<C>,
         mgr: SnapManager,
         pd_worker: FutureWorker<PdTask>,
-        local_reader: Worker<ReadTask>,
+        store_meta: Arc<Mutex<StoreMeta>>,
         mut coprocessor_host: CoprocessorHost,
         importer: Arc<SSTImporter>,
     ) -> Result<()> {
@@ -967,7 +966,6 @@ impl RaftBatchSystem {
             raftlog_gc_worker: Worker::new("raft-gc-worker"),
             compact_worker: Worker::new("compact-worker"),
             pd_worker,
-            local_reader,
             consistency_check_worker: Worker::new("consistency-check"),
             cleanup_sst_worker: Worker::new("cleanup-sst"),
             coprocessor_host: Arc::new(coprocessor_host),
@@ -989,14 +987,13 @@ impl RaftBatchSystem {
             consistency_check_scheduler: workers.consistency_check_worker.scheduler(),
             cleanup_sst_scheduler: workers.cleanup_sst_worker.scheduler(),
             apply_router: self.apply_router.clone(),
-            local_reader: workers.local_reader.scheduler(),
             trans,
             pd_client,
             coprocessor_host: workers.coprocessor_host.clone(),
             importer,
             snap_mgr: mgr,
             global_stat: GlobalStoreStat::default(),
-            store_meta: Arc::new(Mutex::new(StoreMeta::new(PENDING_VOTES_CAP))),
+            store_meta,
             applying_snap_count: Arc::new(AtomicUsize::new(0)),
             future_poller: workers.future_poller.sender().clone(),
         };
@@ -1072,10 +1069,14 @@ impl RaftBatchSystem {
             .spawn("apply".to_owned(), apply_poller_builder);
         self.apply_system
             .schedule_all(region_peers.iter().map(|pair| pair.1.get_peer()));
-
-        let reader = LocalReader::new(&builder, region_peers.iter().map(|pair| pair.1.get_peer()));
-        let timer = LocalReader::new_timer();
-        box_try!(workers.local_reader.start_with_timer(reader, timer));
+        {
+            let mut meta = builder.store_meta.lock().unwrap();
+            for (_, peer_fsm) in &region_peers {
+                let peer = peer_fsm.get_peer();
+                meta.readers
+                    .insert(peer_fsm.region_id(), ReadDelegate::from_peer(peer));
+            }
+        }
 
         if let Err(e) = util_sys::thread::set_priority(util_sys::HIGH_PRI) {
             warn!("set thread priority for raftstore failed, error: {:?}", e);
@@ -1112,7 +1113,6 @@ impl RaftBatchSystem {
         handles.push(workers.pd_worker.stop());
         handles.push(workers.consistency_check_worker.stop());
         handles.push(workers.cleanup_sst_worker.stop());
-        handles.push(workers.local_reader.stop());
         self.apply_system.shutdown();
         self.system.shutdown();
         for h in handles {

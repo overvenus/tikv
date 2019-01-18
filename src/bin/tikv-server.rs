@@ -55,8 +55,8 @@ use std::path::Path;
 use std::process;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
-use std::usize;
 
 use clap::{App, Arg};
 use fs2::FileExt;
@@ -66,8 +66,9 @@ use tikv::coprocessor;
 use tikv::import::{ImportSSTService, SSTImporter};
 use tikv::pd::{PdClient, RpcClient};
 use tikv::raftstore::coprocessor::{CoprocessorHost, RegionInfoAccessor};
+use tikv::raftstore::store::fsm::store::StoreMeta;
 use tikv::raftstore::store::fsm::{self, SendCh};
-use tikv::raftstore::store::{new_compaction_listener, Engines, SnapManagerBuilder};
+use tikv::raftstore::store::{new_compaction_listener, Engines, LocalReader, SnapManagerBuilder};
 use tikv::server::readpool::ReadPool;
 use tikv::server::resolve;
 use tikv::server::status_server::StatusServer;
@@ -77,7 +78,7 @@ use tikv::storage::{self, AutoGCConfig, DEFAULT_ROCKSDB_SUB_DIR};
 use tikv::util::rocksdb::metrics_flusher::{MetricsFlusher, DEFAULT_FLUSHER_INTERVAL};
 use tikv::util::security::SecurityManager;
 use tikv::util::time::Monitor;
-use tikv::util::worker::{Builder, FutureWorker};
+use tikv::util::worker::FutureWorker;
 use tikv::util::{self as tikv_util, check_environment_variables, rocksdb as rocksdb_util};
 
 const RESERVED_OPEN_FDS: u64 = 1000;
@@ -131,15 +132,11 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     let (router, system) = fsm::create_raft_batch_system(&cfg.raft_store);
     let store_sendch = SendCh::new(router.clone(), "raftstore");
 
-    // Create Local Reader.
-    let local_reader = Builder::new("local-reader")
-        .batch_size(cfg.raft_store.local_read_batch_size as usize)
-        .create();
-    let local_ch = local_reader.scheduler();
+    let store_meta = Arc::new(Mutex::new(StoreMeta::new(0)));
 
     // Create router.
-    let raft_router = ServerRaftStoreRouter::new(store_sendch.clone(), router.clone(), local_ch);
-    let compaction_listener = new_compaction_listener(router);
+    let raft_router = ServerRaftStoreRouter::new(store_sendch.clone(), router.clone());
+    let compaction_listener = new_compaction_listener(router.clone());
 
     // Create pd client and pd worker
     let pd_client = Arc::new(pd_client);
@@ -160,12 +157,14 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
         ReadPool::new("store-read", &cfg.readpool.storage.build_config(), || {
             storage::ReadPoolContext::new(pd_sender.clone())
         });
+    let reader = LocalReader::new(kv_engine.clone(), store_meta.clone(), router.clone());
     let storage = create_raft_storage(
         raft_router.clone(),
         &cfg.storage,
         storage_read_pool,
         Some(Arc::clone(&kv_engine)),
         Some(raft_router.clone()),
+        reader,
     ).unwrap_or_else(|e| fatal!("failed to create raft stroage: {:?}", e));
 
     // Create raft engine.
@@ -231,7 +230,7 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
         trans,
         snap_mgr,
         pd_worker,
-        local_reader,
+        store_meta,
         coprocessor_host,
         importer,
     ).unwrap_or_else(|e| fatal!("failed to start node: {:?}", e));

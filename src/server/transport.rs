@@ -85,43 +85,25 @@ pub trait RaftStoreRouter: Send + Clone {
 pub struct ServerRaftStoreRouter {
     pub ch: SendCh,
     router: RaftRouter,
-    local_reader_ch: Scheduler<ReadTask>,
 }
 
 impl ServerRaftStoreRouter {
     /// Creates a new router.
-    pub fn new(
-        raftstore_ch: SendCh,
-        router: RaftRouter,
-        local_reader_ch: Scheduler<ReadTask>,
-    ) -> ServerRaftStoreRouter {
+    pub fn new(raftstore_ch: SendCh, router: RaftRouter) -> ServerRaftStoreRouter {
         ServerRaftStoreRouter {
             ch: raftstore_ch,
             router,
-            local_reader_ch,
         }
     }
 }
 
 impl RaftStoreRouter for ServerRaftStoreRouter {
     fn try_send(&self, msg: StoreMsg) -> RaftStoreResult<()> {
-        if ReadTask::acceptable(&msg) {
-            self.local_reader_ch
-                .schedule(ReadTask::read(msg))
-                .map_err(|e| box_err!(e))
-        } else {
-            self.ch.try_send(msg).map_err(RaftStoreError::Transport)
-        }
+        self.ch.try_send(msg).map_err(RaftStoreError::Transport)
     }
 
     fn send(&self, msg: StoreMsg) -> RaftStoreResult<()> {
-        if ReadTask::acceptable(&msg) {
-            self.local_reader_ch
-                .schedule(ReadTask::read(msg))
-                .map_err(|e| box_err!(e))
-        } else {
-            self.ch.send(msg).map_err(RaftStoreError::Transport)
-        }
+        self.ch.send(msg).map_err(RaftStoreError::Transport)
     }
 
     fn send_raft_msg(&self, msg: RaftMessage) -> RaftStoreResult<()> {

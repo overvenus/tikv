@@ -57,6 +57,7 @@ pub use self::snap::{
 pub use self::transport::Transport;
 pub use self::util::Engines;
 pub use self::worker::{KeyEntry, ReadTask};
+pub use self::worker::{LocalReader, ReadDelegate};
 
 // Only used in tests
 #[cfg(test)]

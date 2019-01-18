@@ -12,7 +12,7 @@
 // limitations under the License.
 
 use std::process;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -24,9 +24,11 @@ use kvproto::raft_serverpb::StoreIdent;
 use pd::{Error as PdError, PdClient, PdTask, INVALID_ID};
 use protobuf::RepeatedField;
 use raftstore::coprocessor::dispatcher::CoprocessorHost;
+use raftstore::store::fsm::store::{RaftRouter, StoreMeta};
 use raftstore::store::fsm::{RaftBatchSystem, SendCh};
 use raftstore::store::{
-    self, keys, Config as StoreConfig, Engines, Peekable, ReadTask, SnapManager, Transport,
+    self, keys, Config as StoreConfig, Engines, LocalReader, Peekable, ReadTask, SnapManager,
+    Transport,
 };
 use rocksdb::DB;
 use server::readpool::ReadPool;
@@ -46,11 +48,12 @@ pub fn create_raft_storage<S>(
     read_pool: ReadPool<storage::ReadPoolContext>,
     local_storage: Option<Arc<DB>>,
     raft_store_router: Option<ServerRaftStoreRouter>,
+    reader: LocalReader<RaftRouter>,
 ) -> Result<Storage<RaftKv<S>>>
 where
     S: RaftStoreRouter + 'static,
 {
-    let engine = RaftKv::new(router);
+    let engine = RaftKv::new(router, reader);
     let store = Storage::from_engine(engine, cfg, read_pool, local_storage, raft_store_router)?;
     Ok(store)
 }
@@ -136,7 +139,7 @@ where
         trans: T,
         snap_mgr: SnapManager,
         pd_worker: FutureWorker<PdTask>,
-        local_read_worker: Worker<ReadTask>,
+        store_meta: Arc<Mutex<StoreMeta>>,
         coprocessor_host: CoprocessorHost,
         importer: Arc<SSTImporter>,
     ) -> Result<()>
@@ -175,7 +178,7 @@ where
             trans,
             snap_mgr,
             pd_worker,
-            local_read_worker,
+            store_meta,
             coprocessor_host,
             importer,
         )?;
@@ -329,7 +332,7 @@ where
         trans: T,
         snap_mgr: SnapManager,
         pd_worker: FutureWorker<PdTask>,
-        local_read_worker: Worker<ReadTask>,
+        store_meta: Arc<Mutex<StoreMeta>>,
         coprocessor_host: CoprocessorHost,
         importer: Arc<SSTImporter>,
     ) -> Result<()>
@@ -353,7 +356,7 @@ where
             pd_client,
             snap_mgr,
             pd_worker,
-            local_read_worker,
+            store_meta,
             coprocessor_host,
             importer,
         )?;
