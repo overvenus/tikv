@@ -132,7 +132,7 @@ where
     /// Starts the Node. It tries to bootstrap cluster if the cluster is not
     /// bootstrapped yet. Then it spawns a thread to run the raftstore in
     /// background.
-    #[cfg_attr(feature = "cargo-clippy", allow(too_many_arguments))]
+    #[allow(clippy::too_many_arguments)]
     pub fn start<T>(
         &mut self,
         engines: Engines,
@@ -324,7 +324,7 @@ where
         Err(box_err!("check cluster bootstrapped failed"))
     }
 
-    #[cfg_attr(feature = "cargo-clippy", allow(too_many_arguments))]
+    #[allow(clippy::too_many_arguments)]
     fn start_store<T>(
         &mut self,
         store_id: u64,

@@ -11,7 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 #![allow(deprecated)]
 
 use std::collections::VecDeque;
@@ -114,12 +113,14 @@ impl Latches {
 
             let front = latch.waiting.front().cloned();
             match front {
-                Some(cid) => if cid == who {
-                    acquired_count += 1;
-                } else {
-                    latch.waiting.push_back(who);
-                    break;
-                },
+                Some(cid) => {
+                    if cid == who {
+                        acquired_count += 1;
+                    } else {
+                        latch.waiting.push_back(who);
+                        break;
+                    }
+                }
                 None => {
                     latch.waiting.push_back(who);
                     acquired_count += 1;

@@ -473,58 +473,58 @@ impl<C: Sender<StoreMsg>> Runnable<Task> for LocalReader<C> {
         let mut executor = ReadExecutor::new(
             self.kv_engine.clone(),
             false, /* dont check region epoch */
-            true,  /* we need snapshot time */
+        true,  /* we need snapshot time */
         );
 
         for task in tasks.drain(..) {
-            match task {
-                Task::Read(StoreMsg::PeerMsg(PeerMsg::RaftCmd {
-                    send_time,
-                    request,
-                    callback,
-                })) => {
-                    // self.propose_raft_command(request, callback, send_time, &mut executor);
-                    // if sent.is_none() {
-                    //     sent = Some(send_time);
-                    // }
-                }
-                Task::Read(other) => {
-                    unimplemented!("unsupported Msg {:?}", other);
-                }
-                Task::Update((region_id, progress)) => {
-                    // if let Some(delegate) = self.delegates.borrow_mut().get_mut(&region_id) {
-                    //     delegate.update(progress);
-                    // } else {
-                    //     warn!(
-                    //         "update unregistered ReadDelegate, region_id: {}, {:?}",
-                    //         region_id, progress
-                    //     );
-                    // }
-                }
-                Task::Destroy(region_id) => {
-                    // if let Some(delegate) = self.delegates.remove(&region_id) {
-                    //     info!("{} destroy ReadDelegate", delegate.tag);
-                    // }
-                }
-            }
+        match task {
+        Task::Read(StoreMsg::PeerMsg(PeerMsg::RaftCmd {
+        send_time,
+        request,
+        callback,
+        })) => {
+        // self.propose_raft_command(request, callback, send_time, &mut executor);
+        // if sent.is_none() {
+        //     sent = Some(send_time);
+        // }
+        }
+        Task::Read(other) => {
+        unimplemented!("unsupported Msg {:?}", other);
+        }
+        Task::Update((region_id, progress)) => {
+        // if let Some(delegate) = self.delegates.borrow_mut().get_mut(&region_id) {
+        //     delegate.update(progress);
+        // } else {
+        //     warn!(
+        //         "update unregistered ReadDelegate, region_id: {}, {:?}",
+        //         region_id, progress
+        //     );
+        // }
+        }
+        Task::Destroy(region_id) => {
+        // if let Some(delegate) = self.delegates.remove(&region_id) {
+        //     info!("{} destroy ReadDelegate", delegate.tag);
+        // }
+        }
+        }
         }
 
         if let Some(send_time) = sent {
-            self.metrics
-                .borrow_mut()
-                .requests_wait_duration
-                .observe(duration_to_sec(send_time.elapsed()));
+        self.metrics
+        .borrow_mut()
+        .requests_wait_duration
+        .observe(duration_to_sec(send_time.elapsed()));
         }
-        */
+         */
     }
 }
 
-const METRICS_FLUSH_INTERVAL: u64 = 15; // 15s
+const METRICS_FLUSH_INTERVAL: u64 = 15_000; // 15s
 
 impl<C: Sender<StoreMsg>> RunnableWithTimer<Task, ()> for LocalReader<C> {
     fn on_timeout(&mut self, timer: &mut Timer<()>, _: ()) {
         self.metrics.borrow_mut().flush();
-        timer.add_task(Duration::from_secs(METRICS_FLUSH_INTERVAL), ());
+        timer.add_task(Duration::from_millis(METRICS_FLUSH_INTERVAL), ());
     }
 }
 
