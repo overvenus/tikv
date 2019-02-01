@@ -1531,7 +1531,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
             .with_label_values(&["applying"])
             .set(apply_snapshot_count as i64);
 
-        stats.set_start_time(self.fsm.store.start_time.unwrap().sec as u32);
+        stats.set_start_time(self.fsm.store.start_time.unwrap_or_else(time::get_time).sec as u32);
 
         // report store write flow to pd
         stats.set_bytes_written(
