@@ -17,17 +17,17 @@ use std::fmt::{self, Display, Formatter};
 use std::mem;
 use std::sync::Arc;
 
+use engine::rocks::DBIterator;
+use engine::{CfName, CF_WRITE, LARGE_CFS};
+use engine::{IterOption, Iterable, DB};
 use kvproto::metapb::Region;
 use kvproto::metapb::RegionEpoch;
 use kvproto::pdpb::CheckPolicy;
-use rocksdb::{DBIterator, DB};
 
 use crate::raftstore::coprocessor::CoprocessorHost;
 use crate::raftstore::coprocessor::SplitCheckerHost;
-use crate::raftstore::store::engine::{IterOption, Iterable};
 use crate::raftstore::store::{keys, Callback, CasualMessage, CasualRouter};
 use crate::raftstore::Result;
-use crate::storage::{CfName, CF_WRITE, LARGE_CFS};
 use crate::util::worker::Runnable;
 
 use super::metrics::*;
@@ -211,7 +211,7 @@ impl<S: CasualRouter> Runner<S> {
                     .collect(),
                 Err(e) => {
                     error!(
-                        "failed to get approxiamte split key, try scan way";
+                        "failed to get approximate split key, try scan way";
                         "region_id" => region_id,
                         "err" => %e,
                     );

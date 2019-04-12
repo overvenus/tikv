@@ -25,23 +25,21 @@ use uuid::Uuid;
 
 use kvproto::import_kvpb::*;
 use kvproto::import_sstpb::*;
-use rocksdb::{
+
+use crate::config::DbConfig;
+use crate::raftstore::store::keys;
+use crate::storage::is_short_value;
+use crate::storage::mvcc::properties::{SizeProperties, SizePropertiesCollectorFactory};
+use crate::storage::mvcc::{Write, WriteType};
+use crate::storage::types::Key;
+use crate::util::config::MB;
+use engine::rocks::util::{new_engine_opt, CFOptions};
+use engine::rocks::{
     BlockBasedOptions, ColumnFamilyOptions, DBIterator, DBOptions, Env, EnvOptions,
     ExternalSstFileInfo, ReadOptions, SequentialFile, SstFileWriter, Writable,
     WriteBatch as RawBatch, DB,
 };
-
-use crate::config::DbConfig;
-use crate::raftstore::store::keys;
-use crate::storage::mvcc::{Write, WriteType};
-use crate::storage::types::Key;
-use crate::storage::{is_short_value, CF_DEFAULT, CF_WRITE};
-use crate::util::config::MB;
-use crate::util::rocksdb_util::{
-    new_engine_opt,
-    properties::{SizeProperties, SizePropertiesCollectorFactory},
-    CFOptions,
-};
+use engine::{CF_DEFAULT, CF_WRITE};
 
 use super::common::*;
 use super::Result;
@@ -96,7 +94,7 @@ impl Engine {
         }
 
         let size = wb.data_size();
-        self.write_without_wal(wb)?;
+        self.write_without_wal(&wb)?;
 
         Ok(size)
     }
@@ -379,9 +377,10 @@ fn tune_dboptions_for_bulk_load(opts: &DbConfig) -> (DBOptions, CFOptions<'_>) {
 mod tests {
     use super::*;
 
+    use engine::rocks::util::new_engine_opt;
+    use engine::rocks::IngestExternalFileOptions;
     use kvproto::kvrpcpb::IsolationLevel;
     use kvproto::metapb::{Peer, Region};
-    use rocksdb::IngestExternalFileOptions;
     use std::fs::File;
     use std::io::{self, Write};
     use tempdir::TempDir;
@@ -389,7 +388,6 @@ mod tests {
     use crate::raftstore::store::RegionSnapshot;
     use crate::storage::mvcc::MvccReader;
     use crate::util::file::file_exists;
-    use crate::util::rocksdb_util::new_engine_opt;
     use crate::util::security::encrypted_env_from_cipher_file;
 
     fn new_engine() -> (TempDir, Engine) {

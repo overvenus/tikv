@@ -12,8 +12,8 @@
 // limitations under the License.
 
 pub mod config;
-pub mod engine;
 pub mod gc_worker;
+pub mod kv;
 mod metrics;
 pub mod mvcc;
 mod readpool_context;
@@ -28,13 +28,12 @@ use std::io::Error as IoError;
 use std::sync::{atomic, Arc, Mutex};
 use std::u64;
 
+use engine::rocks::DB;
+use engine::IterOption;
 use futures::{future, Future};
 use kvproto::errorpb;
 use kvproto::kvrpcpb::{CommandPri, Context, KeyRange, LockInfo};
 
-use rocksdb::DB;
-
-use crate::raftstore::store::engine::IterOption;
 use crate::server::readpool::{self, ReadPool};
 use crate::server::ServerRaftStoreRouter;
 use crate::util;
@@ -47,13 +46,13 @@ use self::mvcc::Lock;
 use self::txn::CMD_BATCH_SIZE;
 
 pub use self::config::{Config, DEFAULT_DATA_DIR, DEFAULT_ROCKSDB_SUB_DIR};
-pub use self::engine::raftkv::RaftKv;
-pub use self::engine::{
+pub use self::gc_worker::{AutoGCConfig, GCSafePointProvider};
+pub use self::kv::raftkv::RaftKv;
+pub use self::kv::{
     CFStatistics, Cursor, CursorBuilder, Engine, Error as EngineError, FlowStatistics, Iterator,
     Modify, RegionInfoProvider, RocksEngine, ScanMode, Snapshot, Statistics, StatisticsSummary,
     TestEngineBuilder,
 };
-pub use self::gc_worker::{AutoGCConfig, GCSafePointProvider};
 pub use self::mvcc::Scanner as StoreScanner;
 pub use self::readpool_context::Context as ReadPoolContext;
 pub use self::txn::{FixtureStore, FixtureStoreScanner};
@@ -61,19 +60,11 @@ pub use self::txn::{Msg, Scanner, Scheduler, SnapshotStore, Store};
 pub use self::types::{Key, KvPair, MvccInfo, Value};
 pub type Callback<T> = Box<dyn FnBox(Result<T>) + Send>;
 
-pub type CfName = &'static str;
-pub const CF_DEFAULT: CfName = "default";
-pub const CF_LOCK: CfName = "lock";
-pub const CF_WRITE: CfName = "write";
-pub const CF_RAFT: CfName = "raft";
-// Cfs that should be very large generally.
-pub const LARGE_CFS: &[CfName] = &[CF_DEFAULT, CF_WRITE];
-pub const ALL_CFS: &[CfName] = &[CF_DEFAULT, CF_LOCK, CF_WRITE];
-pub const DATA_CFS: &[CfName] = &[CF_DEFAULT, CF_LOCK, CF_WRITE];
-
 // Short value max len must <= 255.
 pub const SHORT_VALUE_MAX_LEN: usize = 64;
 pub const SHORT_VALUE_PREFIX: u8 = b'v';
+
+use engine::{CfName, ALL_CFS, CF_DEFAULT, CF_LOCK, CF_WRITE, DATA_CFS};
 
 pub fn is_short_value(value: &[u8]) -> bool {
     value.len() <= SHORT_VALUE_MAX_LEN
@@ -672,7 +663,7 @@ impl<E: Engine> Storage<E> {
         future::result(val)
             .and_then(|_| future.map_err(|cancel| EngineError::Other(box_err!(cancel))))
             .and_then(|(_ctx, result)| result)
-            // map storage::engine::Error -> storage::txn::Error -> storage::Error
+            // map storage::kv::Error -> storage::txn::Error -> storage::Error
             .map_err(txn::Error::from)
             .map_err(Error::from)
     }
@@ -880,6 +871,7 @@ impl<E: Engine> Storage<E> {
             duration,
         };
         self.schedule(cmd, StorageCb::Boolean(callback))?;
+        KV_COMMAND_COUNTER_VEC_STATIC.pause.inc();
         Ok(())
     }
 
@@ -908,9 +900,8 @@ impl<E: Engine> Storage<E> {
             start_ts,
             options,
         };
-        let tag = cmd.tag();
         self.schedule(cmd, StorageCb::Booleans(callback))?;
-        KV_COMMAND_COUNTER_VEC.with_label_values(&[tag]).inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.prewrite.inc();
         Ok(())
     }
 
@@ -929,9 +920,8 @@ impl<E: Engine> Storage<E> {
             lock_ts,
             commit_ts,
         };
-        let tag = cmd.tag();
         self.schedule(cmd, StorageCb::Boolean(callback))?;
-        KV_COMMAND_COUNTER_VEC.with_label_values(&[tag]).inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.commit.inc();
         Ok(())
     }
 
@@ -947,27 +937,15 @@ impl<E: Engine> Storage<E> {
     ) -> Result<()> {
         let mut modifies = Vec::with_capacity(DATA_CFS.len());
         for cf in DATA_CFS {
-            // We enable memtable prefix bloom for CF_WRITE column family, for delete_range
-            // operation, RocksDB will add start key to the prefix bloom, and the start key
-            // will go through function prefix_extractor. In our case the prefix_extractor
-            // is FixedSuffixSliceTransform, which will trim the timestamp at the tail. If the
-            // length of start key is less than 8, we will encounter index out of range error.
-            let s = if *cf == CF_WRITE {
-                start_key.clone().append_ts(u64::MAX)
-            } else {
-                start_key.clone()
-            };
-            modifies.push(Modify::DeleteRange(cf, s, end_key.clone()));
+            modifies.push(Modify::DeleteRange(cf, start_key.clone(), end_key.clone()));
         }
 
         self.engine.async_write(
             &ctx,
             modifies,
-            Box::new(|(_, res): (_, engine::Result<_>)| callback(res.map_err(Error::from))),
+            Box::new(|(_, res): (_, kv::Result<_>)| callback(res.map_err(Error::from))),
         )?;
-        KV_COMMAND_COUNTER_VEC
-            .with_label_values(&["delete_range"])
-            .inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.delete_range.inc();
         Ok(())
     }
 
@@ -979,9 +957,8 @@ impl<E: Engine> Storage<E> {
         callback: Callback<()>,
     ) -> Result<()> {
         let cmd = Command::Cleanup { ctx, key, start_ts };
-        let tag = cmd.tag();
         self.schedule(cmd, StorageCb::Boolean(callback))?;
-        KV_COMMAND_COUNTER_VEC.with_label_values(&[tag]).inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.cleanup.inc();
         Ok(())
     }
 
@@ -998,9 +975,8 @@ impl<E: Engine> Storage<E> {
             keys,
             start_ts,
         };
-        let tag = cmd.tag();
         self.schedule(cmd, StorageCb::Boolean(callback))?;
-        KV_COMMAND_COUNTER_VEC.with_label_values(&[tag]).inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.rollback.inc();
         Ok(())
     }
 
@@ -1023,9 +999,8 @@ impl<E: Engine> Storage<E> {
             },
             limit,
         };
-        let tag = cmd.tag();
         self.schedule(cmd, StorageCb::Locks(callback))?;
-        KV_COMMAND_COUNTER_VEC.with_label_values(&[tag]).inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.scan_lock.inc();
         Ok(())
     }
 
@@ -1060,9 +1035,8 @@ impl<E: Engine> Storage<E> {
             scan_key: None,
             key_locks: vec![],
         };
-        let tag = cmd.tag();
         self.schedule(cmd, StorageCb::Boolean(callback))?;
-        KV_COMMAND_COUNTER_VEC.with_label_values(&[tag]).inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.resolve_lock.inc();
         Ok(())
     }
 
@@ -1071,9 +1045,7 @@ impl<E: Engine> Storage<E> {
     /// during and after the GC operation.
     pub fn async_gc(&self, ctx: Context, safe_point: u64, callback: Callback<()>) -> Result<()> {
         self.gc_worker.async_gc(ctx, safe_point, callback)?;
-        KV_COMMAND_COUNTER_VEC
-            .with_label_values(&[CMD_TAG_GC])
-            .inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.gc.inc();
         Ok(())
     }
 
@@ -1092,9 +1064,7 @@ impl<E: Engine> Storage<E> {
     ) -> Result<()> {
         self.gc_worker
             .async_unsafe_destroy_range(ctx, start_key, end_key, callback)?;
-        KV_COMMAND_COUNTER_VEC
-            .with_label_values(&[CMD_TAG_UNSAFE_DESTROY_RANGE])
-            .inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.unsafe_destroy_range.inc();
         Ok(())
     }
 
@@ -1126,7 +1096,7 @@ impl<E: Engine> Storage<E> {
                 let key_len = key.len();
                 let result = snapshot
                     .get_cf(cf, &Key::from_encoded(key))
-                    // map storage::engine::Error -> storage::Error
+                    // map storage::kv::Error -> storage::Error
                     .map_err(Error::from)
                     .map(|r| {
                         if let Some(ref value) = r {
@@ -1225,9 +1195,9 @@ impl<E: Engine> Storage<E> {
                 Key::from_encoded(key),
                 value,
             )],
-            Box::new(|(_, res): (_, engine::Result<_>)| callback(res.map_err(Error::from))),
+            Box::new(|(_, res): (_, kv::Result<_>)| callback(res.map_err(Error::from))),
         )?;
-        KV_COMMAND_COUNTER_VEC.with_label_values(&["raw_put"]).inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.raw_put.inc();
         Ok(())
     }
 
@@ -1253,11 +1223,9 @@ impl<E: Engine> Storage<E> {
         self.engine.async_write(
             &ctx,
             requests,
-            Box::new(|(_, res): (_, engine::Result<_>)| callback(res.map_err(Error::from))),
+            Box::new(|(_, res): (_, kv::Result<_>)| callback(res.map_err(Error::from))),
         )?;
-        KV_COMMAND_COUNTER_VEC
-            .with_label_values(&["raw_batch_put"])
-            .inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.raw_batch_put.inc();
         Ok(())
     }
 
@@ -1276,11 +1244,9 @@ impl<E: Engine> Storage<E> {
         self.engine.async_write(
             &ctx,
             vec![Modify::Delete(Self::rawkv_cf(&cf)?, Key::from_encoded(key))],
-            Box::new(|(_, res): (_, engine::Result<_>)| callback(res.map_err(Error::from))),
+            Box::new(|(_, res): (_, kv::Result<_>)| callback(res.map_err(Error::from))),
         )?;
-        KV_COMMAND_COUNTER_VEC
-            .with_label_values(&["raw_delete"])
-            .inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.raw_delete.inc();
         Ok(())
     }
 
@@ -1301,18 +1267,16 @@ impl<E: Engine> Storage<E> {
             return Ok(());
         }
 
+        let cf = Self::rawkv_cf(&cf)?;
+        let start_key = Key::from_encoded(start_key);
+        let end_key = Key::from_encoded(end_key);
+
         self.engine.async_write(
             &ctx,
-            vec![Modify::DeleteRange(
-                Self::rawkv_cf(&cf)?,
-                Key::from_encoded(start_key),
-                Key::from_encoded(end_key),
-            )],
-            Box::new(|(_, res): (_, engine::Result<_>)| callback(res.map_err(Error::from))),
+            vec![Modify::DeleteRange(cf, start_key, end_key)],
+            Box::new(|(_, res): (_, kv::Result<_>)| callback(res.map_err(Error::from))),
         )?;
-        KV_COMMAND_COUNTER_VEC
-            .with_label_values(&["raw_delete_range"])
-            .inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.raw_delete_range.inc();
         Ok(())
     }
 
@@ -1338,11 +1302,9 @@ impl<E: Engine> Storage<E> {
         self.engine.async_write(
             &ctx,
             requests,
-            Box::new(|(_, res): (_, engine::Result<_>)| callback(res.map_err(Error::from))),
+            Box::new(|(_, res): (_, kv::Result<_>)| callback(res.map_err(Error::from))),
         )?;
-        KV_COMMAND_COUNTER_VEC
-            .with_label_values(&["raw_batch_delete"])
-            .inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.raw_batch_delete.inc();
         Ok(())
     }
 
@@ -1625,9 +1587,9 @@ impl<E: Engine> Storage<E> {
         callback: Callback<MvccInfo>,
     ) -> Result<()> {
         let cmd = Command::MvccByKey { ctx, key };
-        let tag = cmd.tag();
         self.schedule(cmd, StorageCb::MvccInfoByKey(callback))?;
-        KV_COMMAND_COUNTER_VEC.with_label_values(&[tag]).inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.key_mvcc.inc();
+
         Ok(())
     }
 
@@ -1640,9 +1602,8 @@ impl<E: Engine> Storage<E> {
         callback: Callback<Option<(Key, MvccInfo)>>,
     ) -> Result<()> {
         let cmd = Command::MvccByStartTs { ctx, start_ts };
-        let tag = cmd.tag();
         self.schedule(cmd, StorageCb::MvccInfoByStartTs(callback))?;
-        KV_COMMAND_COUNTER_VEC.with_label_values(&[tag]).inc();
+        KV_COMMAND_COUNTER_VEC_STATIC.start_ts_mvcc.inc();
         Ok(())
     }
 }

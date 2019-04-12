@@ -23,6 +23,13 @@ use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::{cmp, usize};
 
+use crossbeam::channel::{TryRecvError, TrySendError};
+use engine::rocks;
+use engine::rocks::Writable;
+use engine::rocks::{Snapshot, WriteBatch, WriteOptions};
+use engine::Engines;
+use engine::{util as engine_util, Mutable, Peekable};
+use engine::{ALL_CFS, CF_DEFAULT, CF_LOCK, CF_WRITE};
 use kvproto::import_sstpb::SSTMeta;
 use kvproto::metapb::{Peer as PeerMeta, Region};
 use kvproto::raft_cmdpb::{
@@ -34,30 +41,24 @@ use kvproto::raft_serverpb::{
 };
 use protobuf::RepeatedField;
 use raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Snapshot as RaftSnapshot};
-use rocksdb::rocksdb_options::WriteOptions;
-use rocksdb::{Writable, WriteBatch};
+use raft::NO_LIMIT;
 use uuid::Uuid;
 
 use crate::import::SSTImporter;
 use crate::raftstore::coprocessor::CoprocessorHost;
-use crate::raftstore::store::engine::{Mutable, Peekable, Snapshot};
 use crate::raftstore::store::fsm::{RaftPollerBuilder, RaftRouter};
 use crate::raftstore::store::metrics::*;
 use crate::raftstore::store::msg::{Callback, PeerMsg};
 use crate::raftstore::store::peer::Peer;
 use crate::raftstore::store::peer_storage::{self, write_initial_apply_state, write_peer_state};
 use crate::raftstore::store::util::check_region_epoch;
-use crate::raftstore::store::RegionTask;
-use crate::raftstore::store::{cmd_resp, keys, util, Config, Engines};
+use crate::raftstore::store::{cmd_resp, keys, util, Config};
 use crate::raftstore::{Error, Result};
-use crate::storage::{ALL_CFS, CF_DEFAULT, CF_LOCK, CF_WRITE};
 use crate::util::mpsc::{loose_bounded, LooseBoundedSender, Receiver};
 use crate::util::time::{duration_to_sec, Instant, SlowTimer};
 use crate::util::worker::Scheduler;
 use crate::util::Either;
-use crate::util::{escape, rocksdb_util, MustConsumeVec};
-use crossbeam::channel::{TryRecvError, TrySendError};
-use raft::NO_LIMIT;
+use crate::util::{escape, MustConsumeVec};
 
 use super::metrics::*;
 use super::{
@@ -65,9 +66,13 @@ use super::{
     PollHandler,
 };
 
+use super::super::RegionTask;
+
 const WRITE_BATCH_MAX_KEYS: usize = 128;
 const DEFAULT_KV_WB_SIZE: usize = 4 * 1024;
 const DEFAULT_RAFT_WB_SIZE: usize = 1024;
+const DEFAULT_APPLY_WB_SIZE: usize = 4 * 1024;
+const APPLY_WB_SHRINK_SIZE: usize = 1024 * 1024;
 const SHRINK_PENDING_CMD_QUEUE_CAP: usize = 64;
 
 pub struct PendingCmd {
@@ -392,10 +397,9 @@ impl ApplyContext {
         if self.kv_wb.as_ref().map_or(false, |wb| !wb.is_empty()) {
             let mut write_opts = WriteOptions::new();
             write_opts.set_sync(self.sync_log_hint);
-            let kv_wb = self.kv_wb.take().unwrap();
             self.engines
                 .kv
-                .write_opt(kv_wb, &write_opts)
+                .write_opt(self.kv_wb(), &write_opts)
                 .unwrap_or_else(|e| {
                     panic!("failed to write to engine: {:?}", e);
                 });
@@ -404,10 +408,9 @@ impl ApplyContext {
             if self.sync_log_hint {
                 let mut write_opts = WriteOptions::new();
                 write_opts.set_sync(true);
-                let raft_wb = self.raft_wb.take().unwrap();
                 self.engines
                     .raft
-                    .write_opt(raft_wb, &write_opts)
+                    .write_opt(self.raft_wb(), &write_opts)
                     .unwrap_or_else(|e| {
                         panic!("failed to write to engine: {:?}", e);
                     });
@@ -422,6 +425,16 @@ impl ApplyContext {
         }
         if self.sync_log_hint {
             self.sync_log_hint = false;
+            let data_size = self.kv_wb().data_size();
+            if data_size > APPLY_WB_SHRINK_SIZE {
+                // Control the memory usage for the WriteBatch.
+                self.kv_wb = Some(WriteBatch::with_capacity(DEFAULT_APPLY_WB_SIZE));
+            } else {
+                // Clear data, reuse the WriteBatch, this can reduce memory allocations and deallocations.
+                self.kv_wb().clear();
+            }
+            self.kv_wb_last_bytes = 0;
+            self.kv_wb_last_keys = 0;
         }
         for cbs in self.cbs.drain(..) {
             cbs.invoke_all(&self.host);
@@ -460,6 +473,11 @@ impl ApplyContext {
     #[inline]
     pub fn kv_wb_mut(&mut self) -> &mut WriteBatch {
         self.kv_wb.as_mut().unwrap()
+    }
+
+    #[inline]
+    pub fn raft_wb(&self) -> &WriteBatch {
+        self.raft_wb.as_ref().unwrap()
     }
 
     #[inline]
@@ -954,7 +972,11 @@ impl ApplyDelegate {
         ctx.kv_wb_mut().set_save_point();
         ctx.raft_wb_mut().set_save_point();
         let (resp, exec_result) = match self.exec_raft_cmd(ctx, req) {
-            Ok(a) => a,
+            Ok(a) => {
+                ctx.kv_wb_mut().pop_save_point().unwrap();
+                ctx.raft_wb_mut().pop_save_point().unwrap();
+                a
+            }
             Err(e) => {
                 // clear dirty values.
                 ctx.kv_wb_mut().rollback_to_save_point().unwrap();
@@ -1187,8 +1209,8 @@ impl ApplyDelegate {
                 self.metrics.lock_cf_written_bytes += value.len() as u64;
             }
             // TODO: check whether cf exists or not.
-            rocksdb_util::get_cf_handle(&ctx.engines.kv, cf)
-                .and_then(|handle| ctx.kv_wb().put_cf(handle, &key, value))
+            rocks::util::get_cf_handle(&ctx.engines.kv, cf)
+                .and_then(|handle| ctx.kv_wb().put_cf(handle, &key, value).map_err(Into::into))
                 .unwrap_or_else(|e| {
                     panic!(
                         "{} failed to write ({}, {}) to cf {}: {:?}",
@@ -1225,8 +1247,8 @@ impl ApplyDelegate {
         if !req.get_delete().get_cf().is_empty() {
             let cf = req.get_delete().get_cf();
             // TODO: check whether cf exists or not.
-            rocksdb_util::get_cf_handle(&ctx.engines.kv, cf)
-                .and_then(|handle| ctx.kv_wb().delete_cf(handle, &key))
+            rocks::util::get_cf_handle(&ctx.engines.kv, cf)
+                .and_then(|handle| ctx.kv_wb().delete_cf(handle, &key).map_err(Into::into))
                 .unwrap_or_else(|e| {
                     panic!("{} failed to delete {}: {:?}", self.tag, escape(&key), e)
                 });
@@ -1279,7 +1301,7 @@ impl ApplyDelegate {
         if ALL_CFS.iter().find(|x| **x == cf).is_none() {
             return Err(box_err!("invalid delete range command, cf: {:?}", cf));
         }
-        let handle = rocksdb_util::get_cf_handle(&ctx.engines.kv, cf).unwrap();
+        let handle = rocks::util::get_cf_handle(&ctx.engines.kv, cf).unwrap();
 
         let start_key = keys::data_key(s_key);
         // Use delete_files_in_range to drop as many sst files as possible, this
@@ -1298,17 +1320,23 @@ impl ApplyDelegate {
             });
 
         // Delete all remaining keys.
-        util::delete_all_in_range_cf(&ctx.engines.kv, cf, &start_key, &end_key, use_delete_range)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "{} failed to delete all in range [{}, {}), cf: {}, err: {:?}",
-                    self.tag,
-                    escape(&start_key),
-                    escape(&end_key),
-                    cf,
-                    e
-                );
-            });
+        engine_util::delete_all_in_range_cf(
+            &ctx.engines.kv,
+            cf,
+            &start_key,
+            &end_key,
+            use_delete_range,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "{} failed to delete all in range [{}, {}), cf: {}, err: {:?}",
+                self.tag,
+                escape(&start_key),
+                escape(&end_key),
+                cf,
+                e
+            );
+        });
 
         ranges.push(Range::new(cf.to_owned(), start_key, end_key));
 
@@ -2886,17 +2914,18 @@ mod tests {
     use std::sync::*;
     use std::time::*;
 
-    use kvproto::metapb::{self, RegionEpoch};
-    use kvproto::raft_cmdpb::*;
-    use protobuf::Message;
-    use rocksdb::{Writable, WriteBatch, DB};
-    use tempdir::TempDir;
-
-    use crate::import::test_helpers::*;
     use crate::raftstore::coprocessor::*;
     use crate::raftstore::store::msg::WriteResponse;
     use crate::raftstore::store::peer_storage::RAFT_INIT_LOG_INDEX;
     use crate::raftstore::store::util::{new_learner_peer, new_peer};
+    use engine::rocks::Writable;
+    use engine::{WriteBatch, DB};
+    use kvproto::metapb::{self, RegionEpoch};
+    use kvproto::raft_cmdpb::*;
+    use protobuf::Message;
+    use tempdir::TempDir;
+
+    use crate::import::test_helpers::*;
     use crate::raftstore::store::{Config, RegionTask};
     use crate::util::worker::dummy_scheduler;
 
@@ -2905,7 +2934,7 @@ mod tests {
     pub fn create_tmp_engine(path: &str) -> (TempDir, Engines) {
         let path = TempDir::new(path).unwrap();
         let db = Arc::new(
-            rocksdb_util::new_engine(
+            rocks::util::new_engine(
                 path.path().join("db").to_str().unwrap(),
                 None,
                 ALL_CFS,
@@ -2914,7 +2943,7 @@ mod tests {
             .unwrap(),
         );
         let raft_db = Arc::new(
-            rocksdb_util::new_engine(path.path().join("raft").to_str().unwrap(), None, &[], None)
+            rocks::util::new_engine(path.path().join("raft").to_str().unwrap(), None, &[], None)
                 .unwrap(),
         );
         (path, Engines::new(db, raft_db))

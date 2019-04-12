@@ -18,12 +18,10 @@ use std::path::{Path, PathBuf};
 
 use crc::crc32::{self, Hasher32};
 use kvproto::import_sstpb::*;
-use rocksdb::{IngestExternalFileOptions, DB};
 use uuid::Uuid;
 
-use crate::util::rocksdb_util::{
-    get_cf_handle, prepare_sst_for_ingestion, validate_sst_for_ingestion,
-};
+use engine::rocks::util::{get_cf_handle, prepare_sst_for_ingestion, validate_sst_for_ingestion};
+use engine::rocks::{IngestExternalFileOptions, DB};
 
 use super::{Error, Result};
 
@@ -332,7 +330,7 @@ mod tests {
     use super::*;
     use crate::import::test_helpers::*;
 
-    use crate::util::rocksdb_util::new_engine;
+    use engine::rocks::util::new_engine;
     use tempdir::TempDir;
 
     #[test]

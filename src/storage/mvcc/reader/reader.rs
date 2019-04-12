@@ -11,14 +11,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::raftstore::store::engine::IterOption;
-use crate::storage::engine::{Cursor, ScanMode, Snapshot, Statistics};
+use crate::storage::kv::{Cursor, ScanMode, Snapshot, Statistics};
 use crate::storage::mvcc::default_not_found_error;
 use crate::storage::mvcc::lock::{Lock, LockType};
+use crate::storage::mvcc::properties::MvccProperties;
 use crate::storage::mvcc::write::{Write, WriteType};
 use crate::storage::mvcc::{Error, Result};
-use crate::storage::{Key, Value, CF_LOCK, CF_WRITE};
-use crate::util::rocksdb_util::properties::MvccProperties;
+use crate::storage::{Key, Value};
+use engine::IterOption;
+use engine::{CF_LOCK, CF_WRITE};
 use kvproto::kvrpcpb::IsolationLevel;
 
 const GC_MAX_ROW_VERSIONS_THRESHOLD: u64 = 100;
@@ -491,18 +492,17 @@ impl<S: Snapshot> MvccReader<S> {
 mod tests {
     use crate::raftstore::store::keys;
     use crate::raftstore::store::RegionSnapshot;
-    use crate::storage::engine::Modify;
+    use crate::storage::kv::Modify;
+    use crate::storage::mvcc::properties::{MvccProperties, MvccPropertiesCollectorFactory};
     use crate::storage::mvcc::write::WriteType;
     use crate::storage::mvcc::{MvccReader, MvccTxn};
-    use crate::storage::{Key, Mutation, Options, ALL_CFS, CF_DEFAULT, CF_LOCK, CF_WRITE};
-    use crate::util::rocksdb_util::{
-        self as rocksdb_util,
-        properties::{MvccProperties, MvccPropertiesCollectorFactory},
-        CFOptions,
-    };
+    use crate::storage::{Key, Mutation, Options};
+    use engine::rocks::util::CFOptions;
+    use engine::rocks::{self, ColumnFamilyOptions, DBOptions};
+    use engine::rocks::{Writable, WriteBatch, DB};
+    use engine::{ALL_CFS, CF_DEFAULT, CF_LOCK, CF_WRITE};
     use kvproto::kvrpcpb::IsolationLevel;
     use kvproto::metapb::{Peer, Region};
-    use rocksdb::{self, Writable, WriteBatch, DB};
     use std::sync::Arc;
     use std::u64;
     use tempdir::TempDir;
@@ -580,54 +580,54 @@ mod tests {
                 match rev {
                     Modify::Put(cf, k, v) => {
                         let k = keys::data_key(k.as_encoded());
-                        let handle = rocksdb_util::get_cf_handle(db, cf).unwrap();
+                        let handle = rocks::util::get_cf_handle(db, cf).unwrap();
                         wb.put_cf(handle, &k, &v).unwrap();
                     }
                     Modify::Delete(cf, k) => {
                         let k = keys::data_key(k.as_encoded());
-                        let handle = rocksdb_util::get_cf_handle(db, cf).unwrap();
+                        let handle = rocks::util::get_cf_handle(db, cf).unwrap();
                         wb.delete_cf(handle, &k).unwrap();
                     }
                     Modify::DeleteRange(cf, k1, k2) => {
                         let k1 = keys::data_key(k1.as_encoded());
                         let k2 = keys::data_key(k2.as_encoded());
-                        let handle = rocksdb_util::get_cf_handle(db, cf).unwrap();
+                        let handle = rocks::util::get_cf_handle(db, cf).unwrap();
                         wb.delete_range_cf(handle, &k1, &k2).unwrap();
                     }
                 }
             }
-            db.write(wb).unwrap();
+            db.write(&wb).unwrap();
         }
 
         fn flush(&mut self) {
             for cf in ALL_CFS {
-                let cf = rocksdb_util::get_cf_handle(&self.db, cf).unwrap();
+                let cf = rocks::util::get_cf_handle(&self.db, cf).unwrap();
                 self.db.flush_cf(cf, true).unwrap();
             }
         }
 
         fn compact(&mut self) {
             for cf in ALL_CFS {
-                let cf = rocksdb_util::get_cf_handle(&self.db, cf).unwrap();
+                let cf = rocks::util::get_cf_handle(&self.db, cf).unwrap();
                 self.db.compact_range_cf(cf, None, None);
             }
         }
     }
 
     fn open_db(path: &str, with_properties: bool) -> Arc<DB> {
-        let db_opts = rocksdb::DBOptions::new();
-        let mut cf_opts = rocksdb::ColumnFamilyOptions::new();
+        let db_opts = DBOptions::new();
+        let mut cf_opts = ColumnFamilyOptions::new();
         cf_opts.set_write_buffer_size(32 * 1024 * 1024);
         if with_properties {
             let f = Box::new(MvccPropertiesCollectorFactory::default());
             cf_opts.add_table_properties_collector_factory("tikv.test-collector", f);
         }
         let cfs_opts = vec![
-            CFOptions::new(CF_DEFAULT, rocksdb::ColumnFamilyOptions::new()),
-            CFOptions::new(CF_LOCK, rocksdb::ColumnFamilyOptions::new()),
+            CFOptions::new(CF_DEFAULT, ColumnFamilyOptions::new()),
+            CFOptions::new(CF_LOCK, ColumnFamilyOptions::new()),
             CFOptions::new(CF_WRITE, cf_opts),
         ];
-        Arc::new(rocksdb_util::new_engine_opt(path, db_opts, cfs_opts).unwrap())
+        Arc::new(rocks::util::new_engine_opt(path, db_opts, cfs_opts).unwrap())
     }
 
     fn make_region(id: u64, start_key: Vec<u8>, end_key: Vec<u8>) -> Region {

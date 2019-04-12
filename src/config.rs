@@ -12,15 +12,14 @@
 // limitations under the License.
 
 use std::error::Error;
-use std::fmt;
 use std::fs;
 use std::i32;
 use std::io::Error as IoError;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 use std::usize;
 
-use rocksdb::{
+use engine::rocks::{
     BlockBasedOptions, ColumnFamilyOptions, CompactionPriority, DBCompactionStyle,
     DBCompressionType, DBOptions, DBRateLimiterMode, DBRecoveryMode, TitanDBOptions,
 };
@@ -35,20 +34,21 @@ use crate::raftstore::store::Config as RaftstoreConfig;
 use crate::server::readpool;
 use crate::server::Config as ServerConfig;
 use crate::server::CONFIG_ROCKSDB_GAUGE;
-use crate::storage::{
-    Config as StorageConfig, CF_DEFAULT, CF_LOCK, CF_WRITE, DEFAULT_ROCKSDB_SUB_DIR,
+use crate::storage::config::DEFAULT_DATA_DIR;
+use crate::storage::mvcc::properties::{
+    MvccPropertiesCollectorFactory, RangePropertiesCollectorFactory,
 };
+use crate::storage::{Config as StorageConfig, DEFAULT_ROCKSDB_SUB_DIR};
 use crate::util::config::{
     self, compression_type_level_serde, CompressionType, ReadableDuration, ReadableSize, GB, KB, MB,
 };
-use crate::util::rocksdb_util::{
-    db_exist,
-    properties::{MvccPropertiesCollectorFactory, RangePropertiesCollectorFactory},
-    CFOptions, EventListener, FixedPrefixSliceTransform, FixedSuffixSliceTransform,
-    NoopSliceTransform,
-};
 use crate::util::security::SecurityConfig;
 use crate::util::time::duration_to_sec;
+use engine::rocks::util::{
+    db_exist, CFOptions, EventListener, FixedPrefixSliceTransform, FixedSuffixSliceTransform,
+    NoopSliceTransform,
+};
+use engine::{CF_DEFAULT, CF_LOCK, CF_WRITE};
 
 const LOCKCF_MIN_MEM: usize = 256 * MB as usize;
 const LOCKCF_MAX_MEM: usize = GB as usize;
@@ -727,7 +727,7 @@ impl DbConfig {
     // Build cf options for v2.x. which has a RAFT cf in kv engine.
     #[doc(hidden)]
     pub fn build_cf_opts_v2(&self) -> Vec<CFOptions<'_>> {
-        use crate::storage::CF_RAFT;
+        use engine::CF_RAFT;
         vec![
             CFOptions::new(CF_DEFAULT, self.defaultcf.build_opt()),
             CFOptions::new(CF_LOCK, self.lockcf.build_opt()),
@@ -1348,11 +1348,18 @@ impl TiKvConfig {
         }
 
         if last_cfg.storage.data_dir != self.storage.data_dir {
-            return Err(format!(
-                "storage data dir have been changed, former data dir is {}, \
-                 current data dir is {}, please check if it is expected.",
-                last_cfg.storage.data_dir, self.storage.data_dir
-            ));
+            // In tikv 3.0 the default value of storage.data-dir changed
+            // from "" to "./"
+            let using_default_after_upgrade =
+                last_cfg.storage.data_dir.is_empty() && self.storage.data_dir == DEFAULT_DATA_DIR;
+
+            if !using_default_after_upgrade {
+                return Err(format!(
+                    "storage data dir have been changed, former data dir is {}, \
+                     current data dir is {}, please check if it is expected.",
+                    last_cfg.storage.data_dir, self.storage.data_dir
+                ));
+            }
         }
 
         if last_cfg.raft_store.raftdb_path != self.raft_store.raftdb_path {
@@ -1366,24 +1373,18 @@ impl TiKvConfig {
         Ok(())
     }
 
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Self
-    where
-        P: fmt::Debug,
-    {
-        fs::File::open(&path)
-            .map_err::<Box<dyn Error>, _>(|e| Box::new(e))
-            .and_then(|mut f| {
-                let mut s = String::new();
-                f.read_to_string(&mut s)?;
-                let c = ::toml::from_str(&s)?;
-                Ok(c)
-            })
-            .unwrap_or_else(|e| {
-                panic!(
-                    "invalid auto generated configuration file {:?}, err {}",
-                    path, e
-                );
-            })
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Self {
+        (|| -> Result<Self, Box<dyn Error>> {
+            let s = fs::read_to_string(&path)?;
+            Ok(::toml::from_str(&s)?)
+        })()
+        .unwrap_or_else(|e| {
+            panic!(
+                "invalid auto generated configuration file {}, err {}",
+                path.as_ref().display(),
+                e
+            );
+        })
     }
 
     pub fn write_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), IoError> {

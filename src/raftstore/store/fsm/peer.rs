@@ -19,6 +19,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{cmp, u64};
 
+use engine::Engines;
+use engine::{Peekable, Snapshot as EngineSnapshot};
 use futures::Future;
 use kvproto::errorpb;
 use kvproto::import_sstpb::SSTMeta;
@@ -44,7 +46,6 @@ use crate::util::{escape, is_zero_duration};
 
 use crate::raftstore::coprocessor::RegionChangeEvent;
 use crate::raftstore::store::cmd_resp::{bind_term, new_error};
-use crate::raftstore::store::engine::{Peekable, Snapshot as EngineSnapshot};
 use crate::raftstore::store::fsm::store::{PollContext, StoreMeta};
 use crate::raftstore::store::fsm::{
     apply, ApplyMetrics, ApplyTask, ApplyTaskRes, BasicMailbox, ChangePeer, ExecResult, Fsm,
@@ -60,7 +61,6 @@ use crate::raftstore::store::util::KeysInfoFormatter;
 use crate::raftstore::store::worker::{
     CleanupSSTTask, ConsistencyCheckTask, RaftlogGcTask, ReadTask, RegionTask, SplitCheckTask,
 };
-use crate::raftstore::store::Engines;
 use crate::raftstore::store::{
     util, CasualMessage, Config, PeerMsg, PeerTick, RaftCommand, SignificantMsg, SnapKey,
     SnapshotDeleter, StoreMsg,

@@ -21,13 +21,13 @@ use kvproto::metapb::RegionEpoch;
 use kvproto::pdpb::CheckPolicy;
 use kvproto::raft_cmdpb::{RaftCmdRequest, RaftCmdResponse};
 use kvproto::raft_serverpb::RaftMessage;
+use raft::SnapshotStatus;
 
 use crate::raftstore::store::fsm::apply::TaskRes as ApplyTaskRes;
 use crate::raftstore::store::util::KeysInfoFormatter;
 use crate::raftstore::store::SnapKey;
+use crate::storage::kv::CompactedEvent;
 use crate::util::escape;
-use crate::util::rocksdb_util::CompactedEvent;
-use raft::{SnapshotStatus, StateRole};
 
 use super::RegionSnapshot;
 
@@ -42,18 +42,8 @@ pub struct WriteResponse {
     pub response: RaftCmdResponse,
 }
 
-#[derive(Debug)]
-pub enum SeekRegionResult {
-    Found(metapb::Region),
-    LimitExceeded { next_key: Vec<u8> },
-    Ended,
-}
-
 pub type ReadCallback = Box<dyn FnBox(ReadResponse) + Send>;
 pub type WriteCallback = Box<dyn FnBox(WriteResponse) + Send>;
-
-pub type SeekRegionCallback = Box<dyn FnBox(SeekRegionResult) + Send>;
-pub type SeekRegionFilter = Box<dyn Fn(&metapb::Region, StateRole) -> bool + Send>;
 
 /// Variants of callbacks for `Msg`.
 ///  - `Read`: a callbak for read only requests including `StatusRequest`,

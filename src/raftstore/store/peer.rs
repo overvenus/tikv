@@ -19,6 +19,8 @@ use std::sync::{atomic, Arc};
 use std::time::{Duration, Instant};
 use std::{cmp, mem, slice, u64};
 
+use engine::rocks::{Snapshot, SyncSnapshot, WriteBatch, WriteOptions, DB};
+use engine::{Engines, Peekable};
 use kvproto::metapb;
 use kvproto::pdpb::PeerStats;
 use kvproto::raft_cmdpb::{
@@ -30,29 +32,26 @@ use kvproto::raft_serverpb::{
 };
 use protobuf::{self, Message};
 use raft::eraftpb::{self, ConfChangeType, EntryType, MessageType};
-use rocksdb::rocksdb_options::WriteOptions;
-use rocksdb::{WriteBatch, DB};
+use raft::{
+    self, Progress, ProgressState, RawNode, Ready, SnapshotStatus, StateRole, INVALID_INDEX,
+    NO_LIMIT,
+};
 use time::Timespec;
 
 use crate::pd::{PdTask, INVALID_ID};
 use crate::raftstore::coprocessor::{CoprocessorHost, RegionChangeEvent};
-use crate::raftstore::store::engine::{Peekable, Snapshot, SyncSnapshot};
 use crate::raftstore::store::fsm::store::PollContext;
 use crate::raftstore::store::fsm::{
     apply, Apply, ApplyMetrics, ApplyTask, ApplyTaskRes, Proposal, RegionProposal,
 };
 use crate::raftstore::store::keys::{enc_end_key, enc_start_key};
 use crate::raftstore::store::worker::{ReadProgress, ReadTask, RegionTask};
-use crate::raftstore::store::{keys, Callback, Config, Engines, ReadResponse, RegionSnapshot};
+use crate::raftstore::store::{keys, Callback, Config, ReadResponse, RegionSnapshot};
 use crate::raftstore::{Error, Result};
 use crate::util::collections::HashMap;
 use crate::util::time::{duration_to_sec, monotonic_raw_now};
 use crate::util::worker::Scheduler;
 use crate::util::{escape, MustConsumeVec};
-use raft::{
-    self, Progress, ProgressState, RawNode, Ready, SnapshotStatus, StateRole, INVALID_INDEX,
-    NO_LIMIT,
-};
 
 use super::cmd_resp;
 use super::local_metrics::{RaftMessageMetrics, RaftReadyMetrics};
@@ -488,8 +487,8 @@ impl Peer {
         // write kv rocksdb first in case of restart happen between two write
         let mut write_opts = WriteOptions::new();
         write_opts.set_sync(ctx.cfg.sync_log);
-        ctx.engines.kv.write_opt(kv_wb, &write_opts)?;
-        ctx.engines.raft.write_opt(raft_wb, &write_opts)?;
+        ctx.engines.write_kv_opt(&kv_wb, &write_opts)?;
+        ctx.engines.write_raft_opt(&raft_wb, &write_opts)?;
 
         if self.get_store().is_initialized() && !keep_data {
             // If we meet panic when deleting data and raft log, the dirty data
@@ -1137,7 +1136,7 @@ impl Peer {
             self.last_applying_idx = self.get_store().truncated_index();
         } else {
             let committed_entries = ready.committed_entries.take().unwrap();
-            // leader needs to update lease and last commited split index.
+            // leader needs to update lease and last committed split index.
             let mut lease_to_be_updated = self.is_leader();
             let mut split_to_be_updated = self.is_leader();
             let mut merge_to_be_update = self.is_leader();

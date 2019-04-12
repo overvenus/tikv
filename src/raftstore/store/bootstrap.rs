@@ -11,17 +11,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::engine::{Iterable, Mutable};
 use super::keys;
 use super::peer_storage::{
     write_initial_apply_state, write_initial_raft_state, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER,
 };
-use super::util::{new_peer, Engines};
+use super::util::new_peer;
 use crate::raftstore::Result;
-use crate::storage::CF_DEFAULT;
+use engine::rocks::Writable;
+use engine::CF_DEFAULT;
+use engine::{Engines, Iterable, Mutable, WriteBatch, DB};
+
 use kvproto::metapb;
 use kvproto::raft_serverpb::{RegionLocalState, StoreIdent};
-use rocksdb::{Writable, WriteBatch, DB};
 
 pub fn initial_region(store_id: u64, region_id: u64, peer_id: u64) -> metapb::Region {
     let mut region = metapb::Region::new();
@@ -61,7 +62,7 @@ pub fn bootstrap_store(engines: &Engines, cluster_id: u64, store_id: u64) -> Res
     ident.set_store_id(store_id);
 
     engines.raft.put_msg(keys::STORE_IDENT_KEY, &ident)?;
-    engines.raft.sync_wal()?;
+    engines.sync_raft()?;
     Ok(())
 }
 
@@ -77,28 +78,28 @@ pub fn prepare_bootstrap_cluster(engines: &Engines, region: &metapb::Region) -> 
     raft_wb.put_msg(&keys::region_state_key(region.get_id()), &state)?;
     write_initial_apply_state(&raft_wb, region.get_id())?;
     write_initial_raft_state(&raft_wb, region.get_id())?;
-    engines.raft.write(raft_wb)?;
-    engines.raft.sync_wal()?;
+    engines.write_raft(&raft_wb)?;
+    engines.sync_raft()?;
     Ok(())
 }
 
 // Clear first region meta and prepare key for bootstrapping cluster.
 pub fn clear_prepare_bootstrap_cluster(engines: &Engines, region_id: u64) -> Result<()> {
     let wb = WriteBatch::new();
-    wb.delete(keys::PREPARE_BOOTSTRAP_KEY)?;
+    box_try!(wb.delete(keys::PREPARE_BOOTSTRAP_KEY));
     // Clear raft initial state too.
-    wb.delete(&keys::raft_state_key(region_id))?;
-    wb.delete(&keys::region_state_key(region_id))?;
-    wb.delete(&keys::apply_state_key(region_id))?;
-    engines.raft.write(wb)?;
-    engines.raft.sync_wal()?;
+    box_try!(wb.delete(&keys::raft_state_key(region_id)));
+    box_try!(wb.delete(&keys::region_state_key(region_id)));
+    box_try!(wb.delete(&keys::apply_state_key(region_id)));
+    box_try!(engines.raft.write(&wb));
+    engines.sync_raft()?;
     Ok(())
 }
 
 // Clear prepare key
 pub fn clear_prepare_bootstrap_key(engines: &Engines) -> Result<()> {
-    engines.raft.delete(keys::PREPARE_BOOTSTRAP_KEY)?;
-    engines.raft.sync_wal()?;
+    box_try!(engines.raft.delete(keys::PREPARE_BOOTSTRAP_KEY));
+    engines.sync_raft()?;
     Ok(())
 }
 
@@ -108,21 +109,22 @@ mod tests {
     use tempdir::TempDir;
 
     use super::*;
-    use crate::raftstore::store::engine::Peekable;
-    use crate::raftstore::store::{keys, Engines};
-    use crate::storage::CF_DEFAULT;
-    use crate::util::rocksdb_util;
+    use crate::raftstore::store::keys;
+    use engine::rocks;
+    use engine::Engines;
+    use engine::Peekable;
+    use engine::CF_DEFAULT;
 
     #[test]
     fn test_bootstrap() {
         let path = TempDir::new("var").unwrap();
         let raft_path = path.path().join("raft");
         let kv_engine = Arc::new(
-            rocksdb_util::new_engine(path.path().to_str().unwrap(), None, &[CF_DEFAULT], None)
+            rocks::util::new_engine(path.path().to_str().unwrap(), None, &[CF_DEFAULT], None)
                 .unwrap(),
         );
         let raft_engine = Arc::new(
-            rocksdb_util::new_engine(raft_path.to_str().unwrap(), None, &[CF_DEFAULT], None)
+            rocks::util::new_engine(raft_path.to_str().unwrap(), None, &[CF_DEFAULT], None)
                 .unwrap(),
         );
         let region = initial_region(1, 1, 1);

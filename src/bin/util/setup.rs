@@ -28,10 +28,11 @@ pub static LOG_INITIALIZED: AtomicBool = AtomicBool::new(false);
 macro_rules! fatal {
     ($lvl:expr, $($arg:tt)+) => ({
         if LOG_INITIALIZED.load(Ordering::SeqCst) {
-            error!($lvl, $($arg)+);
+            crit!($lvl, $($arg)+);
         } else {
             eprintln!($lvl, $($arg)+);
         }
+        slog_global::clear_global();
         process::exit(1)
     })
 }

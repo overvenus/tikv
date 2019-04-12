@@ -455,6 +455,26 @@ version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
+name = "engine"
+version = "0.0.1"
+dependencies = [
+ "crc 1.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "kvproto 0.0.1 (git+https://github.com/pingcap/kvproto.git)",
+ "lazy_static 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "prometheus 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "protobuf 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "quick-error 1.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "raft 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rocksdb 0.3.0 (git+https://github.com/pingcap/rust-rocksdb.git)",
+ "slog 2.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "slog-global 0.1.0 (git+https://github.com/breeswish/slog-global.git?rev=91904ade)",
+ "sys-info 0.5.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tempdir 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tikv_alloc 0.1.0",
+ "time 0.1.38 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "enum-primitive-derive"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -587,7 +607,7 @@ version = "0.0.1"
 dependencies = [
  "byteorder 1.2.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "failure 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "tikv 3.0.0-beta",
+ "tikv 3.0.0-beta.1",
 ]
 
 [[package]]
@@ -943,7 +963,7 @@ dependencies = [
 [[package]]
 name = "librocksdb_sys"
 version = "0.1.0"
-source = "git+https://github.com/pingcap/rust-rocksdb.git#5f49f9ef202d8ad9515de2bb05c8395c1c66b8aa"
+source = "git+https://github.com/pingcap/rust-rocksdb.git#263b82e81a90d0f9c6162b921f16610af58d195a"
 dependencies = [
  "bzip2-sys 0.1.7 (git+https://github.com/alexcrichton/bzip2-rs.git)",
  "cc 1.0.28 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1620,7 +1640,7 @@ dependencies = [
 [[package]]
 name = "rocksdb"
 version = "0.3.0"
-source = "git+https://github.com/pingcap/rust-rocksdb.git#5f49f9ef202d8ad9515de2bb05c8395c1c66b8aa"
+source = "git+https://github.com/pingcap/rust-rocksdb.git#263b82e81a90d0f9c6162b921f16610af58d195a"
 dependencies = [
  "crc 1.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.2.45 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1977,7 +1997,7 @@ dependencies = [
  "kvproto 0.0.1 (git+https://github.com/pingcap/kvproto.git)",
  "protobuf 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "test_storage 0.0.1",
- "tikv 3.0.0-beta",
+ "tikv 3.0.0-beta.1",
  "tipb 0.0.1 (git+https://github.com/pingcap/tipb.git)",
 ]
 
@@ -1985,17 +2005,17 @@ dependencies = [
 name = "test_raftstore"
 version = "0.0.1"
 dependencies = [
+ "engine 0.0.1",
  "futures 0.1.23 (registry+https://github.com/rust-lang/crates.io-index)",
  "grpcio 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "kvproto 0.0.1 (git+https://github.com/pingcap/kvproto.git)",
  "protobuf 2.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "raft 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand 0.3.14 (registry+https://github.com/rust-lang/crates.io-index)",
- "rocksdb 0.3.0 (git+https://github.com/pingcap/rust-rocksdb.git)",
  "slog 2.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "slog-global 0.1.0 (git+https://github.com/breeswish/slog-global.git?rev=91904ade)",
  "tempdir 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "tikv 3.0.0-beta",
+ "tikv 3.0.0-beta.1",
  "tokio-threadpool 0.1.9 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio-timer 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
@@ -2007,7 +2027,7 @@ dependencies = [
  "futures 0.1.23 (registry+https://github.com/rust-lang/crates.io-index)",
  "kvproto 0.0.1 (git+https://github.com/pingcap/kvproto.git)",
  "test_raftstore 0.0.1",
- "tikv 3.0.0-beta",
+ "tikv 3.0.0-beta.1",
 ]
 
 [[package]]
@@ -2016,7 +2036,7 @@ version = "0.0.1"
 dependencies = [
  "rand 0.5.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "slog 2.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "tikv 3.0.0-beta",
+ "tikv 3.0.0-beta.1",
  "time 0.1.38 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -2043,7 +2063,7 @@ dependencies = [
 
 [[package]]
 name = "tikv"
-version = "3.0.0-beta"
+version = "3.0.0-beta.1"
 dependencies = [
  "arrow 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "backtrace 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2058,6 +2078,7 @@ dependencies = [
  "criterion 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "crossbeam 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "derive_more 0.11.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "engine 0.0.1",
  "fail 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "flate2 1.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "fnv 1.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2088,7 +2109,6 @@ dependencies = [
  "raft 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand 0.3.14 (registry+https://github.com/rust-lang/crates.io-index)",
  "regex 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "rocksdb 0.3.0 (git+https://github.com/pingcap/rust-rocksdb.git)",
  "rust-crypto 0.2.36 (registry+https://github.com/rust-lang/crates.io-index)",
  "safemem 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.71 (registry+https://github.com/rust-lang/crates.io-index)",

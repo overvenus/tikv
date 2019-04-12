@@ -11,11 +11,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use protobuf;
-use rocksdb::DB;
-
 use kvproto::raft_serverpb::{RaftApplyState, RaftTruncatedState};
 
+use engine::rocks::DB;
+use engine::*;
 use test_raftstore::*;
 use tikv::raftstore::store::*;
 use tikv::util::collections::HashMap;

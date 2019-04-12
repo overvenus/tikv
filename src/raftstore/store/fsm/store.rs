@@ -12,6 +12,10 @@
 // limitations under the License.
 
 use crossbeam::channel::{TryRecvError, TrySendError};
+use engine::rocks;
+use engine::rocks::CompactionJobInfo;
+use engine::{WriteBatch, WriteOptions, DB};
+use engine::{CF_DEFAULT, CF_LOCK, CF_WRITE};
 use futures::Future;
 use kvproto::import_sstpb::SSTMeta;
 use kvproto::metapb::{self, Region, RegionEpoch};
@@ -19,7 +23,6 @@ use kvproto::pdpb::StoreStats;
 use kvproto::raft_cmdpb::{AdminCmdType, AdminRequest};
 use kvproto::raft_serverpb::{PeerState, RaftMessage, RegionLocalState};
 use raft::{Ready, StateRole};
-use rocksdb::{CompactionJobInfo, WriteBatch, WriteOptions, DB};
 use std::collections::BTreeMap;
 use std::collections::Bound::{Excluded, Included, Unbounded};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -29,23 +32,11 @@ use std::{mem, thread, u64};
 use time::{self, Timespec};
 use tokio_threadpool::{Sender as ThreadPoolSender, ThreadPool};
 
+use crate::import::SSTImporter;
 use crate::pd::{PdClient, PdRunner, PdTask};
 use crate::raftstore::coprocessor::split_observer::SplitObserver;
 use crate::raftstore::coprocessor::{CoprocessorHost, RegionChangeEvent};
-use crate::raftstore::store::util::is_initial_msg;
-use crate::raftstore::Result;
-use crate::storage::{CF_DEFAULT, CF_LOCK, CF_WRITE};
-use crate::util::collections::{HashMap, HashSet};
-use crate::util::mpsc::{self, LooseBoundedSender, Receiver};
-use crate::util::rocksdb_util::{self, CompactedEvent, CompactionListener};
-use crate::util::time::{duration_to_sec, SlowTimer};
-use crate::util::timer::SteadyTimer;
-use crate::util::worker::{FutureScheduler, FutureWorker, Scheduler, Worker};
-use crate::util::{is_zero_duration, sys as sys_util, Either, RingQueue};
-
-use crate::import::SSTImporter;
 use crate::raftstore::store::config::Config;
-use crate::raftstore::store::engine::{Iterable, Mutable, Peekable};
 use crate::raftstore::store::fsm::metrics::*;
 use crate::raftstore::store::fsm::peer::{
     maybe_destroy_source, new_admin_request, PeerFsm, PeerFsmDelegate,
@@ -60,18 +51,31 @@ use crate::raftstore::store::local_metrics::RaftMetrics;
 use crate::raftstore::store::metrics::*;
 use crate::raftstore::store::peer_storage::{self, HandleRaftReadyContext, InvokeContext};
 use crate::raftstore::store::transport::Transport;
+use crate::raftstore::store::util::is_initial_msg;
 use crate::raftstore::store::worker::{
     CleanupSSTRunner, CleanupSSTTask, CompactRunner, CompactTask, ConsistencyCheckRunner,
     ConsistencyCheckTask, LocalReader, RaftlogGcRunner, RaftlogGcTask, ReadTask, RegionRunner,
     RegionTask, SplitCheckRunner, SplitCheckTask,
 };
 use crate::raftstore::store::{
-    util, Callback, CasualMessage, Engines, PeerMsg, RaftCommand, SnapManager, SnapshotDeleter,
-    StoreMsg, StoreTick,
+    util, Callback, CasualMessage, PeerMsg, RaftCommand, SnapManager, SnapshotDeleter, StoreMsg,
+    StoreTick,
 };
+use crate::raftstore::Result;
+use crate::storage::kv::{CompactedEvent, CompactionListener};
+use crate::util::collections::{HashMap, HashSet};
+use crate::util::mpsc::{self, LooseBoundedSender, Receiver};
+use crate::util::time::{duration_to_sec, SlowTimer};
+use crate::util::timer::SteadyTimer;
+use crate::util::worker::{FutureScheduler, FutureWorker, Scheduler, Worker};
+use crate::util::{is_zero_duration, sys as sys_util, Either, RingQueue};
+use engine::Engines;
+use engine::{Iterable, Mutable, Peekable};
 
 type Key = Vec<u8>;
 
+const KV_WB_SHRINK_SIZE: usize = 256 * 1024;
+const RAFT_WB_SHRINK_SIZE: usize = 1024 * 1024;
 const PENDING_VOTES_CAP: usize = 20;
 
 pub struct StoreInfo {
@@ -468,30 +472,37 @@ impl<T: Transport, C: PdClient> RaftPoller<T, C> {
         if !self.poll_ctx.kv_wb.is_empty() {
             let mut write_opts = WriteOptions::new();
             write_opts.set_sync(true);
-            let kv_wb = mem::replace(&mut self.poll_ctx.kv_wb, WriteBatch::new());
             self.poll_ctx
                 .engines
                 .kv
-                .write_opt(kv_wb, &write_opts)
+                .write_opt(&self.poll_ctx.kv_wb, &write_opts)
                 .unwrap_or_else(|e| {
                     panic!("{} failed to save append state result: {:?}", self.tag, e);
                 });
+            let data_size = self.poll_ctx.kv_wb.data_size();
+            if data_size > KV_WB_SHRINK_SIZE {
+                self.poll_ctx.kv_wb = WriteBatch::with_capacity(4 * 1024);
+            } else {
+                self.poll_ctx.kv_wb.clear();
+            }
         }
         fail_point!("raft_between_save");
         if !self.poll_ctx.raft_wb.is_empty() {
             let mut write_opts = WriteOptions::new();
             write_opts.set_sync(self.poll_ctx.cfg.sync_log || self.poll_ctx.sync_log);
-            let raft_wb = mem::replace(
-                &mut self.poll_ctx.raft_wb,
-                WriteBatch::with_capacity(4 * 1024),
-            );
             self.poll_ctx
                 .engines
                 .raft
-                .write_opt(raft_wb, &write_opts)
+                .write_opt(&self.poll_ctx.raft_wb, &write_opts)
                 .unwrap_or_else(|e| {
                     panic!("{} failed to save raft append result: {:?}", self.tag, e);
                 });
+            let data_size = self.poll_ctx.raft_wb.data_size();
+            if data_size > RAFT_WB_SHRINK_SIZE {
+                self.poll_ctx.raft_wb = WriteBatch::with_capacity(4 * 1024);
+            } else {
+                self.poll_ctx.raft_wb.clear();
+            }
         }
         fail_point!("raft_after_save");
         if ready_cnt != 0 {
@@ -643,6 +654,7 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm, StoreFsm> for RaftPoller<T,
             .process_ready
             .observe(duration_to_sec(self.timer.elapsed()) as f64);
         self.poll_ctx.raft_metrics.flush();
+        self.poll_ctx.store_stat.flush();
     }
 }
 
@@ -692,7 +704,7 @@ impl<T, C> RaftPollerBuilder<T, C> {
         let mut merging_count = 0;
         let mut meta = self.store_meta.lock().unwrap();
         raft_engine.scan(start_key, end_key, false, |key, value| {
-            let (region_id, suffix) = keys::decode_region_meta_key(key)?;
+            let (region_id, suffix) = box_try!(keys::decode_region_meta_key(key));
             if suffix != keys::REGION_STATE_SUFFIX {
                 return Ok(true);
             }
@@ -713,13 +725,13 @@ impl<T, C> RaftPollerBuilder<T, C> {
                 return Ok(true);
             }
 
-            let (tx, mut peer) = PeerFsm::create(
+            let (tx, mut peer) = box_try!(PeerFsm::create(
                 store_id,
                 &self.cfg,
                 self.region_scheduler.clone(),
                 self.engines.clone(),
                 region,
-            )?;
+            ));
             if local_state.get_state() == PeerState::Merging {
                 info!("region is merging"; "region" => ?region, "store_id" => store_id);
                 merging_count += 1;
@@ -739,7 +751,7 @@ impl<T, C> RaftPollerBuilder<T, C> {
         })?;
 
         if !raft_wb.is_empty() {
-            self.engines.raft.write(raft_wb).unwrap();
+            self.engines.raft.write(&raft_wb).unwrap();
             self.engines.raft.sync_wal().unwrap();
         }
 
@@ -806,7 +818,7 @@ impl<T, C> RaftPollerBuilder<T, C> {
         }
         ranges.push((last_start_key, keys::DATA_MAX_KEY.to_vec()));
 
-        rocksdb_util::roughly_cleanup_ranges(&self.engines.kv, &ranges)?;
+        rocks::util::roughly_cleanup_ranges(&self.engines.kv, &ranges)?;
 
         info!(
             "cleans up garbage data";
@@ -1434,7 +1446,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
             return;
         }
 
-        if rocksdb_util::auto_compactions_is_disabled(&self.ctx.engines.kv) {
+        if rocks::util::auto_compactions_is_disabled(&self.ctx.engines.kv) {
             debug!(
                 "skip compact check when disabled auto compactions";
                 "store_id" => self.fsm.store.id,
@@ -1977,8 +1989,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::collections::HashMap;
 
-    use crate::util::rocksdb_util::properties::{IndexHandle, IndexHandles, SizeProperties};
-    use crate::util::rocksdb_util::CompactedEvent;
+    use crate::storage::kv::CompactedEvent;
+    use crate::storage::mvcc::properties::{IndexHandle, IndexHandles, SizeProperties};
     use protobuf::RepeatedField;
 
     use super::*;

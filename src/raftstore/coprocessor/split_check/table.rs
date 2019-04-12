@@ -13,16 +13,16 @@
 
 use std::cmp::Ordering;
 
+use engine::rocks::{SeekKey, DB};
+use engine::CF_WRITE;
+use engine::{IterOption, Iterable};
 use kvproto::metapb::Region;
-use rocksdb::{SeekKey, DB};
+use kvproto::pdpb::CheckPolicy;
 
 use crate::coprocessor::codec::table as table_codec;
-use crate::raftstore::store::engine::{IterOption, Iterable};
 use crate::raftstore::store::keys;
 use crate::storage::types::Key;
-use crate::storage::CF_WRITE;
 use crate::util::escape;
-use kvproto::pdpb::CheckPolicy;
 
 use super::super::{
     Coprocessor, KeyEntry, ObserverContext, Result, SplitCheckObserver, SplitChecker,
@@ -231,17 +231,17 @@ mod tests {
 
     use kvproto::metapb::Peer;
     use kvproto::pdpb::CheckPolicy;
-    use rocksdb::Writable;
     use tempdir::TempDir;
 
     use crate::coprocessor::codec::table::{TABLE_PREFIX, TABLE_PREFIX_KEY_LEN};
     use crate::raftstore::store::{CasualMessage, SplitCheckRunner, SplitCheckTask};
     use crate::storage::types::Key;
-    use crate::storage::ALL_CFS;
     use crate::util::codec::number::NumberEncoder;
     use crate::util::config::ReadableSize;
-    use crate::util::rocksdb_util::new_engine;
     use crate::util::worker::Runnable;
+    use engine::rocks::util::new_engine;
+    use engine::rocks::Writable;
+    use engine::ALL_CFS;
 
     use super::*;
     use crate::raftstore::coprocessor::{Config, CoprocessorHost};
