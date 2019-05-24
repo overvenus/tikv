@@ -16,6 +16,7 @@ mod peer_storage;
 mod region_snapshot;
 mod snap;
 mod worker;
+mod backup;
 
 pub use self::bootstrap::{
     bootstrap_store, clear_prepare_bootstrap_cluster, clear_prepare_bootstrap_key, initial_region,
