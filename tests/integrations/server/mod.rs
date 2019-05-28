@@ -55,7 +55,7 @@ macro_rules! unary_call_dispatch {
         fn $name(&mut self, ctx: RpcContext<'_>, req: $req_name, sink: UnarySink<$resp_name>) {
             (self.0).$name(ctx, req, sink)
         }
-    }
+    };
 }
 
 macro_rules! sstream_call_dispatch {

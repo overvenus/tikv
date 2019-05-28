@@ -16,7 +16,7 @@ use tikv::coprocessor;
 use tikv::import::{ImportSSTService, SSTImporter};
 use tikv::raftstore::coprocessor::{CoprocessorHost, RegionInfoAccessor};
 use tikv::raftstore::store::fsm::{RaftBatchSystem, RaftRouter};
-use tikv::raftstore::store::{Callback, LocalReader, SnapManager};
+use tikv::raftstore::store::{BackupManager, Callback, LocalReader, LocalStorage, SnapManager};
 use tikv::raftstore::Result;
 use tikv::server::load_statistics::ThreadLoad;
 use tikv::server::resolve::{self, Task as ResolveTask};
@@ -49,6 +49,7 @@ struct ServerMeta {
     sim_trans: SimulateServerTransport,
     raw_router: RaftRouter,
     worker: Worker<ResolveTask>,
+    backup_mgr: Option<Arc<BackupManager>>,
 }
 
 pub struct ServerCluster {
@@ -57,6 +58,7 @@ pub struct ServerCluster {
     pub storages: HashMap<u64, SimulateEngine>,
     pub region_info_accessors: HashMap<u64, RegionInfoAccessor>,
     snap_paths: HashMap<u64, TempDir>,
+    backup_paths: HashMap<u64, TempDir>,
     pd_client: Arc<TestPdClient>,
     raft_client: RaftClient<RaftStoreBlackHole>,
     _stats_pool: tokio_threadpool::ThreadPool,
@@ -87,6 +89,7 @@ impl ServerCluster {
             storages: HashMap::default(),
             region_info_accessors: HashMap::default(),
             snap_paths: HashMap::default(),
+            backup_paths: HashMap::default(),
             raft_client,
             _stats_pool: stats_pool,
         }
@@ -94,6 +97,10 @@ impl ServerCluster {
 
     pub fn get_addr(&self, node_id: u64) -> &str {
         &self.addrs[&node_id]
+    }
+
+    pub fn get_backup_mgr(&self, node_id: u64) -> Option<Arc<BackupManager>> {
+        self.metas.get(&node_id).unwrap().backup_mgr.clone()
     }
 }
 
@@ -106,13 +113,21 @@ impl Simulator for ServerCluster {
         router: RaftRouter,
         system: RaftBatchSystem,
     ) -> ServerResult<u64> {
-        let (tmp_str, tmp) = if node_id == 0 || !self.snap_paths.contains_key(&node_id) {
-            let p = TempDir::new("test_cluster").unwrap();
-            (p.path().to_str().unwrap().to_owned(), Some(p))
-        } else {
-            let p = self.snap_paths[&node_id].path().to_str().unwrap();
-            (p.to_owned(), None)
-        };
+        let (tmp_snap_str, tmp_snap, tmp_backup_str, tmp_backup) =
+            if node_id == 0 || !self.snap_paths.contains_key(&node_id) {
+                let snap = TempDir::new("test_cluster_snap").unwrap();
+                let backup = TempDir::new("test_cluster_backup").unwrap();
+                (
+                    snap.path().to_str().unwrap().to_owned(),
+                    Some(snap),
+                    backup.path().to_str().unwrap().to_owned(),
+                    Some(backup),
+                )
+            } else {
+                let p = self.snap_paths[&node_id].path().to_str().unwrap();
+                let b = self.backup_paths[&node_id].path().to_str().unwrap();
+                (p.to_owned(), None, b.to_owned(), None)
+            };
 
         // Now we cache the store address, so here we should re-use last
         // listening address for the same store.
@@ -156,7 +171,15 @@ impl Simulator for ServerCluster {
 
         // Create pd client, snapshot manager, server.
         let (worker, resolver) = resolve::new_resolver(Arc::clone(&self.pd_client)).unwrap();
-        let snap_mgr = SnapManager::new(tmp_str, Some(router.clone()));
+        let backup_mgr = if !cfg.server.backup_mode {
+            None
+        } else {
+            let local_storage = LocalStorage::new(Path::new(&tmp_backup_str))?;
+            let backup_mgr =
+                BackupManager::new(Path::new(&tmp_backup_str), Box::new(local_storage))?;
+            Some(Arc::new(backup_mgr))
+        };
+        let snap_mgr = SnapManager::new(tmp_snap_str, Some(router.clone()), backup_mgr.clone());
         let server_cfg = Arc::new(cfg.server.clone());
         let security_mgr = Arc::new(SecurityManager::new(&cfg.security).unwrap());
         let cop_read_pool =
@@ -223,8 +246,11 @@ impl Simulator for ServerCluster {
         )?;
         assert!(node_id == 0 || node_id == node.id());
         let node_id = node.id();
-        if let Some(tmp) = tmp {
+        if let Some(tmp) = tmp_snap {
             self.snap_paths.insert(node_id, tmp);
+        }
+        if let Some(tmp) = tmp_backup {
+            self.backup_paths.insert(node_id, tmp);
         }
 
         server.start(server_cfg, security_mgr).unwrap();
@@ -238,6 +264,7 @@ impl Simulator for ServerCluster {
                 sim_router,
                 sim_trans: simulate_trans,
                 worker,
+                backup_mgr,
             },
         );
         self.addrs.insert(node_id, format!("{}", addr));

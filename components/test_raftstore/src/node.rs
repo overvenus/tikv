@@ -183,7 +183,8 @@ impl Simulator for NodeCluster {
                 .contains_key(&node_id)
         {
             let tmp = TempDir::new("test_cluster").unwrap();
-            let snap_mgr = SnapManager::new(tmp.path().to_str().unwrap(), Some(router.clone()));
+            let snap_mgr =
+                SnapManager::new(tmp.path().to_str().unwrap(), Some(router.clone()), None);
             (snap_mgr, Some(tmp))
         } else {
             let trans = self.trans.core.lock().unwrap();

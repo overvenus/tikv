@@ -22,6 +22,7 @@ extern crate tikv_util;
 #[macro_use]
 extern crate test_util;
 
+mod bakcup;
 mod config;
 mod coprocessor;
 mod import;

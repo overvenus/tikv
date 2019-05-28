@@ -43,7 +43,7 @@ use tikv_util::worker::Scheduler;
 use tikv_util::{escape, MustConsumeVec};
 
 use super::cmd_resp;
-use super::local_metrics::{RaftMessageMetrics, RaftReadyMetrics};
+use super::local_metrics::RaftReadyMetrics;
 use super::metrics::*;
 use super::peer_storage::{write_peer_state, ApplySnapResult, InvokeContext, PeerStorage};
 use super::transport::Transport;
@@ -668,11 +668,14 @@ impl Peer {
     }
 
     #[inline]
-    fn send<T, I>(&mut self, trans: &mut T, msgs: I, metrics: &mut RaftMessageMetrics)
+    fn send<T, I, C>(&mut self, ctx: &mut PollContext<T, C>, msgs: I)
     where
         T: Transport,
         I: IntoIterator<Item = eraftpb::Message>,
     {
+        let trans = &mut ctx.trans;
+        let metrics = &mut ctx.raft_metrics.message;
+        let _snap_mgr = &mut ctx.snap_mgr;
         for msg in msgs {
             let msg_type = msg.get_msg_type();
             self.send_raft_message(msg, trans);
@@ -683,6 +686,10 @@ impl Peer {
                 MessageType::MsgRequestPreVoteResponse => metrics.prevote_resp += 1,
                 MessageType::MsgRequestVote => metrics.vote += 1,
                 MessageType::MsgRequestVoteResponse => metrics.vote_resp += 1,
+                MessageType::MsgRequestSnapshot => {
+                    // TODO: register to snap_mgr.
+                    metrics.request_snapshot += 1;
+                }
                 MessageType::MsgSnapshot => metrics.snapshot += 1,
                 MessageType::MsgHeartbeat => metrics.heartbeat += 1,
                 MessageType::MsgHeartbeatResponse => metrics.heartbeat_resp += 1,
@@ -1011,7 +1018,7 @@ impl Peer {
             fail_point!("raft_before_follower_send");
             let messages = mem::replace(&mut self.pending_messages, vec![]);
             ctx.need_flush_trans = true;
-            self.send(&mut ctx.trans, messages, &mut ctx.raft_metrics.message);
+            self.send(ctx, messages);
         }
 
         if let Some(snap) = self.get_pending_snapshot() {
@@ -1106,7 +1113,7 @@ impl Peer {
             fail_point!("raft_before_leader_send");
             let msgs = ready.messages.drain(..);
             ctx.need_flush_trans = true;
-            self.send(&mut ctx.trans, msgs, &mut ctx.raft_metrics.message);
+            self.send(ctx, msgs);
         }
 
         let invoke_ctx = match self.mut_store().handle_raft_ready(ctx, &ready) {
@@ -1159,11 +1166,7 @@ impl Peer {
             if self.is_applying_snapshot() {
                 self.pending_messages = mem::replace(&mut ready.messages, vec![]);
             } else {
-                self.send(
-                    &mut ctx.trans,
-                    ready.messages.drain(..),
-                    &mut ctx.raft_metrics.message,
-                );
+                self.send(ctx, ready.messages.drain(..));
                 ctx.need_flush_trans = true;
             }
         }

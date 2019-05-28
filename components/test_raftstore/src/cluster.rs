@@ -210,6 +210,19 @@ impl<T: Simulator> Cluster<T> {
         Ok(())
     }
 
+    pub fn run_node_with_config(&mut self, node_id: u64, cfg: TiKvConfig) -> ServerResult<()> {
+        debug!("starting node {}", node_id);
+        let engines = self.engines[&node_id].clone();
+        let (router, system) = create_raft_batch_system(&self.cfg.raft_store);
+        debug!("calling run node"; "node_id" => node_id);
+        // FIXME: rocksdb event listeners may not work, because we change the router.
+        self.sim
+            .wl()
+            .run_node(node_id, cfg, engines, router, system)?;
+        debug!("node {} started", node_id);
+        Ok(())
+    }
+
     pub fn stop_node(&mut self, node_id: u64) {
         debug!("stopping node {}", node_id);
         self.sim.wl().stop_node(node_id);
@@ -417,7 +430,7 @@ impl<T: Simulator> Cluster<T> {
     // Multiple nodes with fixed node id, like node 1, 2, .. 5,
     // First region 1 is in all stores with peer 1, 2, .. 5.
     // Peer 1 is in node 1, store 1, etc.
-    fn bootstrap_region(&mut self) -> Result<()> {
+    fn bootstrap_region(&mut self) -> Result<metapb::Region> {
         for (id, engines) in self.dbs.iter().enumerate() {
             let id = id as u64 + 1;
             self.engines.insert(id, engines.clone());
@@ -440,9 +453,9 @@ impl<T: Simulator> Cluster<T> {
             prepare_bootstrap_cluster(engines, &region)?;
         }
 
-        self.bootstrap_cluster(region);
+        self.bootstrap_cluster(region.clone());
 
-        Ok(())
+        Ok(region)
     }
 
     // Return first region id.

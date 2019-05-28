@@ -59,6 +59,8 @@ pub struct Config {
     pub status_addr: String,
     pub status_thread_pool_size: usize,
 
+    pub backup_mode: bool,
+
     // TODO: use CompressionAlgorithms instead once it supports traits like Clone etc.
     pub grpc_compression_type: GrpcCompressionType,
     pub grpc_concurrency: usize,
@@ -111,6 +113,7 @@ impl Default for Config {
             advertise_addr: DEFAULT_ADVERTISE_LISTENING_ADDR.to_owned(),
             status_addr: DEFAULT_STATUS_ADDR.to_owned(),
             status_thread_pool_size: 1,
+            backup_mode: false,
             grpc_compression_type: GrpcCompressionType::None,
             grpc_concurrency: DEFAULT_GRPC_CONCURRENCY,
             grpc_concurrent_stream: DEFAULT_GRPC_CONCURRENT_STREAM,

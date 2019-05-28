@@ -33,7 +33,7 @@ use raft::eraftpb::Snapshot as RaftSnapshot;
 use crate::raftstore::errors::Error as RaftStoreError;
 use crate::raftstore::store::keys::{self, enc_end_key, enc_start_key};
 use crate::raftstore::store::util::check_key_in_region;
-use crate::raftstore::store::{RaftRouter, StoreMsg};
+use crate::raftstore::store::{BackupManager, RaftRouter, StoreMsg};
 use crate::raftstore::Result as RaftStoreResult;
 use engine::rocks::util::io_limiter::{IOLimiter, LimitWriter};
 use tikv_util::codec::bytes::{BytesEncoder, CompactBytesFromFileDecoder};
@@ -312,6 +312,7 @@ pub struct Snap {
     size_track: Arc<AtomicU64>,
     limiter: Option<Arc<IOLimiter>>,
     hold_tmp_files: bool,
+    backup_mgr: Option<Arc<BackupManager>>,
 }
 
 impl Snap {
@@ -323,6 +324,7 @@ impl Snap {
         to_build: bool,
         deleter: Box<dyn SnapshotDeleter>,
         limiter: Option<Arc<IOLimiter>>,
+        backup_mgr: Option<Arc<BackupManager>>,
     ) -> RaftStoreResult<Snap> {
         let dir_path = dir.into();
         if !dir_path.exists() {
@@ -370,6 +372,7 @@ impl Snap {
             size_track,
             limiter,
             hold_tmp_files: false,
+            backup_mgr,
         };
 
         // load snapshot meta if meta_file exists
@@ -403,7 +406,7 @@ impl Snap {
         deleter: Box<dyn SnapshotDeleter>,
         limiter: Option<Arc<IOLimiter>>,
     ) -> RaftStoreResult<Snap> {
-        let mut s = Snap::new(dir, key, size_track, true, true, deleter, limiter)?;
+        let mut s = Snap::new(dir, key, size_track, true, true, deleter, limiter, None)?;
         s.init_for_building(snap)?;
         Ok(s)
     }
@@ -414,7 +417,7 @@ impl Snap {
         size_track: Arc<AtomicU64>,
         deleter: Box<dyn SnapshotDeleter>,
     ) -> RaftStoreResult<Snap> {
-        let mut s = Snap::new(dir, key, size_track, true, false, deleter, None)?;
+        let mut s = Snap::new(dir, key, size_track, true, false, deleter, None, None)?;
 
         if !s.exists() {
             // Skip the initialization below if it doesn't exists.
@@ -437,8 +440,11 @@ impl Snap {
         size_track: Arc<AtomicU64>,
         deleter: Box<dyn SnapshotDeleter>,
         limiter: Option<Arc<IOLimiter>>,
+        backup_mgr: Option<Arc<BackupManager>>,
     ) -> RaftStoreResult<Snap> {
-        let mut s = Snap::new(dir, key, size_track, false, false, deleter, limiter)?;
+        let mut s = Snap::new(
+            dir, key, size_track, false, false, deleter, limiter, backup_mgr,
+        )?;
         s.set_snapshot_meta(snapshot_meta)?;
         if s.exists() {
             return Ok(s);
@@ -470,8 +476,11 @@ impl Snap {
         key: &SnapKey,
         size_track: Arc<AtomicU64>,
         deleter: Box<dyn SnapshotDeleter>,
+        backup_mgr: Option<Arc<BackupManager>>,
     ) -> RaftStoreResult<Snap> {
-        let s = Snap::new(dir, key, size_track, false, false, deleter, None)?;
+        let s = Snap::new(
+            dir, key, size_track, false, false, deleter, None, backup_mgr,
+        )?;
         Ok(s)
     }
 
@@ -973,6 +982,34 @@ impl Snapshot for Snap {
     fn apply(&mut self, options: ApplyOptions) -> Result<()> {
         box_try!(self.validate(Arc::clone(&options.db)));
 
+        if let Some(backup_mgr) = self.backup_mgr.as_ref() {
+            check_abort(&options.abort)?;
+            let tmp_dir = box_try!(backup_mgr.tmp_dir(&format!("{}", self.key)));
+            // Meta file
+            let meta_dst = tmp_dir
+                .path()
+                .join(self.meta_file.path.file_name().unwrap());
+            box_try!(fs::copy(&self.meta_file.path, meta_dst));
+            // CF files
+            for cf_file in &self.cf_files {
+                if cf_file.size == 0 {
+                    // Skip empty cf file.
+                    continue;
+                }
+
+                let dst = tmp_dir.path().join(cf_file.path.file_name().unwrap());
+                debug!("copy cf file"; "src" => cf_file.path.display(), "dst" => dst.display());
+                box_try!(fs::copy(&cf_file.path, dst));
+            }
+            box_try!(backup_mgr.save_snapshot(
+                self.key.region_id,
+                self.key.term,
+                self.key.idx,
+                tmp_dir.path()
+            ));
+            return Ok(());
+        }
+
         for cf_file in &mut self.cf_files {
             if cf_file.size == 0 {
                 // Skip empty cf file.
@@ -1134,11 +1171,16 @@ pub struct SnapManager {
     router: Option<RaftRouter>,
     limiter: Option<Arc<IOLimiter>>,
     max_total_size: u64,
+    pub backup_mgr: Option<Arc<BackupManager>>,
 }
 
 impl SnapManager {
-    pub fn new<T: Into<String>>(path: T, router: Option<RaftRouter>) -> SnapManager {
-        SnapManagerBuilder::default().build(path, router)
+    pub fn new<T: Into<String>>(
+        path: T,
+        router: Option<RaftRouter>,
+        backup_mgr: Option<Arc<BackupManager>>,
+    ) -> SnapManager {
+        SnapManagerBuilder::default().build(path, router, backup_mgr)
     }
 
     pub fn init(&self) -> io::Result<()> {
@@ -1306,6 +1348,7 @@ impl SnapManager {
             Arc::clone(&core.snap_size),
             Box::new(self.clone()),
             self.limiter.clone(),
+            self.backup_mgr.clone(),
         )?;
         Ok(Box::new(f))
     }
@@ -1317,6 +1360,7 @@ impl SnapManager {
             key,
             Arc::clone(&core.snap_size),
             Box::new(self.clone()),
+            self.backup_mgr.clone(),
         )?;
         if !s.exists() {
             return Err(RaftStoreError::Other(From::from(
@@ -1461,7 +1505,12 @@ impl SnapManagerBuilder {
         self.max_total_size = bytes;
         self
     }
-    pub fn build<T: Into<String>>(&self, path: T, router: Option<RaftRouter>) -> SnapManager {
+    pub fn build<T: Into<String>>(
+        &self,
+        path: T,
+        router: Option<RaftRouter>,
+        backup_mgr: Option<Arc<BackupManager>>,
+    ) -> SnapManager {
         let limiter = if self.max_write_bytes_per_sec > 0 {
             Some(Arc::new(IOLimiter::new(self.max_write_bytes_per_sec)))
         } else {
@@ -1481,6 +1530,7 @@ impl SnapManagerBuilder {
             router,
             limiter,
             max_total_size,
+            backup_mgr,
         }
     }
 }
@@ -1791,6 +1841,7 @@ pub mod tests {
             Arc::clone(&size_track),
             deleter.clone(),
             None,
+            None,
         )
         .unwrap();
         assert!(!s3.exists());
@@ -1813,7 +1864,8 @@ pub mod tests {
 
         // Ensure a snapshot could be applied to DB.
         let mut s4 =
-            Snap::new_for_applying(dst_dir.path(), &key, Arc::clone(&size_track), deleter).unwrap();
+            Snap::new_for_applying(dst_dir.path(), &key, Arc::clone(&size_track), deleter, None)
+                .unwrap();
         assert!(s4.exists());
 
         let dst_db_dir = TempDir::new("test-snap-file-db-dst").unwrap();
@@ -2026,6 +2078,7 @@ pub mod tests {
             Arc::clone(&size_track),
             deleter,
             None,
+            None,
         )
         .unwrap();
 
@@ -2117,6 +2170,7 @@ pub mod tests {
             &key,
             Arc::clone(&size_track),
             deleter.clone(),
+            None,
         )
         .unwrap();
         assert!(s5.exists());
@@ -2139,13 +2193,15 @@ pub mod tests {
             Arc::clone(&size_track),
             deleter.clone(),
             None,
+            None,
         )
         .is_err());
         assert!(Snap::new_for_applying(
             dst_dir.path(),
             &key,
             Arc::clone(&size_track),
-            deleter.clone()
+            deleter.clone(),
+            None,
         )
         .is_err());
     }
@@ -2229,7 +2285,8 @@ pub mod tests {
             dst_dir.path(),
             &key,
             Arc::clone(&size_track),
-            deleter.clone()
+            deleter.clone(),
+            None,
         )
         .is_err());
         assert!(Snap::new_for_receiving(
@@ -2238,6 +2295,7 @@ pub mod tests {
             snap_data.take_meta(),
             Arc::clone(&size_track),
             deleter.clone(),
+            None,
             None,
         )
         .is_err());
@@ -2250,7 +2308,7 @@ pub mod tests {
         let temp_path = temp_dir.path().join("snap1");
         let path = temp_path.to_str().unwrap().to_owned();
         assert!(!temp_path.exists());
-        let mut mgr = SnapManager::new(path, None);
+        let mut mgr = SnapManager::new(path, None, None);
         mgr.init().unwrap();
         assert!(temp_path.exists());
 
@@ -2258,7 +2316,7 @@ pub mod tests {
         let temp_path2 = temp_dir.path().join("snap2");
         let path2 = temp_path2.to_str().unwrap().to_owned();
         File::create(temp_path2).unwrap();
-        mgr = SnapManager::new(path2, None);
+        mgr = SnapManager::new(path2, None, None);
         assert!(mgr.init().is_err());
     }
 
@@ -2266,7 +2324,7 @@ pub mod tests {
     fn test_snap_mgr_v2() {
         let temp_dir = TempDir::new("test-snap-mgr-v2").unwrap();
         let path = temp_dir.path().to_str().unwrap().to_owned();
-        let mgr = SnapManager::new(path.clone(), None);
+        let mgr = SnapManager::new(path.clone(), None, None);
         mgr.init().unwrap();
         assert_eq!(mgr.get_total_snap_size(), 0);
 
@@ -2306,6 +2364,7 @@ pub mod tests {
             Arc::clone(&size_track),
             deleter.clone(),
             None,
+            None,
         )
         .unwrap();
         let n = io::copy(&mut s, &mut s2).unwrap();
@@ -2331,6 +2390,7 @@ pub mod tests {
             Arc::clone(&size_track),
             deleter.clone(),
             None,
+            None,
         )
         .unwrap();
 
@@ -2339,7 +2399,7 @@ pub mod tests {
         assert!(!s3.exists());
         assert!(!s4.exists());
 
-        let mgr = SnapManager::new(path, None);
+        let mgr = SnapManager::new(path, None, None);
         mgr.init().unwrap();
         assert_eq!(mgr.get_total_snap_size(), expected_size * 2);
 
@@ -2370,7 +2430,7 @@ pub mod tests {
     fn test_snap_deletion_on_registry() {
         let src_temp_dir = TempDir::new("test-snap-deletion-on-registry-src").unwrap();
         let src_path = src_temp_dir.path().to_str().unwrap().to_owned();
-        let src_mgr = SnapManager::new(src_path.clone(), None);
+        let src_mgr = SnapManager::new(src_path.clone(), None, None);
         src_mgr.init().unwrap();
 
         let src_db_dir = TempDir::new("test-snap-deletion-on-registry-src-db").unwrap();
@@ -2406,7 +2466,7 @@ pub mod tests {
 
         let dst_temp_dir = TempDir::new("test-snap-deletion-on-registry-dst").unwrap();
         let dst_path = dst_temp_dir.path().to_str().unwrap().to_owned();
-        let dst_mgr = SnapManager::new(dst_path.clone(), None);
+        let dst_mgr = SnapManager::new(dst_path.clone(), None, None);
         dst_mgr.init().unwrap();
 
         // Ensure the snapshot being received will not be deleted on GC.
@@ -2442,7 +2502,7 @@ pub mod tests {
         let max_total_size = 10240;
         let snap_mgr = SnapManagerBuilder::default()
             .max_total_size(max_total_size)
-            .build(snapfiles_path.path().to_str().unwrap(), None);
+            .build(snapfiles_path.path().to_str().unwrap(), None, None);
         let snapshot = DbSnapshot::new(engine.kv);
 
         // Add an oldest snapshot for receiving.

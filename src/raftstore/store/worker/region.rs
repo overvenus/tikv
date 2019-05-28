@@ -793,7 +793,7 @@ mod tests {
         }
 
         let snap_dir = TempDir::new("snap_dir").unwrap();
-        let mgr = SnapManager::new(snap_dir.path().to_str().unwrap(), None);
+        let mgr = SnapManager::new(snap_dir.path().to_str().unwrap(), None, None);
         let mut worker = Worker::new("snap-manager");
         let sched = worker.scheduler();
         let runner = RegionRunner::new(engine.clone(), mgr, 0, true, Duration::from_secs(0));
@@ -815,7 +815,7 @@ mod tests {
             let s1 = rx.recv().unwrap();
             let data = s1.get_data();
             let key = SnapKey::from_snap(&s1).unwrap();
-            let mgr = SnapManager::new(snap_dir.path().to_str().unwrap(), None);
+            let mgr = SnapManager::new(snap_dir.path().to_str().unwrap(), None, None);
             let mut s2 = mgr.get_snapshot_for_sending(&key).unwrap();
             let mut s3 = mgr.get_snapshot_for_receiving(&key, &data[..]).unwrap();
             io::copy(&mut s2, &mut s3).unwrap();

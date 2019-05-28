@@ -347,7 +347,7 @@ mod tests {
                 quick_fail: Arc::clone(&quick_fail),
                 addr: Arc::clone(&addr),
             },
-            SnapManager::new("", None),
+            SnapManager::new("", None, None),
             None,
             None,
             None,

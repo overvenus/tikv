@@ -92,6 +92,7 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     let lock_path = store_path.join(Path::new("LOCK"));
     let db_path = store_path.join(Path::new(DEFAULT_ROCKSDB_SUB_DIR));
     let snap_path = store_path.join(Path::new("snap"));
+    let backup_path = store_path.join(Path::new("backup"));
     let raft_db_path = Path::new(&cfg.raft_store.raftdb_path);
     let import_path = store_path.join("import");
 
@@ -223,6 +224,17 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     )
     .unwrap_or_else(|e| fatal!("failed to create raft storage: {}", e));
 
+    // Create backup manager.
+    let backup_mgr = if cfg.server.backup_mode {
+        let local_storage = store::LocalStorage::new(&backup_path)
+            .unwrap_or_else(|e| fatal!("failed to create local storage: {}", e));
+        let backup = store::BackupManager::new(&backup_path, Box::new(local_storage))
+            .unwrap_or_else(|e| fatal!("failed to create backup manager: {}", e));
+        Some(Arc::new(backup))
+    } else {
+        None
+    };
+
     // Create snapshot manager, server.
     let snap_mgr = SnapManagerBuilder::default()
         .max_write_bytes_per_sec(cfg.server.snap_max_write_bytes_per_sec.0)
@@ -230,6 +242,7 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
         .build(
             snap_path.as_path().to_str().unwrap().to_owned(),
             Some(router.clone()),
+            backup_mgr,
         );
 
     let importer = Arc::new(SSTImporter::new(import_path).unwrap());
