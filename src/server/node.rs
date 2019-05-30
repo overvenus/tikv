@@ -12,7 +12,7 @@ use crate::raftstore::coprocessor::dispatcher::CoprocessorHost;
 use crate::raftstore::store::fsm::store::StoreMeta;
 use crate::raftstore::store::fsm::{RaftBatchSystem, RaftRouter};
 use crate::raftstore::store::{
-    self, initial_region, keys, Config as StoreConfig, SnapManager, Transport,
+    self, initial_region, keys, BackupManager, Config as StoreConfig, SnapManager, Transport,
 };
 use crate::server::readpool::ReadPool;
 use crate::server::Config as ServerConfig;
@@ -120,6 +120,7 @@ where
         store_meta: Arc<Mutex<StoreMeta>>,
         coprocessor_host: CoprocessorHost,
         importer: Arc<SSTImporter>,
+        backup_mgr: Option<Arc<BackupManager>>,
     ) -> Result<()>
     where
         T: Transport + 'static,
@@ -157,6 +158,7 @@ where
             store_meta,
             coprocessor_host,
             importer,
+            backup_mgr,
         )?;
         Ok(())
     }
@@ -323,6 +325,7 @@ where
         store_meta: Arc<Mutex<StoreMeta>>,
         coprocessor_host: CoprocessorHost,
         importer: Arc<SSTImporter>,
+        backup_mgr: Option<Arc<BackupManager>>,
     ) -> Result<()>
     where
         T: Transport + 'static,
@@ -347,6 +350,7 @@ where
             store_meta,
             coprocessor_host,
             importer,
+            backup_mgr,
         )?;
         Ok(())
     }

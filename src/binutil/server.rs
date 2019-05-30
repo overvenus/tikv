@@ -242,7 +242,7 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
         .build(
             snap_path.as_path().to_str().unwrap().to_owned(),
             Some(router.clone()),
-            backup_mgr,
+            backup_mgr.clone(),
         );
 
     let importer = Arc::new(SSTImporter::new(import_path).unwrap());
@@ -294,6 +294,7 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
         store_meta,
         coprocessor_host,
         importer,
+        backup_mgr,
     )
     .unwrap_or_else(|e| fatal!("failed to start node: {}", e));
     initial_metric(&cfg.metric, Some(node.id()));

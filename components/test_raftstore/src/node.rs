@@ -214,6 +214,7 @@ impl Simulator for NodeCluster {
             store_meta,
             coprocessor_host,
             importer,
+            None,
         )?;
         assert!(engines
             .raft

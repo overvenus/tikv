@@ -189,6 +189,10 @@ impl BackupManager {
         &self.current
     }
 
+    pub fn region_path(&self, region_id: u64) -> PathBuf {
+        self.current.join(format!("{}", region_id))
+    }
+
     pub fn start_backup_region(&self, region_id: u64) -> Result<()> {
         if let Err(e) = self
             .storage
@@ -201,9 +205,19 @@ impl BackupManager {
         Ok(())
     }
 
+    pub fn log_path(&self, region_id: u64, first: u64, last: u64) -> PathBuf {
+        self.current
+            .join(format!("{}/{}_{}", region_id, first, last))
+    }
+
+    pub fn save_logs(&self, region_id: u64, first: u64, last: u64, content: &[u8]) -> Result<()> {
+        let dst = self.log_path(region_id, first, last);
+        self.storage.save_file(&dst, content)
+    }
+
     pub fn snapshot_dir(&self, region_id: u64, term: u64, index: u64) -> PathBuf {
         self.current
-            .join(format!("{}/{}_{}", region_id, index, term))
+            .join(format!("{}/{}@{}", region_id, index, term))
     }
 
     pub fn save_snapshot(&self, region_id: u64, term: u64, index: u64, src: &Path) -> Result<()> {
@@ -256,7 +270,7 @@ mod tests {
         // Test tmp_path
         let tp = ls.tmp_path(Path::new("t.sst"));
         assert_eq!(tp.parent().unwrap(), path.join(LOCAL_STORAGE_TMP_DIR));
-        assert!(tp.file_name().unwrap().to_str().unwrap().starts_with("t"));
+        assert!(tp.file_name().unwrap().to_str().unwrap().starts_with('t'));
         assert!(tp
             .as_path()
             .extension()
@@ -354,5 +368,12 @@ mod tests {
         let ls = LocalStorage::new(&path).unwrap();
         let bm = BackupManager::new(&path, Box::new(ls)).unwrap();
         check_meta(&bm, bm.dependency.get() - 1, magic_contents);
+
+        bm.save_logs(1, 10, 100, magic_contents).unwrap();
+        let mut buf = vec![];
+        bm.storage
+            .read_file(&bm.log_path(1, 10, 100), &mut buf)
+            .unwrap();
+        assert_eq!(buf, magic_contents);
     }
 }

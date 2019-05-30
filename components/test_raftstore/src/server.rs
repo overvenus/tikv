@@ -243,6 +243,7 @@ impl Simulator for ServerCluster {
             store_meta,
             coprocessor_host,
             importer,
+            backup_mgr.clone(),
         )?;
         assert!(node_id == 0 || node_id == node.id());
         let node_id = node.id();

@@ -17,6 +17,7 @@ use engine::rocks::{Snapshot, WriteBatch, WriteOptions};
 use engine::Engines;
 use engine::{util as engine_util, Mutable, Peekable};
 use engine::{ALL_CFS, CF_DEFAULT, CF_LOCK, CF_WRITE};
+use kvproto::backup::{BackupEvent, BackupEvent_Event, EntryBatch};
 use kvproto::import_sstpb::SSTMeta;
 use kvproto::metapb::{Peer as PeerMeta, Region};
 use kvproto::raft_cmdpb::{
@@ -26,7 +27,7 @@ use kvproto::raft_cmdpb::{
 use kvproto::raft_serverpb::{
     MergeState, PeerState, RaftApplyState, RaftTruncatedState, RegionLocalState,
 };
-use protobuf::RepeatedField;
+use protobuf::{Message, RepeatedField};
 use raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Snapshot as RaftSnapshot};
 use raft::NO_LIMIT;
 use uuid::Uuid;
@@ -39,7 +40,7 @@ use crate::raftstore::store::msg::{Callback, PeerMsg};
 use crate::raftstore::store::peer::Peer;
 use crate::raftstore::store::peer_storage::{self, write_initial_apply_state, write_peer_state};
 use crate::raftstore::store::util::check_region_epoch;
-use crate::raftstore::store::{cmd_resp, keys, util, Config};
+use crate::raftstore::store::{cmd_resp, keys, util, BackupManager, Config};
 use crate::raftstore::{Error, Result};
 use tikv_util::mpsc::{loose_bounded, LooseBoundedSender, Receiver};
 use tikv_util::time::{duration_to_sec, Instant, SlowTimer};
@@ -280,6 +281,7 @@ impl Notifier {
 struct ApplyContext {
     tag: String,
     timer: Option<SlowTimer>,
+    backup_mgr: Option<Arc<BackupManager>>,
     host: Arc<CoprocessorHost>,
     importer: Arc<SSTImporter>,
     region_scheduler: Scheduler<RegionTask>,
@@ -302,6 +304,9 @@ struct ApplyContext {
     sync_log_hint: bool,
     // Whether to use the delete range API instead of deleting one by one.
     use_delete_range: bool,
+
+    entry_batch_buf: Vec<u8>,
+    event_batch_buf: Vec<BackupEvent>,
 }
 
 impl ApplyContext {
@@ -314,10 +319,12 @@ impl ApplyContext {
         router: BatchRouter<ApplyFsm, ControlFsm>,
         notifier: Notifier,
         cfg: &Config,
+        backup_mgr: Option<Arc<BackupManager>>,
     ) -> ApplyContext {
         ApplyContext {
             tag,
             timer: None,
+            backup_mgr,
             host,
             importer,
             region_scheduler,
@@ -335,6 +342,8 @@ impl ApplyContext {
             sync_log_hint: false,
             exec_ctx: None,
             use_delete_range: cfg.use_delete_range,
+            entry_batch_buf: vec![],
+            event_batch_buf: vec![],
         }
     }
 
@@ -486,12 +495,45 @@ impl ApplyContext {
 
     /// Flush all pending writes to engines.
     /// If it returns true, all pending writes are persisted in engines.
-    pub fn flush(&mut self) -> bool {
+    pub fn flush<T>(&mut self, fsms: &mut [T]) -> bool
+    where
+        T: AsMut<ApplyFsm>,
+    {
         // TODO: this check is too hacky, need to be more verbose and less buggy.
         let t = match self.timer.take() {
             Some(t) => t,
             None => return false,
         };
+
+        if self.backup_mgr.is_some() && self.sync_log_hint {
+            let bm = self.backup_mgr.as_ref().unwrap();
+            self.event_batch_buf.clear();
+            for f in fsms {
+                let fsm = f.as_mut();
+                let region_id = fsm.delegate.region_id();
+                let delegate = &mut fsm.delegate;
+                let entry_batch = &mut delegate.entry_batch;
+                if entry_batch.get_entries().is_empty() {
+                    continue;
+                }
+                let first = entry_batch.get_entries().first().unwrap().get_index();
+                let last = entry_batch.get_entries().last().unwrap().get_index();
+
+                // Save raft log entries.
+                // TODO: gc large buffer.
+                self.entry_batch_buf.clear();
+                entry_batch.write_to_vec(&mut self.entry_batch_buf).unwrap();
+                bm.save_logs(region_id, first, last, &self.entry_batch_buf)
+                    .unwrap();
+                entry_batch.mut_entries().clear();
+
+                // Collect events.
+                self.event_batch_buf
+                    .extend(fsm.delegate.event_batch.drain(..));
+            }
+            // Save events.
+            bm.save_events(self.event_batch_buf.drain(..)).unwrap();
+        }
 
         // Write to engine
         // raftsotre.sync-log = true means we need prevent data loss when power failure.
@@ -693,6 +735,9 @@ pub struct ApplyDelegate {
 
     /// The local metrics, and it will be flushed periodically.
     metrics: ApplyMetrics,
+
+    entry_batch: EntryBatch,
+    event_batch: Vec<BackupEvent>,
 }
 
 impl ApplyDelegate {
@@ -715,6 +760,8 @@ impl ApplyDelegate {
             metrics: Default::default(),
             last_merge_version: 0,
             pending_request_snapshot_count: reg.pending_request_snapshot_count,
+            entry_batch: EntryBatch::new(),
+            event_batch: vec![],
         }
     }
 
@@ -827,6 +874,10 @@ impl ApplyDelegate {
         let term = entry.get_term();
         let data = entry.get_data();
 
+        if apply_ctx.backup_mgr.is_some() {
+            // We are in backup mode, save entry to entry batch.
+            self.entry_batch.mut_entries().push(entry.clone());
+        }
         if !data.is_empty() {
             let cmd = util::parse_data_at(data, index, &self.tag);
 
@@ -1077,6 +1128,25 @@ impl ApplyDelegate {
     fn new_ctx(&self, index: u64, term: u64) -> ExecContext {
         ExecContext::new(self.apply_state.clone(), index, term)
     }
+
+    fn push_backup_event(
+        &mut self,
+        ctx: &ApplyContext,
+        e: BackupEvent_Event,
+        related_region_ids: &[u64],
+    ) {
+        if let Some(bm) = ctx.backup_mgr.as_ref() {
+            let mut event = BackupEvent::new();
+            event.set_region_id(self.region_id());
+            event.set_index(ctx.exec_ctx.as_ref().unwrap().index);
+            event.set_dependency(bm.dependency.alloc_number());
+            event.set_event(e);
+            for id in related_region_ids {
+                event.mut_related_region_ids().push(*id);
+            }
+            self.event_batch.push(event);
+        }
+    }
 }
 
 impl ApplyDelegate {
@@ -1091,10 +1161,13 @@ impl ApplyDelegate {
             req.get_header().get_region_epoch().get_version() >= self.last_merge_version;
         check_region_epoch(&req, &self.region, include_region)?;
         if req.has_admin_request() {
-            self.exec_admin_cmd(ctx, &req)
-        } else {
-            self.exec_write_cmd(ctx, &req)
+            return self.exec_admin_cmd(ctx, &req);
         }
+        if ctx.backup_mgr.is_some() {
+            // We do not need to execute write cmd in backup mode.
+            return Ok((Default::default(), ApplyResult::None));
+        }
+        self.exec_write_cmd(ctx, &req)
     }
 
     fn exec_admin_cmd(
@@ -1718,6 +1791,14 @@ impl ApplyDelegate {
             .with_label_values(&["batch-split", "success"])
             .inc();
 
+        // Save split event to event_batch.
+        let ids: Vec<_> = regions.iter().map(|r| r.get_id()).collect();
+        self.push_backup_event(ctx, BackupEvent_Event::Split, &ids);
+        if let Some(bm) = ctx.backup_mgr.as_ref() {
+            for id in ids {
+                bm.start_backup_region(id).unwrap();
+            }
+        }
         Ok((
             resp,
             ApplyResult::Res(ExecResult::SplitRegion { regions, derived }),
@@ -1776,6 +1857,12 @@ impl ApplyDelegate {
             .with_label_values(&["prepare_merge", "success"])
             .inc();
 
+        // Save prepare merge event to event_batch.
+        self.push_backup_event(
+            ctx,
+            BackupEvent_Event::PrepareMerge,
+            &[prepare_merge.get_target().get_id()],
+        );
         Ok((
             AdminResponse::new(),
             ApplyResult::Res(ExecResult::PrepareMerge {
@@ -1954,6 +2041,8 @@ impl ApplyDelegate {
             .with_label_values(&["commit_merge", "success"])
             .inc();
 
+        // Save prepare merge event to event_batch.
+        self.push_backup_event(ctx, BackupEvent_Event::CommitMerge, &[source_region_id]);
         let resp = AdminResponse::new();
         Ok((
             resp,
@@ -2000,6 +2089,10 @@ impl ApplyDelegate {
         PEER_ADMIN_CMD_COUNTER_VEC
             .with_label_values(&["rollback_merge", "success"])
             .inc();
+
+        // Save rollback merge event to event_batch.
+        let target_id = state.get_merge_state().get_target().get_id();
+        self.push_backup_event(ctx, BackupEvent_Event::RollbackMerge, &[target_id]);
         let resp = AdminResponse::new();
         Ok((
             resp,
@@ -2402,6 +2495,12 @@ pub struct ApplyFsm {
     mailbox: Option<BasicMailbox<ApplyFsm>>,
 }
 
+impl AsMut<ApplyFsm> for &mut ApplyFsm {
+    fn as_mut(&mut self) -> &mut ApplyFsm {
+        *self
+    }
+}
+
 impl ApplyFsm {
     fn from_peer(peer: &Peer) -> (LooseBoundedSender<Msg>, Box<ApplyFsm>) {
         let reg = Registration::new(peer);
@@ -2494,7 +2593,8 @@ impl ApplyFsm {
         let region_id = self.delegate.region_id();
         if ctx.apply_res.iter().any(|res| res.region_id == region_id) {
             // Flush before destroying to avoid reordering messages.
-            ctx.flush();
+            let fsm: &mut ApplyFsm = self;
+            ctx.flush(&mut [fsm]);
         }
         info!(
             "remove delegate from apply delegates";
@@ -2660,7 +2760,7 @@ impl ApplyFsm {
             // Because apply states are wrote to raft engine, so we have to
             // force sync to make sure there is no lost update after restart.
             apply_ctx.sync_log_hint = true;
-            assert!(apply_ctx.flush());
+            assert!(apply_ctx.flush::<&mut ApplyFsm>(&mut []));
             self.delegate.last_sync_apply_index = self.delegate.apply_state.get_applied_index();
         }
         if let Err(e) = snap_task
@@ -2813,7 +2913,7 @@ impl PollHandler<ApplyFsm, ControlFsm> for ApplyPoller {
     }
 
     fn end(&mut self, fsms: &mut [Box<ApplyFsm>]) {
-        let is_synced = self.apply_ctx.flush();
+        let is_synced = self.apply_ctx.flush(fsms);
         if is_synced {
             for fsm in fsms {
                 fsm.delegate.last_sync_apply_index = fsm.delegate.apply_state.get_applied_index();
@@ -2831,6 +2931,7 @@ pub struct Builder {
     engines: Engines,
     sender: Notifier,
     router: ApplyRouter,
+    backup_mgr: Option<Arc<BackupManager>>,
 }
 
 impl Builder {
@@ -2838,6 +2939,7 @@ impl Builder {
         builder: &RaftPollerBuilder<T, C>,
         sender: Notifier,
         router: ApplyRouter,
+        backup_mgr: Option<Arc<BackupManager>>,
     ) -> Builder {
         Builder {
             tag: format!("[store {}]", builder.store.get_id()),
@@ -2848,6 +2950,7 @@ impl Builder {
             engines: builder.engines.clone(),
             sender,
             router,
+            backup_mgr,
         }
     }
 }
@@ -2867,6 +2970,7 @@ impl HandlerBuilder<ApplyFsm, ControlFsm> for Builder {
                 self.router.clone(),
                 self.sender.clone(),
                 &self.cfg,
+                self.backup_mgr.clone(),
             ),
             messages_per_tick: self.cfg.messages_per_tick,
         }
@@ -2952,6 +3056,7 @@ pub fn create_apply_batch_system(cfg: &Config) -> (ApplyRouter, ApplyBatchSystem
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::atomic::*;
     use std::sync::*;
@@ -2969,7 +3074,7 @@ mod tests {
     use tempdir::TempDir;
 
     use crate::import::test_helpers::*;
-    use crate::raftstore::store::{Config, RegionTask};
+    use crate::raftstore::store::{Config, LocalStorage, RegionTask};
     use tikv_util::worker::dummy_scheduler;
 
     use super::*;
@@ -2997,6 +3102,13 @@ mod tests {
         let dir = TempDir::new(path).unwrap();
         let importer = Arc::new(SSTImporter::new(dir.path()).unwrap());
         (dir, importer)
+    }
+
+    fn create_tmp_backup_mgr(path: &str) -> (TempDir, Arc<BackupManager>) {
+        let dir = TempDir::new(path).unwrap();
+        let ls = LocalStorage::new(dir.path()).unwrap();
+        let bm = Arc::new(BackupManager::new(dir.path(), Box::new(ls)).unwrap());
+        (dir, bm)
     }
 
     pub fn new_entry(term: u64, index: u64, req: Option<RaftCmdRequest>) -> Entry {
@@ -3116,6 +3228,7 @@ mod tests {
             sender,
             engines: engines.clone(),
             router: router.clone(),
+            backup_mgr: None,
         };
         system.spawn("test-basic".to_owned(), builder);
 
@@ -3461,6 +3574,7 @@ mod tests {
             importer: importer.clone(),
             engines: engines.clone(),
             router: router.clone(),
+            backup_mgr: None,
         };
         system.spawn("test-handle-raft".to_owned(), builder);
 
@@ -3802,6 +3916,7 @@ mod tests {
             coprocessor_host: host,
             engines: engines.clone(),
             router: router.clone(),
+            backup_mgr: None,
         };
         system.spawn("test-split".to_owned(), builder);
 
@@ -3938,5 +4053,140 @@ mod tests {
         checker.check(b"k3", b"k31", 1, &[3, 5, 7], false);
         checker.check(b"k31", b"k32", 24, &[25, 26, 27], true);
         checker.check(b"k32", b"k4", 28, &[29, 30, 31], true);
+    }
+
+    #[test]
+    fn test_backup() {
+        let (_path, engines) = create_tmp_engine("test-delegate");
+        let (_import_dir, importer) = create_tmp_importer("test-delegate");
+        let (_bm_dir, bm) = create_tmp_backup_mgr("test-delegate");
+        let mut reg = Registration::default();
+        reg.id = 3;
+        reg.term = 1;
+        reg.region.set_id(1);
+        reg.region.set_end_key(b"k5".to_vec());
+        reg.region.mut_region_epoch().set_conf_ver(1);
+        reg.region.mut_region_epoch().set_version(3);
+        let peers = vec![new_peer(2, 3), new_peer(4, 5), new_learner_peer(6, 7)];
+        reg.region.set_peers(RepeatedField::from_vec(peers.clone()));
+        let (tx, _rx) = mpsc::channel();
+        let sender = Notifier::Sender(tx);
+        let host = Arc::new(CoprocessorHost::default());
+        let (region_scheduler, _) = dummy_scheduler();
+        let cfg = Arc::new(Config::default());
+        let (router, mut system) = create_apply_batch_system(&cfg);
+        let builder = super::Builder {
+            tag: "test-store".to_owned(),
+            cfg,
+            sender,
+            importer,
+            region_scheduler,
+            coprocessor_host: host,
+            engines: engines.clone(),
+            router: router.clone(),
+            backup_mgr: Some(bm.clone()),
+        };
+        system.spawn("test-backup".to_owned(), builder);
+
+        router.schedule_task(1, Msg::Registration(reg.clone()));
+        bm.start_backup_region(1).unwrap();
+
+        let entry_batch = RefCell::new(EntryBatch::new());
+        let index_id = RefCell::new(1);
+        let make_split_msg = |reqs| -> Msg {
+            let split = EntryBuilder::new(*index_id.borrow(), 1)
+                .split(reqs)
+                .epoch(1, 3)
+                .build();
+            *index_id.borrow_mut() += 1;
+            entry_batch.borrow_mut().mut_entries().push(split.clone());
+            Msg::apply(Apply::new(1, 1, vec![split]))
+        };
+        let make_put_msg = |count: usize| -> Msg {
+            let mut puts = vec![];
+            for _ in 0..count {
+                let put = EntryBuilder::new(*index_id.borrow(), 1)
+                    .put(b"k2", b"v2")
+                    .epoch(1, 3)
+                    .build();
+                *index_id.borrow_mut() += 1;
+                entry_batch.borrow_mut().mut_entries().push(put.clone());
+                puts.push(put);
+            }
+            Msg::apply(Apply::new(1, 1, puts))
+        };
+
+        let check_delegate = |region_id: u64,
+                              mut msgs: Vec<Msg>,
+                              entry_batch_size: usize,
+                              event_batch_size: usize|
+         -> Vec<PathBuf> {
+            let (tx, rx) = mpsc::channel();
+            msgs.push(Msg::Validate(
+                region_id,
+                Box::new(move |delegate: &ApplyDelegate| {
+                    assert_eq!(
+                        delegate.entry_batch.get_entries().len(),
+                        entry_batch_size,
+                        "{:?}",
+                        delegate.entry_batch
+                    );
+                    assert_eq!(
+                        delegate.event_batch.len(),
+                        event_batch_size,
+                        "{:?}",
+                        delegate.event_batch
+                    );
+                    tx.send(()).unwrap();
+                }),
+            ));
+            batch_messages(&router, region_id, msgs);
+            rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            bm.storage.list_dir(&bm.region_path(1)).unwrap()
+        };
+
+        // Write cmds do not add backup events.
+        let mut first: u64 = *index_id.borrow();
+        let put_msg1 = make_put_msg(1);
+        let put_msg2 = make_put_msg(2);
+        let put_msg3 = make_put_msg(3);
+        router.schedule_task(1, put_msg1);
+        assert!(check_delegate(1, vec![put_msg2, put_msg3], 6, 0).is_empty());
+
+        // Both bad and good committed entries should be backuped.
+        let mut splits = BatchSplitRequest::new();
+        splits.set_right_derive(true);
+        // Bad split, because 3 followers are required.
+        splits.mut_requests().push(new_split_req(b"k1", 8, vec![]));
+        let split_msg = make_split_msg(splits.clone());
+        // Bad admin cmds do not add backup events, but they do flush entry_batch.
+        assert_eq!(check_delegate(1, vec![split_msg], 7, 0).len(), 0);
+        assert_eq!(check_delegate(1, vec![], 0, 0).len(), 1);
+        let mut last: u64 = *index_id.borrow() - 1;
+        let mut buf = vec![];
+        bm.storage
+            .read_file(&bm.log_path(1, first, last), &mut buf)
+            .unwrap();
+        assert_eq!(buf, entry_batch.borrow().write_to_bytes().unwrap());
+        entry_batch.borrow_mut().mut_entries().clear();
+        buf.clear();
+
+        first = *index_id.borrow();
+        last = *index_id.borrow();
+        splits.mut_requests().clear();
+        splits
+            .mut_requests()
+            .push(new_split_req(b"k1", 8, vec![9, 10, 11]));
+        let split_msg = make_split_msg(splits.clone());
+        // Good admin cmds add backup events, and they flush entry_batch.
+        assert_eq!(check_delegate(1, vec![split_msg], 1, 1).len(), 1);
+        assert_eq!(check_delegate(1, vec![], 0, 0).len(), 2);
+        // Split also starts backup new regions.
+        assert!(bm.storage.list_dir(&bm.region_path(8)).unwrap().is_empty());
+        bm.storage
+            .read_file(&bm.log_path(1, first, last), &mut buf)
+            .unwrap();
+        assert_eq!(buf, entry_batch.borrow().write_to_bytes().unwrap());
+        entry_batch.borrow_mut().mut_entries().clear();
     }
 }

@@ -99,6 +99,7 @@ fn test_node_bootstrap_with_prepared_data() {
         Arc::new(Mutex::new(StoreMeta::new(0))),
         coprocessor_host,
         importer,
+        None,
     )
     .unwrap();
     assert!(Arc::clone(&raft_engine)

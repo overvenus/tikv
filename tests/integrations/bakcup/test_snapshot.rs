@@ -1,23 +1,11 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
-
-use futures::Future;
-
-use kvproto::metapb;
-use kvproto::raft_cmdpb::{RaftCmdResponse, RaftResponseHeader};
-use kvproto::raft_serverpb::*;
-use raft::eraftpb::{ConfChangeType, MessageType};
 
 use engine::*;
 use test_raftstore::*;
-use tikv::pd::PdClient;
 use tikv::raftstore::store::*;
-use tikv::raftstore::Result;
-use tikv_util::config::ReadableDuration;
+use tikv_util::config::{ReadableDuration, ReadableSize};
 use tikv_util::HandyRwLock;
 
 fn run_cluster_with_backup<T: Simulator>(cluster: &mut Cluster<T>, backup_nodes: &[u64]) -> u64 {
@@ -43,29 +31,35 @@ fn check_snapshot(bm: &BackupManager, region_id: u64, cf_count: usize) {
     assert_eq!(snap_list.len(), cf_count + 1);
 }
 
-fn test_simple_snapshot(cluster: &mut Cluster<ServerCluster>) {
+#[test]
+fn test_server_simple_backup_snapshot() {
+    let mut cluster = new_server_cluster(0, 4);
     let pd_client = Arc::clone(&cluster.pd_client);
     // Disable default max peer count check.
     pd_client.disable_default_operator();
 
-    let r1 = run_cluster_with_backup(cluster, &[2, 3]);
-
     // Now region 1 only has peer (1, 1);
-    let (key, value) = (b"k1", b"v1");
+    let r1 = run_cluster_with_backup(&mut cluster, &[2, 3, 4]);
 
+    // Add learner (2, 2) to region 1.
+    pd_client.must_add_peer(r1, new_learner_peer(2, 2));
+    pd_client.must_none_pending_peer(new_learner_peer(2, 2));
+    // Check all cfs are emptry.
+    let backup_mgr2 = cluster.sim.rl().get_backup_mgr(2).unwrap();
+    check_snapshot(&backup_mgr2, r1, 0);
+
+    let (key, value) = (b"k1", b"v1");
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
-    let engine_2 = cluster.get_engine(2);
-    must_get_none(&engine_2, b"k1");
-    // add learner (2, 2) to region 1.
-    pd_client.must_add_peer(r1, new_learner_peer(2, 2));
-    pd_client.must_none_pending_peer(new_learner_peer(2, 2));
+    // Add learner (3, 3) to region 1.
+    pd_client.must_add_peer(r1, new_learner_peer(3, 3));
+    pd_client.must_none_pending_peer(new_learner_peer(3, 3));
+    // Check only default cf is not emptry.
+    let backup_mgr3 = cluster.sim.rl().get_backup_mgr(3).unwrap();
+    check_snapshot(&backup_mgr3, r1, 1);
 
-    // check only default is not emptry.
-    let backup_mgr2 = cluster.sim.rl().get_backup_mgr(2).unwrap();
-    check_snapshot(&backup_mgr2, r1, 1);
-
+    // Check only default is not emptry.
     let (key, value) = (b"k2", b"v2");
     cluster.must_put_cf(CF_LOCK, key, value);
     assert_eq!(cluster.get_cf(CF_LOCK, key), Some(value.to_vec()));
@@ -74,18 +68,61 @@ fn test_simple_snapshot(cluster: &mut Cluster<ServerCluster>) {
     cluster.must_put_cf(CF_WRITE, key, value);
     assert_eq!(cluster.get_cf(CF_WRITE, key), Some(value.to_vec()));
 
-    // add learner (3, 3) to region 1.
-    pd_client.must_add_peer(r1, new_learner_peer(3, 3));
-    pd_client.must_none_pending_peer(new_learner_peer(3, 3));
-
-    // check all cfs are not emptry.
-    let backup_mgr3 = cluster.sim.rl().get_backup_mgr(3).unwrap();
-    check_snapshot(&backup_mgr3, r1, 3);
+    // Add learner (4, 4) to region 1.
+    pd_client.must_add_peer(r1, new_learner_peer(4, 4));
+    pd_client.must_none_pending_peer(new_learner_peer(4, 4));
+    // Check all cfs are not emptry.
+    let backup_mgr4 = cluster.sim.rl().get_backup_mgr(4).unwrap();
+    check_snapshot(&backup_mgr4, r1, 3);
 }
 
 #[test]
-fn test_server_simple_backup_snapshot() {
-    let count = 3;
-    let mut cluster = new_server_cluster(0, count);
-    test_simple_snapshot(&mut cluster);
+fn test_server_simple_replication() {
+    let mut cluster = new_server_cluster(0, 2);
+    // Avoid log compaction which flush log files unexpectedly.
+    cluster.cfg.raft_store.raft_log_gc_threshold = 1000;
+    cluster.cfg.raft_store.raft_log_gc_count_limit = 1000;
+    cluster.cfg.raft_store.raft_log_gc_size_limit = ReadableSize::mb(20);
+    cluster.cfg.raft_store.snap_mgr_gc_tick_interval = ReadableDuration::hours(50);
+
+    let pd_client = Arc::clone(&cluster.pd_client);
+    // Disable default max peer count check.
+    pd_client.disable_default_operator();
+    // Now region 1 only has peer (1, 1);
+    let r1 = run_cluster_with_backup(&mut cluster, &[2]);
+
+    // Add learner (2, 2) to region 1.
+    pd_client.must_add_peer(r1, new_learner_peer(2, 2));
+    pd_client.must_none_pending_peer(new_learner_peer(2, 2));
+    // Check all cfs are emptry.
+    let backup_mgr2 = cluster.sim.rl().get_backup_mgr(2).unwrap();
+    check_snapshot(&backup_mgr2, r1, 0);
+    let check_list_dir = |region_id, count| {
+        let list = backup_mgr2
+            .storage
+            .list_dir(&backup_mgr2.region_path(region_id))
+            .unwrap();
+        assert_eq!(list.len(), count, "{:?}", list,);
+    };
+    check_list_dir(r1, 1);
+
+    // Write cmds does not flush log files.
+    for _ in 0..20 {
+        let (key, value) = (b"k1", b"v1");
+        cluster.must_put(key, value);
+    }
+    // Only snapshot dir.
+    check_list_dir(r1, 1);
+
+    // Split cmds do flush log files.
+    let region = cluster.get_region(b"");
+    cluster.must_split(&region, b"k2");
+    // Split is right derived by default.
+    let region2 = cluster.get_region(b"k1");
+    // TODO: use readindex to make sure learner has applied latest committed logs.
+    sleep_ms(500);
+    // Snapshot dir and a log file.
+    check_list_dir(r1, 2);
+    // Raft peers always propose a raft log after became leader.
+    check_list_dir(region2.get_id(), 1);
 }

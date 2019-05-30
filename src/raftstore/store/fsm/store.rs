@@ -49,8 +49,8 @@ use crate::raftstore::store::worker::{
     SplitCheckRunner, SplitCheckTask,
 };
 use crate::raftstore::store::{
-    util, Callback, CasualMessage, PeerMsg, RaftCommand, SignificantMsg, SnapManager,
-    SnapshotDeleter, StoreMsg, StoreTick,
+    util, BackupManager, Callback, CasualMessage, PeerMsg, RaftCommand, SignificantMsg,
+    SnapManager, SnapshotDeleter, StoreMsg, StoreTick,
 };
 use crate::raftstore::Result;
 use crate::storage::kv::{CompactedEvent, CompactionListener};
@@ -203,6 +203,7 @@ pub struct PollContext<T, C: 'static> {
     pub future_poller: ThreadPoolSender,
     pub raft_metrics: RaftMetrics,
     pub snap_mgr: SnapManager,
+    pub backup_mgr: Option<Arc<BackupManager>>,
     pub applying_snap_count: Arc<AtomicUsize>,
     pub coprocessor_host: Arc<CoprocessorHost>,
     pub timer: SteadyTimer,
@@ -690,6 +691,7 @@ pub struct RaftPollerBuilder<T, C> {
     global_stat: GlobalStoreStat,
     pub engines: Engines,
     applying_snap_count: Arc<AtomicUsize>,
+    backup_mgr: Option<Arc<BackupManager>>,
 }
 
 impl<T, C> RaftPollerBuilder<T, C> {
@@ -882,6 +884,7 @@ where
             ready_res: Vec::new(),
             need_flush_trans: false,
             queued_snapshot: HashSet::default(),
+            backup_mgr: self.backup_mgr.clone(),
         };
         RaftPoller {
             tag: format!("[store {}]", ctx.store.get_id()),
@@ -933,6 +936,7 @@ impl RaftBatchSystem {
         store_meta: Arc<Mutex<StoreMeta>>,
         mut coprocessor_host: CoprocessorHost,
         importer: Arc<SSTImporter>,
+        backup_mgr: Option<Arc<BackupManager>>,
     ) -> Result<()> {
         assert!(self.workers.is_none());
         // TODO: we can get cluster meta regularly too later.
@@ -979,6 +983,7 @@ impl RaftBatchSystem {
             store_meta,
             applying_snap_count: Arc::new(AtomicUsize::new(0)),
             future_poller: workers.future_poller.sender().clone(),
+            backup_mgr,
         };
         let region_peers = builder.init()?;
         self.start_system(workers, region_peers, builder)?;
@@ -1004,6 +1009,7 @@ impl RaftBatchSystem {
             &builder,
             ApplyNotifier::Router(self.router.clone()),
             self.apply_router.clone(),
+            builder.backup_mgr.clone(),
         );
         self.apply_system
             .schedule_all(region_peers.iter().map(|pair| pair.1.get_peer()));
@@ -1391,7 +1397,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
             region_id,
             target.clone(),
         )?;
-        if let Some(bm) = self.ctx.snap_mgr.backup_mgr.as_ref() {
+        if let Some(bm) = self.ctx.backup_mgr.as_ref() {
             bm.start_backup_region(region_id).unwrap();
         }
         // following snapshot may overlap, should insert into region_ranges after
