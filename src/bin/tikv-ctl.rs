@@ -38,7 +38,7 @@ use raft::eraftpb::{ConfChange, Entry, EntryType};
 use tikv::binutil as util;
 use tikv::config::TiKvConfig;
 use tikv::pd::{Config as PdConfig, PdClient, RpcClient};
-use tikv::raftstore::store::{keys, INIT_EPOCH_CONF_VER};
+use tikv::raftstore::store::{keys, BackupManager, LocalStorage, INIT_EPOCH_CONF_VER};
 use tikv::server::debug::{BottommostLevelCompaction, Debugger, RegionInfo};
 use tikv::storage::Key;
 use tikv_util::security::{SecurityConfig, SecurityManager};
@@ -1659,6 +1659,21 @@ fn main() {
                         .default_value("1024")
                         .help("the length"),
                 ),
+        ).subcommand(
+            SubCommand::with_name("backup")
+                .about("Backup a TiKV cluster")
+                .arg(
+                    Arg::with_name("path")
+                        .short("p")
+                        .long("path")
+                        .takes_value(true)
+                        .required(true)
+                        .help("the path of backup location"),
+                )
+                .subcommand(
+                    SubCommand::with_name("meta")
+                        .about("Display back meta information"),
+                ),
         );
 
     let matches = app.clone().get_matches();
@@ -1686,6 +1701,17 @@ fn main() {
         let len = value_t_or_exit!(matches.value_of("len"), usize);
         let random_bytes = gen_random_bytes(len);
         v1!("{}", hex::encode_upper(&random_bytes));
+        return;
+    } else if let Some(matches) = matches.subcommand_matches("backup") {
+        use std::path::Path;
+        let p = matches.value_of("path").unwrap();
+        let path = Path::new(p);
+        let ls = LocalStorage::new(path).unwrap();
+        let bm = BackupManager::new(path, Box::new(ls)).unwrap();
+        if matches.subcommand_matches("meta").is_some() {
+            let meta = bm.backup_meta();
+            v1!("backup meta:\n{:#?}", meta);
+        }
         return;
     }
 

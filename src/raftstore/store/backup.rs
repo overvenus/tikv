@@ -185,6 +185,10 @@ impl BackupManager {
         })
     }
 
+    pub fn backup_meta(&self) -> BackupMeta {
+        self.meta.lock().unwrap().backup_meta.clone()
+    }
+
     pub fn tmp_dir(&self, prefix: &str) -> Result<TempDir> {
         TempDir::new_in(&self.auxiliary, prefix)
     }
