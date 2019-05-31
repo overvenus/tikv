@@ -2173,6 +2173,10 @@ impl ApplyDelegate {
         _: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult)> {
         let resp = AdminResponse::new();
+        if ctx.backup_mgr.is_some() {
+            // Can not compute hash in backup mode.
+            return Ok((resp, ApplyResult::None));
+        }
         Ok((
             resp,
             ApplyResult::Res(ExecResult::ComputeHash {
@@ -2190,13 +2194,17 @@ impl ApplyDelegate {
 
     fn exec_verify_hash(
         &self,
-        _: &ApplyContext,
+        ctx: &ApplyContext,
         req: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult)> {
+        let resp = AdminResponse::new();
+        if ctx.backup_mgr.is_some() {
+            // Can not verify hash in backup mode.
+            return Ok((resp, ApplyResult::None));
+        }
         let verify_req = req.get_verify_hash();
         let index = verify_req.get_index();
         let hash = verify_req.get_hash().to_vec();
-        let resp = AdminResponse::new();
         Ok((
             resp,
             ApplyResult::Res(ExecResult::VerifyHash { index, hash }),
