@@ -25,7 +25,7 @@ impl Dependency for AtomicU64 {
 }
 
 fn maybe_create_dir(path: &Path) -> Result<()> {
-    if let Err(e) = fs::create_dir(path) {
+    if let Err(e) = fs::create_dir_all(path) {
         if e.kind() != ErrorKind::AlreadyExists {
             return Err(e);
         }
@@ -90,7 +90,8 @@ impl Storage for LocalStorage {
     }
 
     fn save_dir(&self, path: &Path, src: &Path) -> Result<()> {
-        let tmp = self.tmp_path(path);
+        let n = path.file_name().unwrap();
+        let tmp = self.tmp_path(Path::new(n));
         fs::create_dir_all(&tmp).unwrap();
         src.metadata().unwrap();
         for entry in src.read_dir()? {
@@ -105,7 +106,10 @@ impl Storage for LocalStorage {
     }
 
     fn save_file(&self, path: &Path, content: &[u8]) -> Result<()> {
-        // TODO: handle bad path.
+        // Sanitize check, do not save file if its parent not found.
+        if let Some(p) = path.parent() {
+            fs::metadata(self.base.join(p))?;
+        }
         let name = path.file_name().unwrap();
         let tmp_path = self.tmp_path(Path::new(name));
         let mut tmp_f = File::create(&tmp_path)?;
@@ -288,6 +292,8 @@ mod tests {
         );
         ls.save_file(Path::new("a/a.log"), magic_contents.as_bytes())
             .unwrap_err();
+        let list = ls.list_dir(Path::new(LOCAL_STORAGE_TMP_DIR)).unwrap();
+        assert!(list.is_empty(), "{:?}", list);
 
         // Test make_dir
         ls.make_dir(Path::new("z/z")).unwrap();
@@ -306,6 +312,8 @@ mod tests {
             ls.read_file(&e, &mut buf).unwrap();
             assert_eq!(buf, magic_contents.as_bytes());
         }
+        let list = ls.list_dir(Path::new(LOCAL_STORAGE_TMP_DIR)).unwrap();
+        assert!(list.is_empty(), "{:?}", list);
     }
 
     fn make_snap_dir(path: &Path, contents: &[u8]) {
