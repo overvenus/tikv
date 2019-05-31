@@ -32,7 +32,7 @@ fn check_snapshot(bm: &BackupManager, region_id: u64, cf_count: usize) {
 }
 
 #[test]
-fn test_server_simple_backup_snapshot() {
+fn test_server_simple_snapshot() {
     let mut cluster = new_server_cluster(0, 4);
     let pd_client = Arc::clone(&cluster.pd_client);
     // Disable default max peer count check.
