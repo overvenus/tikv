@@ -185,6 +185,10 @@ impl BackupManager {
         })
     }
 
+    pub fn check_meta(&self) -> Result<()> {
+        check_meta(self.backup_meta())
+    }
+
     pub fn backup_meta(&self) -> BackupMeta {
         self.meta.lock().unwrap().backup_meta.clone()
     }
@@ -255,6 +259,94 @@ impl BackupManager {
         let meta_path = self.current.join(BACKUP_META_NAME);
         self.storage.save_file(&meta_path, &meta.buf).unwrap();
         Ok(())
+    }
+}
+
+fn check_meta(mut meta: BackupMeta) -> Result<()> {
+    use std::collections::hash_map::{Entry, HashMap};
+
+    let mut err = String::new();
+    meta.mut_events()
+        .sort_by(|l, r| l.get_dependency().cmp(&r.get_dependency()));
+    // First, we check if there is any duplicate dependency with different events.
+    let mut map = HashMap::with_capacity(meta.get_events().len());
+    for e in meta.get_events() {
+        match map.entry(e.get_dependency()) {
+            Entry::Occupied(value) => {
+                let v = value.get();
+                err += &format!("dup dependency {:?}, {:?}\n\n", v, e);
+                if *v != e {
+                    err += &format!(
+                        "different events with the same dependency {:?}, {:?}\n\n",
+                        v, e
+                    );
+                }
+            }
+            Entry::Vacant(v) => {
+                v.insert(e);
+            }
+        }
+    }
+    drop(map);
+
+    // Then, we check if there any events has a cycle. Eg:
+    //   1. region A has two events: {dep: 1, index: 2} {dep: 2, index: 1}
+    //   2. region A splits into A and B:
+    //      - {region: A, dep: 10, event: Split, related_region: B}
+    //      - B exist an event whose dep is less than 10.
+    //   3. TODO: consider merge.
+    let mut region_events = HashMap::new();
+    for e in meta.take_events().into_vec() {
+        region_events
+            .entry(e.get_region_id())
+            .or_insert_with(Vec::new)
+            .push(e);
+    }
+    for (region_id, events) in &region_events {
+        for i in 0..events.len() {
+            let cur = &events[i];
+            if i != 0 {
+                let prev = &events[i - 1];
+                if cur.get_index() < prev.get_index() {
+                    err += &format!(
+                        "cycle detected dep1 < dep2, index2 < index1 {:?}, {:?}\n\n",
+                        prev, cur
+                    );
+                }
+            }
+            if let BackupEvent_Event::Split = cur.get_event() {
+                for id in cur.get_related_region_ids() {
+                    if id == region_id {
+                        // Do not check self.
+                        // TODO: must not include self.
+                        continue;
+                    }
+                    if let Some(events) = region_events.get(id) {
+                        if events.is_empty() {
+                            continue;
+                        }
+                        let head = &events[0];
+                        if head.get_dependency() < cur.get_dependency() {
+                            err += &format!(
+                                "cycle detected region {} splits {:?},\
+                                 {} has smaller dependency, {:?}, {:?}\n\n",
+                                region_id,
+                                cur.get_related_region_ids(),
+                                head.get_region_id(),
+                                cur,
+                                head
+                            );
+                        }
+                    }
+                }
+            }
+            // TODO: Check other events.
+        }
+    }
+    if err.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::new(ErrorKind::Other, err))
     }
 }
 
@@ -387,5 +479,55 @@ mod tests {
             .read_file(&bm.log_path(1, 10, 100), &mut buf)
             .unwrap();
         assert_eq!(buf, magic_contents);
+    }
+
+    #[test]
+    fn test_check_meta() {
+        fn check(err: &Error, expect: &str) {
+            let msg = format!("{:?}", err);
+            assert!(msg.contains(expect), "{}", msg)
+        }
+
+        let mut dup_dep = BackupMeta::new();
+        let mut event1 = BackupEvent::new();
+        event1.set_region_id(1);
+        event1.set_dependency(1);
+        event1.set_event(BackupEvent_Event::Split);
+        dup_dep.mut_events().push(event1.clone());
+        let mut event2 = event1;
+        event2.set_event(BackupEvent_Event::Snapshot);
+        dup_dep.mut_events().push(event2);
+        let err = check_meta(dup_dep).unwrap_err();
+        check(&err, "dup dependency");
+        check(&err, "different events");
+
+        let mut cycle_dep = BackupMeta::new();
+        let mut event1 = BackupEvent::new();
+        event1.set_region_id(1);
+        event1.set_dependency(2);
+        event1.set_index(2);
+        cycle_dep.mut_events().push(event1.clone());
+        let mut event2 = event1;
+        event2.set_dependency(3);
+        event2.set_index(1);
+        cycle_dep.mut_events().push(event2);
+        check(
+            &check_meta(cycle_dep).unwrap_err(),
+            "dep1 < dep2, index2 < index1",
+        );
+
+        let mut cycle_split = BackupMeta::new();
+        let mut event1 = BackupEvent::new();
+        event1.set_region_id(1);
+        event1.set_dependency(2);
+        event1.set_event(BackupEvent_Event::Split);
+        event1.set_related_region_ids(vec![2]);
+        cycle_split.mut_events().push(event1.clone());
+        let mut event2 = event1;
+        event2.set_region_id(2);
+        event2.set_dependency(1);
+        event2.set_index(1);
+        cycle_split.mut_events().push(event2);
+        check(&check_meta(cycle_split).unwrap_err(), "splits");
     }
 }

@@ -1671,8 +1671,12 @@ fn main() {
                         .help("the path of backup location"),
                 )
                 .subcommand(
+                    SubCommand::with_name("check")
+                        .about("Check backup meta information"),
+                )
+                .subcommand(
                     SubCommand::with_name("meta")
-                        .about("Display back meta information"),
+                        .about("Display backup meta information"),
                 ),
         );
 
@@ -1711,6 +1715,12 @@ fn main() {
         if matches.subcommand_matches("meta").is_some() {
             let meta = bm.backup_meta();
             v1!("backup meta:\n{:#?}", meta);
+        } else if matches.subcommand_matches("check").is_some() {
+            if let Err(e) = bm.check_meta() {
+                v1!("Bad backup meta detected:\n{}", e);
+            } else {
+                v1!("backup meta is good!");
+            }
         }
         return;
     }
