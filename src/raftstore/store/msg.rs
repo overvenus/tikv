@@ -212,6 +212,7 @@ pub enum CasualMessage {
 
     /// Request a snapshot from leader.
     RequestSnapshot {
+        region_epoch: RegionEpoch,
         callback: Callback,
     },
 }
@@ -253,7 +254,9 @@ impl fmt::Debug for CasualMessage {
                 "clear region size"
             },
             CasualMessage::RegionOverlapped => write!(fmt, "RegionOverlapped"),
-            CasualMessage::RequestSnapshot { .. } => write!(fmt, "RequestSnapshot"),
+            CasualMessage::RequestSnapshot {
+                ref region_epoch, ..
+            } => write!(fmt, "RequestSnapshot at {:?}", region_epoch),
         }
     }
 }

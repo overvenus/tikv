@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use engine::Engines;
 use futures::{Future, Stream};
 use grpcio::{ChannelBuilder, EnvBuilder, Environment, Server as GrpcServer, ServerBuilder};
+use kvproto::backup_grpc::*;
 use kvproto::debugpb_grpc::create_debug;
 use kvproto::import_sstpb_grpc::create_import_sst;
 use kvproto::tikvpb_grpc::*;
@@ -114,7 +115,7 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver + 'static> Server<T, S> {
         let builder_or_server = {
             let mut sb = ServerBuilder::new(Arc::clone(&env))
                 .channel_args(channel_args)
-                .register_service(create_tikv(kv_service));
+                .register_service(create_tikv(kv_service.clone()));
             sb = security_mgr.bind(sb, &ip, addr.port());
             if let Some(engines) = debug_engines {
                 let debug_service = DebugService::new(engines, raft_router.clone());
@@ -125,6 +126,9 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver + 'static> Server<T, S> {
             }
             if let Some(service) = deadlock_service {
                 sb = sb.register_service(create_deadlock(service));
+            }
+            if cfg.backup_mode {
+                sb = sb.register_service(create_backup(kv_service));
             }
             // When port is 0, it has to be binded now to get a valid address, which
             // is then reported to PD before the server is up. 0 is usually used in tests.

@@ -985,6 +985,7 @@ impl Peer {
     fn on_role_changed<T, C>(&mut self, ctx: &mut PollContext<T, C>, ready: &Ready) {
         // Update leader lease when the Raft state changes.
         if let Some(ref ss) = ready.ss {
+            // TODO: should we clean pending_request_snapshot?
             match ss.raft_state {
                 StateRole::Leader => {
                     // The local read can only be performed after a new leader has applied
@@ -1331,6 +1332,14 @@ impl Peer {
                         // To prevent unsafe local read, we suspect its leader lease.
                         self.leader_lease.suspect(monotonic_raw_now());
                         merge_to_be_update = false;
+                        let region = self.raft_group.get_store().region();
+                        if !self.pending_request_snapshots.is_empty() {
+                            let resp = cmd_resp::err_resp(
+                                Error::Other(box_err!("{} is merging", self.tag)),
+                                self.term(),
+                            );
+                            self.pending_request_snapshots.apply(region, resp);
+                        }
                     }
                 }
             }
@@ -2214,7 +2223,11 @@ impl Peer {
         resp
     }
 
-    pub fn handle_request_snapshot(&mut self, callback: Callback) {
+    pub fn handle_request_snapshot(
+        &mut self,
+        region_epoch: metapb::RegionEpoch,
+        callback: Callback,
+    ) {
         if self.is_leader() {
             // Snapshot can only be requested when it's not a leader.
             // TODO: check how leader handles snapshots.
@@ -2225,14 +2238,25 @@ impl Peer {
         if self.is_merging() {
             // Snapshot can only be requested when there is no merging progress.
             let resp = cmd_resp::err_resp(
-                Error::EpochNotMatch("merging".to_owned(), vec![self.region().to_owned()]),
+                Error::Other(box_err!("{} is merging", self.tag)),
+                self.term(),
+            );
+            callback.invoke_with_response(resp);
+            return;
+        }
+        if *self.region().get_region_epoch() != region_epoch {
+            let resp = cmd_resp::err_resp(
+                Error::EpochNotMatch(String::new(), vec![self.region().to_owned()]),
                 self.term(),
             );
             callback.invoke_with_response(resp);
             return;
         }
         if self.is_applying_snapshot() || self.has_pending_snapshot() {
-            let resp = cmd_resp::message_error(format!("{} is applying snapshot", self.tag));
+            let resp = cmd_resp::err_resp(
+                Error::Other(box_err!("{} is applying snapshot", self.tag)),
+                self.term(),
+            );
             callback.invoke_with_response(resp);
             return;
         }

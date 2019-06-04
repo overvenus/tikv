@@ -1078,7 +1078,7 @@ impl PeerStorage {
         }
 
         // only when apply snapshot
-        if ctx.apply_state != self.apply_state {
+        if ctx.snap_region.is_some() {
             ctx.save_apply_state_to(ready_ctx.raft_wb_mut())?;
         }
 

@@ -6,19 +6,9 @@ use std::time::{Duration, Instant};
 use engine::*;
 use test_raftstore::*;
 use tikv::raftstore::store::*;
-use tikv_util::config::{ReadableDuration, ReadableSize};
 use tikv_util::HandyRwLock;
 
-fn run_cluster_with_backup<T: Simulator>(cluster: &mut Cluster<T>, backup_nodes: &[u64]) -> u64 {
-    let reigon_id = cluster.run_conf_change();
-    for node_id in backup_nodes {
-        cluster.stop_node(*node_id);
-        let mut cfg = cluster.cfg.clone();
-        cfg.server.backup_mode = true;
-        cluster.run_node_with_config(*node_id, cfg).unwrap();
-    }
-    reigon_id
-}
+use super::configure_for_backup;
 
 fn check_snapshot(bm: &BackupManager, region_id: u64, cf_count: usize) {
     let region_list = bm
@@ -40,7 +30,7 @@ fn test_server_simple_snapshot() {
     pd_client.disable_default_operator();
 
     // Now region 1 only has peer (1, 1);
-    let r1 = run_cluster_with_backup(&mut cluster, &[2, 3, 4]);
+    let r1 = cluster.run_with_backup(&[2, 3, 4]);
 
     // Add learner (2, 2) to region 1.
     pd_client.must_add_peer(r1, new_learner_peer(2, 2));
@@ -80,17 +70,13 @@ fn test_server_simple_snapshot() {
 #[test]
 fn test_server_simple_replication() {
     let mut cluster = new_server_cluster(0, 2);
-    // Avoid log compaction which flush log files unexpectedly.
-    cluster.cfg.raft_store.raft_log_gc_threshold = 1000;
-    cluster.cfg.raft_store.raft_log_gc_count_limit = 1000;
-    cluster.cfg.raft_store.raft_log_gc_size_limit = ReadableSize::mb(20);
-    cluster.cfg.raft_store.snap_mgr_gc_tick_interval = ReadableDuration::hours(50);
+    configure_for_backup(&mut cluster);
 
     let pd_client = Arc::clone(&cluster.pd_client);
     // Disable default max peer count check.
     pd_client.disable_default_operator();
     // Now region 1 only has peer (1, 1);
-    let r1 = run_cluster_with_backup(&mut cluster, &[2]);
+    let r1 = cluster.run_with_backup(&[2]);
 
     // Add learner (2, 2) to region 1.
     pd_client.must_add_peer(r1, new_learner_peer(2, 2));
@@ -130,19 +116,14 @@ fn test_server_simple_replication() {
 
 #[test]
 fn test_server_simple_request_snasphot() {
-    test_util::setup_for_ci();
     let mut cluster = new_server_cluster(0, 2);
-    // Avoid log compaction which flush log files unexpectedly.
-    cluster.cfg.raft_store.raft_log_gc_threshold = 1000;
-    cluster.cfg.raft_store.raft_log_gc_count_limit = 1000;
-    cluster.cfg.raft_store.raft_log_gc_size_limit = ReadableSize::mb(20);
-    cluster.cfg.raft_store.snap_mgr_gc_tick_interval = ReadableDuration::hours(50);
+    configure_for_backup(&mut cluster);
 
     let pd_client = Arc::clone(&cluster.pd_client);
     // Disable default max peer count check.
     pd_client.disable_default_operator();
     // Now region 1 only has peer (1, 1);
-    let r1 = run_cluster_with_backup(&mut cluster, &[2]);
+    let r1 = cluster.run_with_backup(&[2]);
 
     // Add learner (2, 2) to region 1.
     pd_client.must_add_peer(r1, new_learner_peer(2, 2));
@@ -155,9 +136,11 @@ fn test_server_simple_request_snasphot() {
     let (key, value) = (b"k1", b"v1");
     cluster.must_put(key, value);
 
+    let region_epoch = cluster.get_region_epoch(r1);
     let router2 = cluster.sim.read().unwrap().get_router(2).unwrap();
     let (tx, rx) = mpsc::channel();
     let req_snap = PeerMsg::CasualMessage(CasualMessage::RequestSnapshot {
+        region_epoch,
         callback: Callback::Write(Box::new(move |resp: WriteResponse| {
             let resp = resp.response;
             assert!(!resp.get_header().has_error(), "{:?}", resp,);

@@ -227,18 +227,19 @@ impl BackupManager {
         self.storage.save_file(&dst, content)
     }
 
-    pub fn snapshot_dir(&self, region_id: u64, term: u64, index: u64) -> PathBuf {
+    pub fn snapshot_dir(&self, region_id: u64, term: u64, index: u64, dependency: u64) -> PathBuf {
         self.current
-            .join(format!("{}/{}@{}", region_id, index, term))
+            .join(format!("{}/{}@{}_{}", region_id, index, term, dependency))
     }
 
     pub fn save_snapshot(&self, region_id: u64, term: u64, index: u64, src: &Path) -> Result<()> {
-        let dst = self.snapshot_dir(region_id, term, index);
+        let dep = self.dependency.alloc_number();
+        let dst = self.snapshot_dir(region_id, term, index, dep);
         self.storage.save_dir(&dst, src).unwrap();
         let mut event = BackupEvent::new();
         event.set_region_id(region_id);
         event.set_index(index);
-        event.set_dependency(self.dependency.alloc_number());
+        event.set_dependency(dep);
         event.set_event(BackupEvent_Event::Snapshot);
         self.save_events(vec![event])
     }
@@ -454,7 +455,7 @@ mod tests {
             assert_eq!(events[0].get_index(), 3);
             assert_eq!(events[0].get_dependency(), dependency);
 
-            let snap_dir = bm.snapshot_dir(1, 2, 3);
+            let snap_dir = bm.snapshot_dir(1, 2, 3, dependency);
             let mut buf = vec![];
             bm.storage
                 .read_file(&snap_dir.join("a.sst"), &mut buf)

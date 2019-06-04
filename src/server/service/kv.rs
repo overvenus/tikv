@@ -20,6 +20,8 @@ use grpcio::{
     ClientStreamingSink, DuplexSink, Error as GrpcError, RequestStream, RpcContext, RpcStatus,
     RpcStatusCode, ServerStreamingSink, UnarySink, WriteFlags,
 };
+use kvproto::backup::{BackupRequest, BackupResponse};
+use kvproto::backup_grpc;
 use kvproto::coprocessor::*;
 use kvproto::errorpb::{Error as RegionError, ServerIsBusy};
 use kvproto::kvrpcpb::{self, *};
@@ -82,6 +84,51 @@ impl<T: RaftStoreRouter + 'static, E: Engine> Service<T, E> {
     ) {
         let status = RpcStatus::new(code, Some(format!("{}", err)));
         ctx.spawn(sink.fail(status).map_err(|_| ()));
+    }
+}
+
+// TODO: create a standlone backup service.
+impl<T: RaftStoreRouter + 'static, E: Engine> backup_grpc::Backup for Service<T, E> {
+    fn backup(
+        &mut self,
+        ctx: RpcContext<'_>,
+        mut req: BackupRequest,
+        sink: UnarySink<BackupResponse>,
+    ) {
+        let timer = GRPC_MSG_HISTOGRAM_VEC.backup.start_coarse_timer();
+
+        let region_id = req.get_context().get_region_id();
+        let (cb, future) = paired_future_callback();
+        let req = CasualMessage::RequestSnapshot {
+            region_epoch: req.mut_context().take_region_epoch(),
+            callback: Callback::Write(cb),
+        };
+
+        if let Err(e) = self.ch.casual_send(region_id, req) {
+            self.send_fail_status(ctx, sink, Error::from(e), RpcStatusCode::ResourceExhausted);
+            return;
+        }
+
+        let future = future
+            .map_err(Error::from)
+            .map(move |mut v| {
+                let mut resp = BackupResponse::new();
+                if v.response.get_header().has_error() {
+                    resp.set_region_error(v.response.mut_header().take_error());
+                }
+                resp
+            })
+            .and_then(|res| sink.success(res).map_err(Error::from))
+            .map(|_| timer.observe_duration())
+            .map_err(move |e| {
+                warn!("backup rpc failed";
+                    "request" => "backup",
+                    "err" => ?e
+                );
+                GRPC_MSG_FAIL_COUNTER.backup.inc();
+            });
+
+        ctx.spawn(future);
     }
 }
 

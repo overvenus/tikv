@@ -357,13 +357,18 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
                 self.fsm.group_state = GroupState::Chaos;
                 self.register_raft_base_tick();
             }
-            CasualMessage::RequestSnapshot { callback } => {
-                info!(
+            CasualMessage::RequestSnapshot {
+                region_epoch,
+                callback,
+            } => {
+                debug!(
                     "start requesting snapshot";
                     "region_id" => self.region_id(),
                     "peer_id" => self.fsm.peer_id()
                 );
-                self.fsm.peer.handle_request_snapshot(callback);
+                self.fsm
+                    .peer
+                    .handle_request_snapshot(region_epoch, callback);
             }
         }
     }
