@@ -357,6 +357,14 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
                 self.fsm.group_state = GroupState::Chaos;
                 self.register_raft_base_tick();
             }
+            CasualMessage::RequestSnapshot { callback } => {
+                info!(
+                    "start requesting snapshot";
+                    "region_id" => self.region_id(),
+                    "peer_id" => self.fsm.peer_id()
+                );
+                self.fsm.peer.handle_request_snapshot(callback);
+            }
         }
     }
 
@@ -891,6 +899,13 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
             return Ok(());
         }
 
+        if !self.check_request_snapshot(&msg) {
+            info!("can not handle request snapshot";
+                "region_id" => self.fsm.peer.region().get_id(),
+                "peer_id" => self.fsm.peer.peer_id());
+            return Ok(());
+        }
+
         if util::is_vote_msg(&msg.get_message())
             || msg.get_message().get_msg_type() == MessageType::MsgTimeoutNow
         {
@@ -1312,6 +1327,24 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
         }
 
         Ok(None)
+    }
+
+    // Check if this peer can handle request_snapshot.
+    fn check_request_snapshot(&mut self, msg: &RaftMessage) -> bool {
+        let m = msg.get_message();
+        if MessageType::MsgRequestSnapshot != m.get_msg_type() {
+            // If it's not a request snapshot, then go on.
+            return true;
+        }
+        if !self.fsm.peer.is_leader() {
+            // Only leader can handle request snapshot.
+            return false;
+        }
+        if self.fsm.peer.is_merging_strict() {
+            // Can not handle request snapshot in merging.
+            return false;
+        }
+        true
     }
 
     fn handle_destroy_peer(&mut self, job: DestroyPeerJob) -> bool {
@@ -1749,7 +1782,7 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
             let target_id = expect_region.get_id();
             let sibling_region = expect_region;
 
-            let min_index = self.fsm.peer.get_min_progress() + 1;
+            let min_index = self.fsm.peer.get_min_progress()? + 1;
             let low = cmp::max(min_index, state.get_min_index());
             // TODO: move this into raft module.
             // > over >= to include the PrepareMerge proposal.

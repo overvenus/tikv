@@ -1612,7 +1612,7 @@ dependencies = [
 [[package]]
 name = "raft"
 version = "0.4.3"
-source = "git+https://github.com/pingcap/raft-rs/?branch=request-snapshot#f1d51041d0b23c064dde1b420fca6dd6c7556d53"
+source = "git+https://github.com/pingcap/raft-rs/?branch=request-snapshot#4c8a95d4175271c81f100b7e85a58eeb42777ba6"
 dependencies = [
  "fxhash 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "log 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)",

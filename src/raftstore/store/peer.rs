@@ -119,6 +119,82 @@ impl ReadIndexQueue {
     }
 }
 
+#[derive(Default)]
+struct RequestSnapshotCmds {
+    commit_index: u64,
+    epoch: metapb::RegionEpoch,
+    callbacks: Vec<Callback>,
+}
+
+struct RequestSnapshotQueue {
+    requests: VecDeque<RequestSnapshotCmds>,
+    current_ready: Option<RequestSnapshotCmds>,
+}
+
+impl RequestSnapshotQueue {
+    const SHRINK_CACHE_CAPACITY: usize = 4;
+
+    fn new() -> RequestSnapshotQueue {
+        RequestSnapshotQueue {
+            requests: VecDeque::new(),
+            current_ready: None,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.current_ready.is_none() && self.requests.is_empty()
+    }
+
+    fn push_callback(&mut self, callback: Callback) {
+        if self.current_ready.is_none() {
+            self.current_ready = Some(Default::default());
+        }
+        self.current_ready
+            .as_mut()
+            .unwrap()
+            .callbacks
+            .push(callback);
+    }
+
+    fn push_msg(&mut self, commit_index: u64, epoch: metapb::RegionEpoch) {
+        if let Some(mut current) = self.current_ready.take() {
+            current.commit_index = commit_index;
+            current.epoch = epoch;
+            self.requests.push_back(current);
+        }
+    }
+
+    fn apply(&mut self, region: &metapb::Region, mut resp: RaftCmdResponse) {
+        if let Some(current) = self.current_ready.take() {
+            for cb in current.callbacks {
+                cb.invoke_with_response(resp.clone());
+            }
+        }
+
+        for req in self.requests.drain(..) {
+            if *region.get_region_epoch() != req.epoch && !resp.get_header().has_error() {
+                cmd_resp::bind_error(
+                    &mut resp,
+                    Error::EpochNotMatch("snapshot".to_owned(), vec![region.to_owned()]),
+                )
+            }
+            for cb in req.callbacks {
+                cb.invoke_with_response(resp.clone());
+            }
+        }
+
+        self.gc();
+    }
+
+    fn gc(&mut self) {
+        if self.requests.capacity() > Self::SHRINK_CACHE_CAPACITY
+            && self.requests.len() < Self::SHRINK_CACHE_CAPACITY
+        {
+            self.requests.shrink_to_fit();
+        }
+    }
+}
+
 /// The returned states of the peer after checking whether it is stale
 #[derive(Debug, PartialEq, Eq)]
 pub enum StaleState {
@@ -255,6 +331,8 @@ pub struct Peer {
     leader_missing_time: Option<Instant>,
     leader_lease: Lease,
     pending_reads: ReadIndexQueue,
+    /// Pending request snapshot cmds.
+    pending_request_snapshots: RequestSnapshotQueue,
 
     /// If it fails to send messages to leader.
     pub leader_unreachable: bool,
@@ -300,6 +378,8 @@ pub struct Peer {
     /// Approximate size of logs that is applied but not compacted yet.
     pub raft_log_size_hint: u64,
 
+    /// The latest proposed prepare merge commands.
+    last_proposed_prepare_merge_idx: u64,
     /// The index of the latest committed prepare merge command.
     last_committed_prepare_merge_idx: u64,
     /// The merge related state. It indicates this Peer is in merging.
@@ -369,6 +449,8 @@ impl Peer {
             pending_remove: false,
             pending_merge_state: None,
             pending_request_snapshot_count: Arc::new(AtomicUsize::new(0)),
+            pending_request_snapshots: RequestSnapshotQueue::new(),
+            last_proposed_prepare_merge_idx: 0,
             last_committed_prepare_merge_idx: 0,
             leader_missing_time: Some(Instant::now()),
             tag,
@@ -675,7 +757,6 @@ impl Peer {
     {
         let trans = &mut ctx.trans;
         let metrics = &mut ctx.raft_metrics.message;
-        let _snap_mgr = &mut ctx.snap_mgr;
         for msg in msgs {
             let msg_type = msg.get_msg_type();
             self.send_raft_message(msg, trans);
@@ -687,7 +768,10 @@ impl Peer {
                 MessageType::MsgRequestVote => metrics.vote += 1,
                 MessageType::MsgRequestVoteResponse => metrics.vote_resp += 1,
                 MessageType::MsgRequestSnapshot => {
-                    // TODO: register to snap_mgr.
+                    self.pending_request_snapshots.push_msg(
+                        self.get_store().applied_index(),
+                        self.region().get_region_epoch().to_owned(),
+                    );
                     metrics.request_snapshot += 1;
                 }
                 MessageType::MsgSnapshot => metrics.snapshot += 1,
@@ -985,6 +1069,11 @@ impl Peer {
             || self.pending_merge_state.is_some()
     }
 
+    #[inline]
+    pub fn is_merging_strict(&self) -> bool {
+        self.last_proposed_prepare_merge_idx > self.get_store().applied_index() || self.is_merging()
+    }
+
     pub fn take_apply_proposals(&mut self) -> Option<RegionProposal> {
         if self.apply_proposals.is_empty() {
             return None;
@@ -1172,6 +1261,11 @@ impl Peer {
         }
 
         if apply_snap_result.is_some() {
+            if !self.pending_request_snapshots.is_empty() {
+                let region = self.raft_group.get_store().region();
+                let resp = RaftCmdResponse::new();
+                self.pending_request_snapshots.apply(region, resp);
+            }
             self.activate(ctx);
             let mut meta = ctx.store_meta.lock().unwrap();
             meta.readers
@@ -1854,10 +1948,22 @@ impl Peer {
         true
     }
 
-    pub fn get_min_progress(&self) -> u64 {
-        self.raft_group.status_ref().progress.map_or(0, |p| {
-            p.iter().map(|(_, pr)| pr.matched).min().unwrap_or_default()
-        })
+    pub fn get_min_progress(&self) -> Result<u64> {
+        let mut min = 0;
+        if let Some(progress) = self.raft_group.status_ref().progress {
+            for (_, pr) in progress.iter() {
+                if pr.state == ProgressState::Snapshot || pr.requesting_snapshot {
+                    return Err(box_err!(
+                        "there is a pending snapshot peer {:?}, skip merge",
+                        pr
+                    ));
+                }
+                if min > pr.matched {
+                    min = pr.matched;
+                }
+            }
+        }
+        Ok(min)
     }
 
     fn pre_propose_prepare_merge<T, C>(
@@ -1866,7 +1972,7 @@ impl Peer {
         req: &mut RaftCmdRequest,
     ) -> Result<()> {
         let last_index = self.raft_group.raft.raft_log.last_index();
-        let min_progress = self.get_min_progress();
+        let min_progress = self.get_min_progress()?;
         let min_index = min_progress + 1;
         if min_progress == 0 || last_index - min_progress > ctx.cfg.merge_max_log_gap {
             return Err(box_err!(
@@ -1991,6 +2097,9 @@ impl Peer {
             // or transferring leader. Both cases can be considered as NotLeader error.
             return Err(Error::NotLeader(self.region_id, None));
         }
+        if ctx.contains(ProposalContext::PREPARE_MERGE) {
+            self.last_proposed_prepare_merge_idx = propose_index;
+        }
 
         Ok(propose_index)
     }
@@ -2103,6 +2212,44 @@ impl Peer {
 
         cmd_resp::bind_term(&mut resp.response, self.term());
         resp
+    }
+
+    pub fn handle_request_snapshot(&mut self, callback: Callback) {
+        if self.is_leader() {
+            // Snapshot can only be requested when it's not a leader.
+            // TODO: check how leader handles snapshots.
+            let resp = cmd_resp::err_resp(Error::StaleCommand, self.term());
+            callback.invoke_with_response(resp);
+            return;
+        }
+        if self.is_merging() {
+            // Snapshot can only be requested when there is no merging progress.
+            let resp = cmd_resp::err_resp(
+                Error::EpochNotMatch("merging".to_owned(), vec![self.region().to_owned()]),
+                self.term(),
+            );
+            callback.invoke_with_response(resp);
+            return;
+        }
+        if self.is_applying_snapshot() || self.has_pending_snapshot() {
+            let resp = cmd_resp::message_error(format!("{} is applying snapshot", self.tag));
+            callback.invoke_with_response(resp);
+            return;
+        }
+        info!(
+            "start requesting snapshot";
+            "region_id" => self.region_id,
+            "peer_id" => self.peer_id()
+        );
+        if let Err(e) = self.raft_group.request_snapshot() {
+            error!("request snapshot failed";
+                "region_id" => self.region_id,
+                "peer_id" => self.peer_id());
+            let resp = cmd_resp::message_error(e);
+            callback.invoke_with_response(resp);
+        } else {
+            self.pending_request_snapshots.push_callback(callback);
+        }
     }
 
     pub fn term(&self) -> u64 {

@@ -1,6 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use engine::*;
 use test_raftstore::*;
@@ -125,4 +126,58 @@ fn test_server_simple_replication() {
     check_list_dir(r1, 2);
     // Raft peers always propose a raft log after became leader.
     check_list_dir(region2.get_id(), 1);
+}
+
+#[test]
+fn test_server_simple_request_snasphot() {
+    test_util::setup_for_ci();
+    let mut cluster = new_server_cluster(0, 2);
+    // Avoid log compaction which flush log files unexpectedly.
+    cluster.cfg.raft_store.raft_log_gc_threshold = 1000;
+    cluster.cfg.raft_store.raft_log_gc_count_limit = 1000;
+    cluster.cfg.raft_store.raft_log_gc_size_limit = ReadableSize::mb(20);
+    cluster.cfg.raft_store.snap_mgr_gc_tick_interval = ReadableDuration::hours(50);
+
+    let pd_client = Arc::clone(&cluster.pd_client);
+    // Disable default max peer count check.
+    pd_client.disable_default_operator();
+    // Now region 1 only has peer (1, 1);
+    let r1 = run_cluster_with_backup(&mut cluster, &[2]);
+
+    // Add learner (2, 2) to region 1.
+    pd_client.must_add_peer(r1, new_learner_peer(2, 2));
+    pd_client.must_none_pending_peer(new_learner_peer(2, 2));
+    // Check all cfs are emptry.
+    let backup_mgr2 = cluster.sim.rl().get_backup_mgr(2).unwrap();
+    check_snapshot(&backup_mgr2, r1, 0);
+
+    // Write something then request a snapshot.
+    let (key, value) = (b"k1", b"v1");
+    cluster.must_put(key, value);
+
+    let router2 = cluster.sim.read().unwrap().get_router(2).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let req_snap = PeerMsg::CasualMessage(CasualMessage::RequestSnapshot {
+        callback: Callback::Write(Box::new(move |resp: WriteResponse| {
+            let resp = resp.response;
+            assert!(!resp.get_header().has_error(), "{:?}", resp,);
+            tx.send(()).unwrap();
+        })),
+    });
+    router2.send(r1, req_snap).unwrap();
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    let start = Instant::now();
+    loop {
+        let list = backup_mgr2
+            .storage
+            .list_dir(&backup_mgr2.region_path(r1))
+            .unwrap();
+        if list.len() == 2 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!("should be 2 snapshot dir, {:?}", list);
+        }
+    }
 }
