@@ -514,6 +514,12 @@ impl ApplyContext {
                 let delegate = &mut fsm.delegate;
                 let entry_batch = &mut delegate.entry_batch;
                 if entry_batch.get_entries().is_empty() {
+                    if !delegate.event_batch.is_empty() {
+                        panic!(
+                            "[{}] entry empty but has {:?}",
+                            delegate.tag, delegate.event_batch
+                        );
+                    }
                     continue;
                 }
                 let first = entry_batch.get_entries().first().unwrap().get_index();
@@ -816,6 +822,10 @@ impl ApplyDelegate {
                 );
             }
 
+            if apply_ctx.backup_mgr.is_some() {
+                // We are in backup mode, save entry to entry batch.
+                self.entry_batch.mut_entries().push(entry.clone());
+            }
             let res = match entry.get_entry_type() {
                 EntryType::EntryNormal => self.handle_raft_entry_normal(apply_ctx, &entry),
                 EntryType::EntryConfChange => self.handle_raft_entry_conf_change(apply_ctx, &entry),
@@ -874,10 +884,6 @@ impl ApplyDelegate {
         let term = entry.get_term();
         let data = entry.get_data();
 
-        if apply_ctx.backup_mgr.is_some() {
-            // We are in backup mode, save entry to entry batch.
-            self.entry_batch.mut_entries().push(entry.clone());
-        }
         if !data.is_empty() {
             let cmd = util::parse_data_at(data, index, &self.tag);
 
