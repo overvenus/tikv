@@ -1676,7 +1676,14 @@ fn main() {
                 )
                 .subcommand(
                     SubCommand::with_name("meta")
-                        .about("Display backup meta information"),
+                        .about("Display backup meta information")
+                        .arg(
+                            Arg::with_name("region")
+                                .short("r")
+                                .long("region")
+                                .takes_value(true)
+                                .help("Only display events of the region")
+                        ),
                 ),
         );
 
@@ -1712,9 +1719,19 @@ fn main() {
         let path = Path::new(p);
         let ls = LocalStorage::new(path).unwrap();
         let bm = BackupManager::new(path, Box::new(ls)).unwrap();
-        if matches.subcommand_matches("meta").is_some() {
+        if let Some(matches) = matches.subcommand_matches("meta") {
             let meta = bm.backup_meta();
-            v1!("backup meta:\n{:#?}", meta);
+            if let Some(v) = matches.value_of("region") {
+                let id: u64 = v.parse().unwrap();
+                v1!("backup meta for region {}:", id);
+                for e in meta.get_events() {
+                    if e.get_region_id() == id {
+                        v1!("{:?}", e);
+                    }
+                }
+            } else {
+                v1!("backup meta:\n{:#?}", meta);
+            }
         } else if matches.subcommand_matches("check").is_some() {
             if let Err(e) = bm.check_meta() {
                 v1!("Bad backup meta detected:\n{}", e);

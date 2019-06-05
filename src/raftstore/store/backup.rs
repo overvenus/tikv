@@ -295,7 +295,11 @@ fn check_meta(mut meta: BackupMeta) -> Result<()> {
     //   2. region A splits into A and B:
     //      - {region: A, dep: 10, event: Split, related_region: B}
     //      - B exist an event whose dep is less than 10.
-    //   3. TODO(backup): consider merge.
+    //   3. region A merges into B:
+    //      - Prepare merge must be the last event or the next must be rollback
+    //      - Rollback merge's dep < prepare merge
+    //      - B's commit merge dep < A's prepare merge
+    //      - B has commit merge and A has rollback merge
     let mut region_events = HashMap::new();
     for e in meta.take_events().into_vec() {
         region_events
@@ -315,33 +319,88 @@ fn check_meta(mut meta: BackupMeta) -> Result<()> {
                     );
                 }
             }
-            if let BackupEvent_Event::Split = cur.get_event() {
-                for id in cur.get_related_region_ids() {
-                    if id == region_id {
-                        // Do not check self.
-                        // TODO(backup): must not include self.
-                        continue;
-                    }
-                    if let Some(events) = region_events.get(id) {
-                        if events.is_empty() {
+            match cur.get_event() {
+                BackupEvent_Event::Split => {
+                    for id in cur.get_related_region_ids() {
+                        if id == region_id {
+                            // Do not check self.
                             continue;
                         }
-                        let head = &events[0];
-                        if head.get_dependency() < cur.get_dependency() {
-                            err += &format!(
-                                "cycle detected region {} splits {:?},\
-                                 {} has smaller dependency, {:?}, {:?}\n\n",
-                                region_id,
-                                cur.get_related_region_ids(),
-                                head.get_region_id(),
-                                cur,
-                                head
-                            );
+                        if let Some(events) = region_events.get(id) {
+                            if events.is_empty() {
+                                continue;
+                            }
+                            let head = &events[0];
+                            if head.get_dependency() < cur.get_dependency() {
+                                err += &format!(
+                                    "cycle detected region {} splits {:?},\
+                                     {} has smaller dependency, {:?}, {:?}\n\n",
+                                    region_id,
+                                    cur.get_related_region_ids(),
+                                    head.get_region_id(),
+                                    cur,
+                                    head
+                                );
+                            }
                         }
                     }
                 }
+                BackupEvent_Event::PrepareMerge => {
+                    let mut has_rollbacked = false;
+                    if i != events.len() - 1 {
+                        if events[i + 1].get_event() != BackupEvent_Event::RollbackMerge {
+                            err += &format!(
+                                "bad merge {:?}, unexpected {:?} after {:?}",
+                                cur,
+                                events[i + 1],
+                                cur
+                            );
+                        } else {
+                            has_rollbacked = true;
+                        }
+                    }
+                    let target_id = cur.get_related_region_ids()[0];
+                    if let Some(target_events) = region_events.get(&target_id) {
+                        if !has_rollbacked {
+                            if let Some(e) = target_events.iter().find(|e| {
+                                e.get_event() == BackupEvent_Event::CommitMerge
+                                    && e.get_related_region_ids()[0] == *region_id
+                            }) {
+                                if e.get_dependency() < cur.get_dependency() {
+                                    err += &format!(
+                                        "bad merge {:?}, commit dep {} < prepare dep {}",
+                                        cur,
+                                        e.get_dependency(),
+                                        cur.get_dependency()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // TODO(backup): what if target is not backuped yet?
+                }
+                BackupEvent_Event::RollbackMerge => {
+                    // TODO(backup): what if it's the first event?
+                    let prev = &events[i - 1];
+                    if prev.get_event() != BackupEvent_Event::PrepareMerge {
+                        err += &format!("bad merge {:?}, prepare merge not found", cur);
+                    }
+                }
+                BackupEvent_Event::CommitMerge => {
+                    let source_id = cur.get_related_region_ids()[0];
+                    if let Some(source_events) = region_events.get(&source_id) {
+                        if let Some(last) = source_events.last() {
+                            if last.get_event() != BackupEvent_Event::PrepareMerge {
+                                err += &format!("bad merge {:?}, commit found but no prepare", cur);
+                            }
+                        }
+                    } else {
+                        err += &format!("bad merge {:?}, commit but no source", cur);
+                    }
+                }
+                // TODO(backup): Check other events.
+                _ => (),
             }
-            // TODO(backup): Check other events.
         }
     }
     if err.is_empty() {
@@ -530,5 +589,73 @@ mod tests {
         event2.set_index(1);
         cycle_split.mut_events().push(event2);
         check(&check_meta(cycle_split).unwrap_err(), "splits");
+
+        // Prepare merge must be the last event or the next must be rollback
+        let mut bad_merge = BackupMeta::new();
+        let mut event0 = BackupEvent::new();
+        event0.set_region_id(1);
+        event0.set_dependency(1);
+        event0.set_event(BackupEvent_Event::Snapshot);
+        bad_merge.mut_events().push(event0.clone());
+        let mut event1 = BackupEvent::new();
+        event1.set_region_id(1);
+        event1.set_dependency(3);
+        event1.set_event(BackupEvent_Event::PrepareMerge);
+        event1.set_related_region_ids(vec![2]);
+        bad_merge.mut_events().push(event1.clone());
+
+        let mut unexpected_merge = bad_merge.clone();
+        let mut event2 = BackupEvent::new();
+        event2.set_region_id(1);
+        event2.set_dependency(4);
+        event2.set_event(BackupEvent_Event::Snapshot);
+        unexpected_merge.mut_events().push(event2.clone());
+        check(
+            &check_meta(unexpected_merge.clone()).unwrap_err(),
+            "unexpected",
+        );
+
+        let mut good_merge = unexpected_merge.clone();
+        good_merge.mut_events()[2].set_event(BackupEvent_Event::RollbackMerge);
+        check_meta(good_merge.clone()).unwrap();
+        good_merge.mut_events().pop();
+        check_meta(good_merge.clone()).unwrap();
+
+        // Rollback merge's dep < prepare merge
+        let mut no_prepare_merge = bad_merge.clone();
+        let mut event3 = event2.clone();
+        event3.set_dependency(2);
+        event3.set_event(BackupEvent_Event::RollbackMerge);
+        no_prepare_merge.mut_events().push(event3);
+        check(
+            &check_meta(no_prepare_merge.clone()).unwrap_err(),
+            "prepare merge not found",
+        );
+
+        // B's commit merge dep < A's prepare merge
+        let mut cycle_merge = bad_merge.clone();
+        let mut eventb = BackupEvent::new();
+        eventb.set_region_id(2);
+        eventb.set_dependency(2);
+        eventb.set_event(BackupEvent_Event::CommitMerge);
+        eventb.set_related_region_ids(vec![1]);
+        cycle_merge.mut_events().push(eventb);
+        check(&check_meta(cycle_merge.clone()).unwrap_err(), "commit dep");
+
+        let mut good_merge = cycle_merge.clone();
+        good_merge.mut_events()[2].set_dependency(4);
+        check_meta(good_merge.clone()).unwrap();
+
+        // B has commit merge and A has rollback merge
+        let mut commit_rollback_merge = good_merge.clone();
+        let mut event4 = BackupEvent::new();
+        event4.set_region_id(1);
+        event4.set_dependency(5);
+        event4.set_event(BackupEvent_Event::RollbackMerge);
+        commit_rollback_merge.mut_events().push(event4);
+        check(
+            &check_meta(commit_rollback_merge.clone()).unwrap_err(),
+            "commit found but no prepare",
+        );
     }
 }
