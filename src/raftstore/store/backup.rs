@@ -63,7 +63,7 @@ impl LocalStorage {
         })
     }
 
-    // TODO: gc tmp files.
+    // TODO(backup): gc tmp files.
     fn tmp_path(&self, path: &Path) -> PathBuf {
         let uid: u64 = rand::thread_rng().gen();
         let tmp_suffix = format!("{}{:016x}", LOCAL_STORAGE_TEP_FILE_SUFFIX, uid);
@@ -295,7 +295,7 @@ fn check_meta(mut meta: BackupMeta) -> Result<()> {
     //   2. region A splits into A and B:
     //      - {region: A, dep: 10, event: Split, related_region: B}
     //      - B exist an event whose dep is less than 10.
-    //   3. TODO: consider merge.
+    //   3. TODO(backup): consider merge.
     let mut region_events = HashMap::new();
     for e in meta.take_events().into_vec() {
         region_events
@@ -319,7 +319,7 @@ fn check_meta(mut meta: BackupMeta) -> Result<()> {
                 for id in cur.get_related_region_ids() {
                     if id == region_id {
                         // Do not check self.
-                        // TODO: must not include self.
+                        // TODO(backup): must not include self.
                         continue;
                     }
                     if let Some(events) = region_events.get(id) {
@@ -341,7 +341,7 @@ fn check_meta(mut meta: BackupMeta) -> Result<()> {
                     }
                 }
             }
-            // TODO: Check other events.
+            // TODO(backup): Check other events.
         }
     }
     if err.is_empty() {

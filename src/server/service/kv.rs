@@ -87,7 +87,7 @@ impl<T: RaftStoreRouter + 'static, E: Engine> Service<T, E> {
     }
 }
 
-// TODO: create a standlone backup service.
+// TODO(backup): create a standlone backup service.
 impl<T: RaftStoreRouter + 'static, E: Engine> backup_grpc::Backup for Service<T, E> {
     fn backup(
         &mut self,

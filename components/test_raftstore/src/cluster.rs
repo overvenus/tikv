@@ -194,7 +194,7 @@ impl<T: Simulator> Cluster<T> {
     }
 
     // Run a cluster with backup nodes.
-    // TODO: Support node cluster.
+    // TODO(backup): Support node cluster.
     pub fn run_with_backup(&mut self, backup_nodes: &[u64]) -> u64 {
         let reigon_id = self.run_conf_change();
         for node_id in backup_nodes {

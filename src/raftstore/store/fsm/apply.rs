@@ -520,7 +520,7 @@ impl ApplyContext {
                 let last = entry_batch.get_entries().last().unwrap().get_index();
 
                 // Save raft log entries.
-                // TODO: gc large buffer.
+                // TODO(backup): gc large buffer.
                 self.entry_batch_buf.clear();
                 entry_batch.write_to_vec(&mut self.entry_batch_buf).unwrap();
                 bm.save_logs(region_id, first, last, &self.entry_batch_buf)

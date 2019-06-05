@@ -106,7 +106,7 @@ fn test_server_simple_replication() {
     cluster.must_split(&region, b"k2");
     // Split is right derived by default.
     let region2 = cluster.get_region(b"k1");
-    // TODO: use readindex to make sure learner has applied latest committed logs.
+    // TODO(backup): use readindex to make sure learner has applied latest committed logs.
     sleep_ms(500);
     // Snapshot dir and a log file.
     check_list_dir(r1, 2);

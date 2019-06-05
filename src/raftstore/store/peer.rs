@@ -985,7 +985,7 @@ impl Peer {
     fn on_role_changed<T, C>(&mut self, ctx: &mut PollContext<T, C>, ready: &Ready) {
         // Update leader lease when the Raft state changes.
         if let Some(ref ss) = ready.ss {
-            // TODO: should we clean pending_request_snapshot?
+            // TODO(backup): should we clean pending_request_snapshot?
             match ss.raft_state {
                 StateRole::Leader => {
                     // The local read can only be performed after a new leader has applied
@@ -2230,7 +2230,7 @@ impl Peer {
     ) {
         if self.is_leader() {
             // Snapshot can only be requested when it's not a leader.
-            // TODO: check how leader handles snapshots.
+            // TODO(backup): check how leader handles snapshots.
             let resp = cmd_resp::err_resp(Error::StaleCommand, self.term());
             callback.invoke_with_response(resp);
             return;
