@@ -1958,21 +1958,24 @@ impl Peer {
     }
 
     pub fn get_min_progress(&self) -> Result<u64> {
-        let mut min = 0;
+        let mut min = None;
         if let Some(progress) = self.raft_group.status_ref().progress {
-            for (_, pr) in progress.iter() {
+            for (id, pr) in progress.iter() {
                 if pr.state == ProgressState::Snapshot || pr.requesting_snapshot {
                     return Err(box_err!(
-                        "there is a pending snapshot peer {:?}, skip merge",
-                        pr
+                        "there is a pending snapshot peer {} [{:?}], skip merge",
+                        id, pr
                     ));
                 }
-                if min > pr.matched {
-                    min = pr.matched;
+                if min.is_none() {
+                    min = Some(pr.matched);
+                }
+                if min.unwrap() > pr.matched {
+                    min = Some(pr.matched);
                 }
             }
         }
-        Ok(min)
+        Ok(min.unwrap_or(0))
     }
 
     fn pre_propose_prepare_merge<T, C>(
