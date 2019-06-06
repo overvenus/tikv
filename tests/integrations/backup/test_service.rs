@@ -47,8 +47,8 @@ fn test_backup_service() {
     ctx.set_region_id(region_id);
     ctx.set_region_epoch(reigon_epoch);
 
-    let mut req = BackupRequest::new();
+    let mut req = BackupRegionRequest::new();
     req.set_context(ctx);
-    let resp = client.backup(&req).unwrap();
-    assert!(!resp.has_region_error(), "{:?}", resp);
+    let resp = client.backup_region(&req).unwrap();
+    assert!(!resp.get_error().has_region_error(), "{:?}", resp);
 }

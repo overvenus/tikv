@@ -1964,7 +1964,8 @@ impl Peer {
                 if pr.state == ProgressState::Snapshot || pr.requesting_snapshot {
                     return Err(box_err!(
                         "there is a pending snapshot peer {} [{:?}], skip merge",
-                        id, pr
+                        id,
+                        pr
                     ));
                 }
                 if min.is_none() {

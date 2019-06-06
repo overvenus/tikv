@@ -1,13 +1,38 @@
 use std::fs::{self, File};
-use std::io::{Error, ErrorKind, Read, Result, Write};
+use std::io::{Error as IoError, ErrorKind, Read, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::{error, result};
 
-use kvproto::backup::{BackupEvent, BackupEvent_Event, BackupMeta};
+use kvproto::backup::{BackupEvent, BackupEvent_Event, BackupMeta, BackupState};
 use protobuf::Message;
 use rand::Rng;
 use tempdir::TempDir;
+
+quick_error! {
+    #[derive(Debug)]
+    pub enum Error {
+        Other(err: Box<dyn error::Error + Sync + Send>) {
+            from()
+            cause(err.as_ref())
+            description(err.description())
+            display("{}", err)
+        }
+        Io(err: IoError) {
+            from()
+            cause(err)
+            display("{}", err)
+            description(err.description())
+        }
+        Step(current: BackupState, request: BackupState) {
+            display("current {:?}, request {:?}", current, request)
+            description("can not step backup state")
+        }
+    }
+}
+
+pub type Result<T> = result::Result<T, Error>;
 
 pub trait Dependency: Sync + Send {
     fn get(&self) -> u64;
@@ -24,7 +49,7 @@ impl Dependency for AtomicU64 {
     }
 }
 
-fn maybe_create_dir(path: &Path) -> Result<()> {
+fn maybe_create_dir(path: &Path) -> IoResult<()> {
     if let Err(e) = fs::create_dir_all(path) {
         if e.kind() != ErrorKind::AlreadyExists {
             return Err(e);
@@ -38,12 +63,35 @@ const BACKUP_META_NAME: &str = "backup.meta";
 const LOCAL_STORAGE_TMP_DIR: &str = "localtmp";
 const LOCAL_STORAGE_TEP_FILE_SUFFIX: &str = "tmp";
 
+// TODO(backup): Simplify the trait.
 pub trait Storage: Sync + Send {
-    fn make_dir(&self, path: &Path) -> Result<()>;
-    fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>>;
-    fn save_dir(&self, path: &Path, src: &Path) -> Result<()>;
-    fn save_file(&self, path: &Path, content: &[u8]) -> Result<()>;
-    fn read_file(&self, path: &Path, buf: &mut Vec<u8>) -> Result<()>;
+    fn rename_dir(&self, from: &Path, to: &Path) -> IoResult<()>;
+    fn make_dir(&self, path: &Path) -> IoResult<()>;
+    fn list_dir(&self, path: &Path) -> IoResult<Vec<PathBuf>>;
+    fn save_dir(&self, path: &Path, src: &Path) -> IoResult<()>;
+    fn save_file(&self, path: &Path, content: &[u8]) -> IoResult<()>;
+    fn read_file(&self, path: &Path, buf: &mut Vec<u8>) -> IoResult<()>;
+}
+
+impl Storage for Box<dyn Storage> {
+    fn rename_dir(&self, from: &Path, to: &Path) -> IoResult<()> {
+        (**self).rename_dir(from, to)
+    }
+    fn make_dir(&self, path: &Path) -> IoResult<()> {
+        (**self).make_dir(path)
+    }
+    fn list_dir(&self, path: &Path) -> IoResult<Vec<PathBuf>> {
+        (**self).list_dir(path)
+    }
+    fn save_dir(&self, path: &Path, src: &Path) -> IoResult<()> {
+        (**self).save_dir(path, src)
+    }
+    fn save_file(&self, path: &Path, content: &[u8]) -> IoResult<()> {
+        (**self).save_file(path, content)
+    }
+    fn read_file(&self, path: &Path, buf: &mut Vec<u8>) -> IoResult<()> {
+        (**self).read_file(path, buf)
+    }
 }
 
 #[derive(Clone)]
@@ -53,7 +101,7 @@ pub struct LocalStorage {
 }
 
 impl LocalStorage {
-    pub fn new(base: &Path) -> Result<LocalStorage> {
+    pub fn new(base: &Path) -> IoResult<LocalStorage> {
         info!("create local storage"; "base" => base.display());
         let tmp = base.join(LOCAL_STORAGE_TMP_DIR);
         maybe_create_dir(&tmp)?;
@@ -71,13 +119,20 @@ impl LocalStorage {
     }
 }
 
+// TODO(backup): fsync dirs.
 impl Storage for LocalStorage {
-    fn make_dir(&self, path: &Path) -> Result<()> {
+    fn rename_dir(&self, from: &Path, to: &Path) -> IoResult<()> {
+        let from = self.base.join(from);
+        let to = self.base.join(to);
+        fs::rename(from, to)
+    }
+
+    fn make_dir(&self, path: &Path) -> IoResult<()> {
         let path = self.base.join(path);
         fs::create_dir_all(path)
     }
 
-    fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>> {
+    fn list_dir(&self, path: &Path) -> IoResult<Vec<PathBuf>> {
         let path = self.base.join(path);
         let rd = path.read_dir()?;
         let mut buf = vec![];
@@ -89,7 +144,7 @@ impl Storage for LocalStorage {
         Ok(buf)
     }
 
-    fn save_dir(&self, path: &Path, src: &Path) -> Result<()> {
+    fn save_dir(&self, path: &Path, src: &Path) -> IoResult<()> {
         let n = path.file_name().unwrap();
         let tmp = self.tmp_path(Path::new(n));
         fs::create_dir_all(&tmp).unwrap();
@@ -105,7 +160,7 @@ impl Storage for LocalStorage {
         fs::rename(tmp, self.base.join(path))
     }
 
-    fn save_file(&self, path: &Path, content: &[u8]) -> Result<()> {
+    fn save_file(&self, path: &Path, content: &[u8]) -> IoResult<()> {
         // Sanitize check, do not save file if its parent not found.
         if let Some(p) = path.parent() {
             fs::metadata(self.base.join(p))?;
@@ -119,7 +174,7 @@ impl Storage for LocalStorage {
         fs::rename(tmp_path, self.base.join(path))
     }
 
-    fn read_file(&self, path: &Path, buf: &mut Vec<u8>) -> Result<()> {
+    fn read_file(&self, path: &Path, buf: &mut Vec<u8>) -> IoResult<()> {
         let mut file = File::open(self.base.join(path))?;
         file.read_to_end(buf).map(|_| ())
     }
@@ -130,59 +185,117 @@ struct Meta {
     buf: Vec<u8>,
 }
 
+impl Meta {
+    fn state(&self) -> BackupState {
+        self.backup_meta.get_state()
+    }
+
+    fn step(&mut self, request: BackupState) -> Result<BackupState> {
+        let current = self.state();
+        assert!(current != BackupState::Unknown);
+        match (current, request) {
+            (BackupState::Stop, BackupState::Stop)
+            | (BackupState::Stop, BackupState::StartFullBackup)
+            | (BackupState::StartFullBackup, BackupState::FinishFullBackup)
+            | (BackupState::FinishFullBackup, BackupState::StartFullBackup)
+            | (BackupState::FinishFullBackup, BackupState::IncrementalBackup)
+            | (BackupState::IncrementalBackup, BackupState::IncrementalBackup)
+            | (_, BackupState::Stop) => (),
+            (current, request) => {
+                return Err(Error::Step(current, request));
+            }
+        }
+        self.backup_meta.set_state(request);
+        Ok(request)
+    }
+
+    fn last_dependency(&self) -> u64 {
+        let events = self.backup_meta.get_events();
+        events.iter().map(|e| e.get_dependency()).max().unwrap_or(0)
+    }
+
+    fn save_to(&mut self, path: &Path, storage: &dyn Storage) -> Result<()> {
+        self.buf.clear();
+        self.backup_meta.write_to_vec(&mut self.buf).unwrap();
+        storage.save_file(&path, &self.buf)?;
+        Ok(())
+    }
+}
+
 pub struct BackupManager {
     pub dependency: Box<dyn Dependency>,
     pub storage: Box<dyn Storage>,
     current: PathBuf,
     meta: Mutex<Meta>,
+    backuping: AtomicBool,
 
     auxiliary: PathBuf,
 }
 
+// TODO(backup): change unwrap to ?.
 impl BackupManager {
     pub fn new(base: &Path, storage: Box<dyn Storage>) -> Result<BackupManager> {
         info!("create backup manager"; "base" => base.display());
 
         let current = Path::new(CURRENT_DIR).to_owned();
+        // TODO(backup): do not create the dir until start_full_backup.
         if let Err(e) = storage.make_dir(&current) {
             if e.kind() != ErrorKind::AlreadyExists {
-                return Err(e);
+                return Err(Error::Io(e));
             }
         }
         let auxiliary = base.join("auxiliary");
         maybe_create_dir(&auxiliary).unwrap();
 
+        let mut backup_meta = BackupMeta::new();
         let meta_path = current.join(BACKUP_META_NAME);
         let mut content = vec![];
         if let Err(e) = storage.read_file(meta_path.as_path(), &mut content) {
             if e.kind() != ErrorKind::NotFound {
                 error!("fail to start backup"; "error" => ?e);
-                return Err(e);
+                return Err(Error::Io(e));
             }
+            // The initial state is Stop.
+            backup_meta.set_state(BackupState::Stop);
             info!("new backup");
         } else {
+            backup_meta
+                .merge_from_bytes(&content)
+                .map_err(|e| IoError::new(ErrorKind::InvalidData, format!("{:?}", e)))
+                .unwrap();
             info!("continue backup");
         }
 
-        let mut backup_meta = BackupMeta::new();
-        backup_meta
-            .merge_from_bytes(&content)
-            .map_err(|e| Error::new(ErrorKind::InvalidData, format!("{:?}", e)))
-            .unwrap();
-        let events = backup_meta.mut_events();
-        events.sort_by(|l, r| l.get_dependency().cmp(&r.get_dependency()));
-        let last_number = events.last().map_or(0, |e| e.get_dependency());
-        let dependency = Box::new(AtomicU64::new(last_number + 1));
-        let buf = vec![];
-        info!("backup last number"; "last_number" => last_number);
         debug!("backup meta"; "meta" => ?backup_meta);
+        let meta = Meta {
+            backup_meta,
+            buf: vec![],
+        };
+        let last_number = meta.last_dependency();
+        let dependency = Box::new(AtomicU64::new(last_number + 1));
+        info!("backup last number"; "last_number" => last_number);
+        assert!(
+            meta.state() != BackupState::Unknown,
+            "{:?}",
+            meta.backup_meta
+        );
+        // TODO: Stop backup by default.
+        // let backuping = AtomicBool::new(BackupState::Stop != meta.state());
+        let backuping = AtomicBool::new(true);
         Ok(BackupManager {
             dependency,
             storage,
             auxiliary,
             current,
-            meta: Mutex::new(Meta { backup_meta, buf }),
+            backuping,
+            meta: Mutex::new(meta),
         })
+    }
+
+    fn on_state_change(&self, new: BackupState) {
+        assert!(new != BackupState::Unknown, "{:?}", new);
+        self.backuping
+            .store(new != BackupState::Stop, Ordering::Release);
     }
 
     pub fn check_meta(&self) -> Result<()> {
@@ -194,7 +307,8 @@ impl BackupManager {
     }
 
     pub fn tmp_dir(&self, prefix: &str) -> Result<TempDir> {
-        TempDir::new_in(&self.auxiliary, prefix)
+        let dir = TempDir::new_in(&self.auxiliary, prefix)?;
+        Ok(dir)
     }
 
     pub fn current_dir(&self) -> &Path {
@@ -206,12 +320,15 @@ impl BackupManager {
     }
 
     pub fn start_backup_region(&self, region_id: u64) -> Result<()> {
+        if !self.backuping.load(Ordering::Acquire) {
+            return Ok(());
+        }
         if let Err(e) = self
             .storage
             .make_dir(&self.current.join(&format!("{}", region_id)))
         {
             if e.kind() != ErrorKind::AlreadyExists {
-                return Err(e);
+                return Err(Error::Io(e));
             }
         }
         Ok(())
@@ -223,8 +340,12 @@ impl BackupManager {
     }
 
     pub fn save_logs(&self, region_id: u64, first: u64, last: u64, content: &[u8]) -> Result<()> {
+        if !self.backuping.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let dst = self.log_path(region_id, first, last);
-        self.storage.save_file(&dst, content)
+        self.storage.save_file(&dst, content)?;
+        Ok(())
     }
 
     pub fn snapshot_dir(&self, region_id: u64, term: u64, index: u64, dependency: u64) -> PathBuf {
@@ -233,6 +354,9 @@ impl BackupManager {
     }
 
     pub fn save_snapshot(&self, region_id: u64, term: u64, index: u64, src: &Path) -> Result<()> {
+        if !self.backuping.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let dep = self.dependency.alloc_number();
         let dst = self.snapshot_dir(region_id, term, index, dep);
         self.storage.save_dir(&dst, src).unwrap();
@@ -241,25 +365,62 @@ impl BackupManager {
         event.set_index(index);
         event.set_dependency(dep);
         event.set_event(BackupEvent_Event::Snapshot);
-        self.save_events(vec![event])
+        self.save_events(vec![event])?;
+        Ok(())
     }
 
     pub fn save_events<I>(&self, events: I) -> Result<()>
     where
         I: IntoIterator<Item = BackupEvent>,
     {
+        if !self.backuping.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let mut meta = self.meta.lock().unwrap();
         for event in events {
             meta.backup_meta.mut_events().push(event);
         }
-        let meta: &mut Meta = &mut *meta;
-        let backup_meta = &mut meta.backup_meta;
-        let buf = &mut meta.buf;
-        buf.clear();
-        backup_meta.write_to_vec(buf).unwrap();
         let meta_path = self.current.join(BACKUP_META_NAME);
-        self.storage.save_file(&meta_path, &meta.buf).unwrap();
+        meta.save_to(&meta_path, &self.storage).unwrap();
         Ok(())
+    }
+
+    pub fn step(&self, request: BackupState) -> Result<u64> {
+        let mut meta = self.meta.lock().unwrap();
+        let state = meta.step(request)?;
+        self.on_state_change(state);
+        let dep = self.dependency.alloc_number();
+        match state {
+            BackupState::Stop => {
+                self.backuping.store(false, Ordering::Release);
+            }
+            BackupState::StartFullBackup => {
+                if meta.backup_meta.get_start_full_backup_dependency() != 0 {
+                    // Rotate the current dir.
+                    self.storage
+                        .rename_dir(
+                            self.current_dir(),
+                            Path::new(&format!("{}", meta.last_dependency())),
+                        )
+                        .unwrap();
+                }
+                self.storage.make_dir(self.current_dir()).unwrap();
+                meta.backup_meta.set_start_full_backup_dependency(dep);
+                self.backuping.store(true, Ordering::Release);
+            }
+            BackupState::FinishFullBackup => {
+                meta.backup_meta.set_finish_full_backup_dependency(dep);
+                assert!(self.backuping.load(Ordering::Acquire));
+            }
+            BackupState::IncrementalBackup => {
+                meta.backup_meta.mut_inc_backup_dependencies().push(dep);
+                assert!(self.backuping.load(Ordering::Acquire));
+            }
+            BackupState::Unknown => panic!("unexpected state unknown"),
+        }
+        let meta_path = self.current.join(BACKUP_META_NAME);
+        meta.save_to(&meta_path, &self.storage).unwrap();
+        Ok(dep)
     }
 }
 
@@ -406,7 +567,7 @@ fn check_meta(mut meta: BackupMeta) -> Result<()> {
     if err.is_empty() {
         Ok(())
     } else {
-        Err(Error::new(ErrorKind::Other, err))
+        Err(Error::Other(box_err!(err)))
     }
 }
 
@@ -418,6 +579,54 @@ mod tests {
     fn test_sync_send_backup_mgr() {
         fn t<T: Sync + Send>(_: Option<T>) {}
         t::<BackupManager>(None);
+    }
+
+    #[test]
+    fn test_meta_step() {
+        use std::collections::HashSet;
+        let mut meta = Meta {
+            backup_meta: Default::default(),
+            buf: vec![],
+        };
+        let mut correct = HashSet::new();
+        correct.insert((BackupState::Stop, BackupState::StartFullBackup));
+        correct.insert((BackupState::StartFullBackup, BackupState::FinishFullBackup));
+        correct.insert((BackupState::FinishFullBackup, BackupState::StartFullBackup));
+        correct.insert((
+            BackupState::FinishFullBackup,
+            BackupState::IncrementalBackup,
+        ));
+        correct.insert((
+            BackupState::IncrementalBackup,
+            BackupState::IncrementalBackup,
+        ));
+        correct.insert((BackupState::Stop, BackupState::Stop));
+        correct.insert((BackupState::StartFullBackup, BackupState::Stop));
+        correct.insert((BackupState::FinishFullBackup, BackupState::Stop));
+        correct.insert((BackupState::IncrementalBackup, BackupState::Stop));
+
+        let all = vec![
+            BackupState::Unknown,
+            BackupState::Stop,
+            BackupState::StartFullBackup,
+            BackupState::FinishFullBackup,
+            BackupState::IncrementalBackup,
+        ];
+
+        for s1 in all.clone() {
+            if s1 == BackupState::Unknown {
+                continue;
+            }
+            for s2 in all.clone() {
+                meta.backup_meta.set_state(s1);
+                assert!(
+                    meta.step(s2).is_ok() == correct.contains(&(s1, s2)),
+                    "{:?} should be {}",
+                    (s1, s2),
+                    correct.contains(&(s1, s2))
+                );
+            }
+        }
     }
 
     #[test]
@@ -479,6 +688,49 @@ mod tests {
     }
 
     #[test]
+    fn test_backup_mgr_step() {
+        let temp_dir = TempDir::new("test_backup_mgr").unwrap();
+        let path = temp_dir.path();
+
+        let ls = LocalStorage::new(&path).unwrap();
+        let bm = BackupManager::new(&path, Box::new(ls)).unwrap();
+
+        let check_file_count = |count| {
+            let files = bm.storage.list_dir(Path::new("")).unwrap();
+            assert_eq!(count, files.len(), "{:?}", files);
+            files.len()
+        };
+        // For now, current dir is created during initializing backup manager.
+        let len = check_file_count(1 /* current */ + 1 /* auxiliary */ + 1 /* localtmp */);
+
+        bm.step(BackupState::Stop).unwrap();
+        let len = check_file_count(len);
+        assert!(!bm.backuping.load(Ordering::Acquire));
+
+        // Do not rotate if it is the first backup.
+        bm.step(BackupState::StartFullBackup).unwrap();
+        let len = check_file_count(len);
+        assert!(bm.backuping.load(Ordering::Acquire));
+
+        bm.step(BackupState::FinishFullBackup).unwrap();
+        let len = check_file_count(len);
+        assert!(bm.backuping.load(Ordering::Acquire));
+
+        bm.step(BackupState::IncrementalBackup).unwrap();
+        let len = check_file_count(len);
+        assert!(bm.backuping.load(Ordering::Acquire));
+
+        // Test rotate.
+        bm.step(BackupState::Stop).unwrap();
+        let len = check_file_count(len);
+        assert!(!bm.backuping.load(Ordering::Acquire));
+
+        bm.step(BackupState::StartFullBackup).unwrap();
+        check_file_count(len + 1);
+        assert!(bm.backuping.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn test_backup_mgr() {
         let temp_dir = TempDir::new("test_backup_mgr").unwrap();
         let path = temp_dir.path();
@@ -490,6 +742,8 @@ mod tests {
         assert_eq!(bm.dependency.get(), 1);
         assert_eq!(bm.dependency.alloc_number(), 1);
         assert_eq!(bm.dependency.alloc_number(), 2);
+
+        bm.step(BackupState::StartFullBackup).unwrap();
 
         let src = path.join("src");
         bm.start_backup_region(1).unwrap();

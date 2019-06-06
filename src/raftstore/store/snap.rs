@@ -1171,7 +1171,7 @@ pub struct SnapManager {
     router: Option<RaftRouter>,
     limiter: Option<Arc<IOLimiter>>,
     max_total_size: u64,
-    backup_mgr: Option<Arc<BackupManager>>,
+    pub backup_mgr: Option<Arc<BackupManager>>,
 }
 
 impl SnapManager {
