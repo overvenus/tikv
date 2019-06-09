@@ -8,7 +8,6 @@ pub mod msg;
 pub mod transport;
 pub mod util;
 
-mod backup;
 mod bootstrap;
 mod local_metrics;
 mod metrics;
@@ -18,7 +17,7 @@ mod region_snapshot;
 mod snap;
 mod worker;
 
-pub use self::backup::{BackupManager, Dependency, LocalStorage};
+pub use backup::{BackupManager, Dependency, LocalStorage};
 pub use self::bootstrap::{
     bootstrap_store, clear_prepare_bootstrap_cluster, clear_prepare_bootstrap_key, initial_region,
     prepare_bootstrap_cluster,

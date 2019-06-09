@@ -1,3 +1,24 @@
+// Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
+
+#![recursion_limit = "200"]
+
+#[macro_use(
+    kv,
+    slog_kv,
+    slog_debug,
+    slog_info,
+    slog_error,
+    slog_record,
+    slog_b,
+    slog_log,
+    slog_record_static
+)]
+extern crate slog;
+#[macro_use]
+extern crate slog_global;
+#[macro_use]
+extern crate quick_error;
+
 use std::fs::{self, File};
 use std::io::{Error as IoError, ErrorKind, Read, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
@@ -567,7 +588,7 @@ fn check_meta(mut meta: BackupMeta) -> Result<()> {
     if err.is_empty() {
         Ok(())
     } else {
-        Err(Error::Other(box_err!(err)))
+        Err(Error::Other(err.into()))
     }
 }
 
