@@ -175,9 +175,15 @@ impl Simulator for ServerCluster {
             None
         } else {
             let local_storage = LocalStorage::new(Path::new(&tmp_backup_str))?;
-            let backup_mgr =
-                BackupManager::new(Path::new(&tmp_backup_str), Box::new(local_storage)).unwrap();
-            backup_mgr.step(kvproto::backup::BackupState::StartFullBackup).unwrap();
+            let backup_mgr = BackupManager::new(
+                cfg.server.cluster_id,
+                Path::new(&tmp_backup_str),
+                Box::new(local_storage),
+            )
+            .unwrap();
+            backup_mgr
+                .step(kvproto::backup::BackupState::StartFullBackup)
+                .unwrap();
             Some(Arc::new(backup_mgr))
         };
         let snap_mgr = SnapManager::new(tmp_snap_str, Some(router.clone()), backup_mgr.clone());

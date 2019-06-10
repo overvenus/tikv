@@ -228,8 +228,9 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     let backup_mgr = if cfg.server.backup_mode {
         let local_storage = store::LocalStorage::new(&backup_path)
             .unwrap_or_else(|e| fatal!("failed to create local storage: {}", e));
-        let backup = store::BackupManager::new(&backup_path, Box::new(local_storage))
-            .unwrap_or_else(|e| fatal!("failed to create backup manager: {}", e));
+        let backup =
+            store::BackupManager::new(cfg.server.cluster_id, &backup_path, Box::new(local_storage))
+                .unwrap_or_else(|e| fatal!("failed to create backup manager: {}", e));
         Some(Arc::new(backup))
     } else {
         None

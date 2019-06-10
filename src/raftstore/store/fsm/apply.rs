@@ -3121,7 +3121,7 @@ mod tests {
     fn create_tmp_backup_mgr(path: &str) -> (TempDir, Arc<BackupManager>) {
         let dir = TempDir::new(path).unwrap();
         let ls = LocalStorage::new(dir.path()).unwrap();
-        let bm = Arc::new(BackupManager::new(dir.path(), Box::new(ls)).unwrap());
+        let bm = Arc::new(BackupManager::new(0, dir.path(), Box::new(ls)).unwrap());
         (dir, bm)
     }
 
@@ -4103,7 +4103,8 @@ mod tests {
         system.spawn("test-backup".to_owned(), builder);
 
         router.schedule_task(1, Msg::Registration(reg.clone()));
-        bm.step(kvproto::backup::BackupState::StartFullBackup).unwrap();
+        bm.step(kvproto::backup::BackupState::StartFullBackup)
+            .unwrap();
         bm.start_backup_region(1).unwrap();
 
         let entry_batch = RefCell::new(EntryBatch::new());

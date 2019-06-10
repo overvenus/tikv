@@ -15,7 +15,7 @@ use super::configure_for_backup;
 
 fn must_new_backup_cluster_and_client() -> (Cluster<ServerCluster>, BackupClient, u64) {
     let count = 2;
-    let mut cluster = new_server_cluster(0, count);
+    let mut cluster = new_server_cluster(1, count);
     configure_for_backup(&mut cluster);
 
     // Disable default max peer count check.
@@ -31,7 +31,7 @@ fn must_new_backup_cluster_and_client() -> (Cluster<ServerCluster>, BackupClient
 }
 
 #[test]
-fn test_backup_service() {
+fn test_service_backup_region() {
     let (cluster, client, region_id) = must_new_backup_cluster_and_client();
 
     // Add learner (2, 2) to region 1.
@@ -51,4 +51,22 @@ fn test_backup_service() {
     req.set_context(ctx);
     let resp = client.backup_region(&req).unwrap();
     assert!(!resp.get_error().has_region_error(), "{:?}", resp);
+}
+
+#[test]
+fn test_service_backup() {
+    let (cluster, client, _) = must_new_backup_cluster_and_client();
+
+    let mut req = BackupRequest::new();
+    let resp = client.backup(&req).unwrap();
+    assert!(resp.get_error().has_cluster_id_error(), "{:?}", resp);
+
+    req.set_cluster_id(cluster.id());
+    let resp = client.backup(&req).unwrap();
+    assert!(!resp.get_error().has_cluster_id_error(), "{:?}", resp);
+    assert!(resp.get_error().has_state_step_error(), "{:?}", resp);
+
+    req.set_state(BackupState::Stop);
+    let resp = client.backup(&req).unwrap();
+    assert!(!resp.has_error(), "{:?}", resp);
 }

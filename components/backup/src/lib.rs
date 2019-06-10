@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::{error, result};
 
-use kvproto::backup::{BackupEvent, BackupEvent_Event, BackupMeta, BackupState};
+use kvproto::backup::{BackupEvent, BackupEvent_Event, BackupMeta, BackupState, Error as ErrorPb};
 use protobuf::Message;
 use rand::Rng;
 use tempdir::TempDir;
@@ -50,6 +50,30 @@ quick_error! {
             display("current {:?}, request {:?}", current, request)
             description("can not step backup state")
         }
+        ClusterID(current: u64, request: u64) {
+            display("current {:?}, request {:?}", current, request)
+            description("cluster ID mismatch")
+        }
+    }
+}
+
+impl Into<ErrorPb> for Error {
+    fn into(self) -> ErrorPb {
+        let mut err = ErrorPb::new();
+        match self {
+            Error::Step(current, request) => {
+                err.mut_state_step_error().set_current(current);
+                err.mut_state_step_error().set_request(request);
+            }
+            Error::ClusterID(current, request) => {
+                err.mut_cluster_id_error().set_current(current);
+                err.mut_cluster_id_error().set_request(request);
+            }
+            other => {
+                err.set_msg(format!("{:?}", other));
+            }
+        }
+        err
     }
 }
 
@@ -249,13 +273,14 @@ pub struct BackupManager {
     current: PathBuf,
     meta: Mutex<Meta>,
     backuping: AtomicBool,
+    cluster_id: u64,
 
     auxiliary: PathBuf,
 }
 
 // TODO(backup): change unwrap to ?.
 impl BackupManager {
-    pub fn new(base: &Path, storage: Box<dyn Storage>) -> Result<BackupManager> {
+    pub fn new(cluster_id: u64, base: &Path, storage: Box<dyn Storage>) -> Result<BackupManager> {
         info!("create backup manager"; "base" => base.display());
 
         let current = Path::new(CURRENT_DIR).to_owned();
@@ -309,6 +334,7 @@ impl BackupManager {
             auxiliary,
             current,
             backuping,
+            cluster_id,
             meta: Mutex::new(meta),
         })
     }
@@ -442,6 +468,14 @@ impl BackupManager {
         let meta_path = self.current.join(BACKUP_META_NAME);
         meta.save_to(&meta_path, &self.storage).unwrap();
         Ok(dep)
+    }
+
+    pub fn check_cluster_id(&self, cluster_id: u64) -> Result<()> {
+        if self.cluster_id != cluster_id {
+            Err(Error::ClusterID(self.cluster_id, cluster_id))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -714,7 +748,7 @@ mod tests {
         let path = temp_dir.path();
 
         let ls = LocalStorage::new(&path).unwrap();
-        let bm = BackupManager::new(&path, Box::new(ls)).unwrap();
+        let bm = BackupManager::new(0, &path, Box::new(ls)).unwrap();
 
         let check_file_count = |count| {
             let files = bm.storage.list_dir(Path::new("")).unwrap();
@@ -759,7 +793,7 @@ mod tests {
         // fs::create_dir(path).unwrap();
 
         let ls = LocalStorage::new(&path).unwrap();
-        let bm = BackupManager::new(&path, Box::new(ls)).unwrap();
+        let bm = BackupManager::new(0, &path, Box::new(ls)).unwrap();
         assert_eq!(bm.dependency.get(), 1);
         assert_eq!(bm.dependency.alloc_number(), 1);
         assert_eq!(bm.dependency.alloc_number(), 2);
@@ -805,7 +839,7 @@ mod tests {
 
         drop(bm);
         let ls = LocalStorage::new(&path).unwrap();
-        let bm = BackupManager::new(&path, Box::new(ls)).unwrap();
+        let bm = BackupManager::new(0, &path, Box::new(ls)).unwrap();
         check_meta(&bm, bm.dependency.get() - 1, magic_contents);
 
         bm.save_logs(1, 10, 100, magic_contents).unwrap();

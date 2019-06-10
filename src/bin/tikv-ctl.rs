@@ -1718,7 +1718,7 @@ fn main() {
         let p = matches.value_of("path").unwrap();
         let path = Path::new(p);
         let ls = LocalStorage::new(path).unwrap();
-        let bm = BackupManager::new(path, Box::new(ls)).unwrap();
+        let bm = BackupManager::new(0, path, Box::new(ls)).unwrap();
         if let Some(matches) = matches.subcommand_matches("meta") {
             let meta = bm.backup_meta();
             if let Some(v) = matches.value_of("region") {

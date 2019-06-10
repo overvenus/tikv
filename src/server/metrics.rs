@@ -35,6 +35,7 @@ make_static_metric! {
         split_region,
         read_index,
         backup,
+        backup_region,
     }
     pub struct GrpcMsgHistogramVec: Histogram {
         "type" => GrpcTypeKind,
