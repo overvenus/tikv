@@ -78,7 +78,7 @@ pub enum GroupState {
 }
 
 pub struct PeerFsm {
-    peer: Peer,
+    pub peer: Peer,
     /// A registry for all scheduled ticks. This can avoid scheduling ticks twice accidentally.
     tick_registry: PeerTicks,
     /// Ticks for speed up campaign in chaos state.
@@ -370,6 +370,7 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
                     .peer
                     .handle_request_snapshot(region_epoch, callback);
             }
+            CasualMessage::Test(cb) => cb(self.fsm),
         }
     }
 
@@ -905,9 +906,6 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
         }
 
         if !self.check_request_snapshot(&msg) {
-            info!("can not handle request snapshot";
-                "region_id" => self.fsm.peer.region().get_id(),
-                "peer_id" => self.fsm.peer.peer_id());
             return Ok(());
         }
 
@@ -1337,18 +1335,24 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
     // Check if this peer can handle request_snapshot.
     fn check_request_snapshot(&mut self, msg: &RaftMessage) -> bool {
         let m = msg.get_message();
-        if m.get_request_snapshot()
-            || !(m.get_reject() && m.get_reject_hint() == raft::INVALID_INDEX)
-        {
+        if m.get_request_snapshot() == raft::INVALID_INDEX {
             // If it's not a request snapshot, then go on.
             return true;
         }
         if !self.fsm.peer.is_leader() {
             // Only leader can handle request snapshot.
+            info!("can not handle request snapshot";
+                "reason" => "not_leader",
+                "region_id" => self.fsm.peer.region().get_id(),
+                "peer_id" => self.fsm.peer.peer_id());
             return false;
         }
-        if self.fsm.peer.is_merging_strict() {
-            // Can not handle request snapshot in merging.
+        // Can not handle request snapshot in merging and splitting.
+        if self.fsm.peer.is_merging() || self.fsm.peer.is_splitting() {
+            info!("can not handle request snapshot";
+                "reason" => "split_merge",
+                "region_id" => self.fsm.peer.region().get_id(),
+                "peer_id" => self.fsm.peer.peer_id());
             return false;
         }
         true

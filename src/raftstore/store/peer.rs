@@ -795,10 +795,7 @@ impl Peer {
             match msg_type {
                 MessageType::MsgAppend => metrics.append += 1,
                 MessageType::MsgAppendResponse => {
-                    if msg.get_request_snapshot()
-                        && msg.get_reject()
-                        && msg.get_reject_hint() == raft::INVALID_INDEX
-                    {
+                    if msg.get_request_snapshot() != raft::INVALID_INDEX {
                         self.pending_request_snapshots.push_msg(
                             self.get_store().applied_index(),
                             self.region().get_region_epoch().to_owned(),
@@ -1098,12 +1095,12 @@ impl Peer {
     }
 
     #[inline]
-    fn is_splitting(&self) -> bool {
+    pub fn is_splitting(&self) -> bool {
         self.last_committed_split_idx > self.get_store().applied_index()
     }
 
     #[inline]
-    fn is_merging(&self) -> bool {
+    pub fn is_merging(&self) -> bool {
         self.last_committed_prepare_merge_idx > self.get_store().applied_index()
             || self.pending_merge_state.is_some()
     }
@@ -2009,7 +2006,7 @@ impl Peer {
             for (id, pr) in progress.iter() {
                 if pr.state == ProgressState::Snapshot {
                     return Err(box_err!(
-                        "there is a pending peer {} [{:?}], skip merge",
+                        "there is a pending snapshot peer {} [{:?}], skip merge",
                         id,
                         pr
                     ));
@@ -2315,7 +2312,10 @@ impl Peer {
             "region_id" => self.region_id,
             "peer_id" => self.peer_id()
         );
-        if let Err(e) = self.raft_group.request_snapshot() {
+        if let Err(e) = self
+            .raft_group
+            .request_snapshot(self.get_store().committed_index())
+        {
             error!("request snapshot failed";
                 "region_id" => self.region_id,
                 "peer_id" => self.peer_id());

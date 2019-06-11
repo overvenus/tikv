@@ -130,6 +130,12 @@ impl RaftMessageMetrics {
                 .inc_by(self.snapshot as i64);
             self.snapshot = 0;
         }
+        if self.request_snapshot > 0 {
+            STORE_RAFT_SENT_MESSAGE_COUNTER_VEC
+                .with_label_values(&["request_snapshot"])
+                .inc_by(self.request_snapshot as i64);
+            self.request_snapshot = 0;
+        }
         if self.heartbeat > 0 {
             STORE_RAFT_SENT_MESSAGE_COUNTER_VEC
                 .with_label_values(&["heartbeat"])

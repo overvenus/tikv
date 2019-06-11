@@ -12,6 +12,7 @@ use kvproto::raft_serverpb::RaftMessage;
 use raft::SnapshotStatus;
 
 use crate::raftstore::store::fsm::apply::TaskRes as ApplyTaskRes;
+use crate::raftstore::store::fsm::PeerFsm;
 use crate::raftstore::store::util::KeysInfoFormatter;
 use crate::raftstore::store::SnapKey;
 use crate::storage::kv::CompactedEvent;
@@ -215,6 +216,10 @@ pub enum CasualMessage {
         region_epoch: RegionEpoch,
         callback: Callback,
     },
+
+    /// A test only message, it is useful when we want to access
+    /// peer's internal state.
+    Test(Box<dyn FnOnce(&mut PeerFsm) + Send + 'static>),
 }
 
 impl fmt::Debug for CasualMessage {
@@ -257,6 +262,7 @@ impl fmt::Debug for CasualMessage {
             CasualMessage::RequestSnapshot {
                 ref region_epoch, ..
             } => write!(fmt, "RequestSnapshot at {:?}", region_epoch),
+            CasualMessage::Test(_) => write!(fmt, "Test"),
         }
     }
 }
