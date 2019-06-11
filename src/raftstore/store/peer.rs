@@ -1961,9 +1961,9 @@ impl Peer {
         let mut min = None;
         if let Some(progress) = self.raft_group.status_ref().progress {
             for (id, pr) in progress.iter() {
-                if pr.state == ProgressState::Snapshot || pr.requesting_snapshot {
+                if pr.state == ProgressState::Snapshot {
                     return Err(box_err!(
-                        "there is a pending snapshot peer {} [{:?}], skip merge",
+                        "there is a pending peer {} [{:?}], skip merge",
                         id,
                         pr
                     ));
