@@ -19,6 +19,7 @@ extern crate slog_global;
 #[macro_use]
 extern crate quick_error;
 
+use std::collections::hash_map::{Entry, HashMap};
 use std::fs::{self, File};
 use std::io::{Error as IoError, ErrorKind, Read, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
@@ -345,7 +346,11 @@ impl BackupManager {
             .store(new != BackupState::Stop, Ordering::Release);
     }
 
-    pub fn check_meta(&self) -> Result<()> {
+    pub fn check_data(&self, region_events: RegionEvents) -> Result<()> {
+        check_data(region_events, &self.current, &self.storage)
+    }
+
+    pub fn check_meta(&self) -> Result<RegionEvents> {
         check_meta(self.backup_meta())
     }
 
@@ -363,7 +368,7 @@ impl BackupManager {
     }
 
     pub fn region_path(&self, region_id: u64) -> PathBuf {
-        self.current.join(format!("{}", region_id))
+        region_path(&self.current, region_id)
     }
 
     pub fn start_backup_region(&self, region_id: u64) -> Result<()> {
@@ -382,8 +387,7 @@ impl BackupManager {
     }
 
     pub fn log_path(&self, region_id: u64, first: u64, last: u64) -> PathBuf {
-        self.current
-            .join(format!("{}/{}_{}", region_id, first, last))
+        log_path(&self.current, region_id, first, last)
     }
 
     pub fn save_logs(&self, region_id: u64, first: u64, last: u64, content: &[u8]) -> Result<()> {
@@ -396,8 +400,7 @@ impl BackupManager {
     }
 
     pub fn snapshot_dir(&self, region_id: u64, term: u64, index: u64, dependency: u64) -> PathBuf {
-        self.current
-            .join(format!("{}/{}@{}_{}", region_id, index, term, dependency))
+        snapshot_dir(&self.current, region_id, term, index, dependency)
     }
 
     pub fn save_snapshot(&self, region_id: u64, term: u64, index: u64, src: &Path) -> Result<()> {
@@ -479,9 +482,21 @@ impl BackupManager {
     }
 }
 
-fn check_meta(mut meta: BackupMeta) -> Result<()> {
-    use std::collections::hash_map::{Entry, HashMap};
+fn region_path(base: &Path, region_id: u64) -> PathBuf {
+    base.join(format!("{}", region_id))
+}
 
+fn snapshot_dir(base: &Path, region_id: u64, term: u64, index: u64, dependency: u64) -> PathBuf {
+    base.join(format!("{}/{}@{}_{}", region_id, index, term, dependency))
+}
+
+fn log_path(base: &Path, region_id: u64, first: u64, last: u64) -> PathBuf {
+    base.join(format!("{}/{}_{}", region_id, first, last))
+}
+
+type RegionEvents = HashMap<u64, Vec<BackupEvent>>;
+
+fn check_meta(mut meta: BackupMeta) -> Result<RegionEvents> {
     let mut err = String::new();
     meta.mut_events()
         .sort_by(|l, r| l.get_dependency().cmp(&r.get_dependency()));
@@ -617,6 +632,76 @@ fn check_meta(mut meta: BackupMeta) -> Result<()> {
                 // TODO(backup): Check other events.
                 _ => (),
             }
+        }
+    }
+    if err.is_empty() {
+        Ok(region_events)
+    } else {
+        Err(Error::Other(err.into()))
+    }
+}
+
+/// The very first raft log index of TiKV.
+const TIKV_INITIAL_INDEX: u64 = 6;
+
+fn check_data(region_events: RegionEvents, base: &Path, storage: &dyn Storage) -> Result<()> {
+    let mut err = String::new();
+    let mut index_vec = Vec::new();
+    let mut snap_vec = Vec::new();
+    // Check raft log and snapshot.
+    // 1. raft log must be continuous, no gap is allowed, unless
+    // 2. there is a snapshot, and gap is only allowed between
+    //    raft log and sanpshot.
+    // TODO(backup): check snapshot events.
+    for region_id in region_events.keys() {
+        let path = region_path(base, *region_id);
+        let list = match storage.list_dir(&path) {
+            Ok(list) => list,
+            Err(e) => {
+                err += &format!("fail to list {}, error {:?}\n", path.display(), e);
+                continue;
+            }
+        };
+        index_vec.clear();
+        snap_vec.clear();
+        for p in list {
+            let name = p.file_name().unwrap().to_str().unwrap();
+            if name.contains('@') {
+                let index: u64 = name.split('@').next().unwrap().parse().unwrap();
+                snap_vec.push(index);
+            } else {
+                let mut is = name.split('_');
+                let index1: u64 = is.next().unwrap().parse().unwrap();
+                let index2: u64 = is.next().unwrap().parse().unwrap();
+                index_vec.push((index1, index2));
+            }
+        }
+        index_vec.sort_by(|r, l| r.cmp(&l));
+        snap_vec.sort();
+
+        let mut index1 = 0;
+        let mut index2 = 0;
+        for (i1, i2) in index_vec.drain(..) {
+            if i1 > i2 {
+                err += &format!(
+                    "out of order logs region_id: {} ({}_{})\n",
+                    region_id, i1, i2
+                );
+            }
+            // Ignore duplicate raft logs, it is caused by commit merge.
+            if index2 + 1 != i1 && index2 != i1 {
+                // [0, TIKV_INITIAL_INDEX] is suppose to be empty.
+                if !(index2 == 0 && i1 == TIKV_INITIAL_INDEX)
+                    && !snap_vec.iter().any(|i| i + 1 == i1)
+                {
+                    err += &format!(
+                        "gap between logs region_id: {} [{}_{}, {}_{}]\n",
+                        region_id, index1, index2, i1, i2,
+                    );
+                }
+            }
+            index1 = i1;
+            index2 = i2;
         }
     }
     if err.is_empty() {
@@ -966,5 +1051,97 @@ mod tests {
             &check_meta(commit_rollback_merge.clone()).unwrap_err(),
             "commit found but no prepare",
         );
+    }
+
+    #[test]
+    fn test_check_data() {
+        #[derive(Debug)]
+        struct Case {
+            snaps: Vec<(u64, u64)>, // index and term
+            logs: Vec<(u64, u64)>,
+            expect: Option<&'static str>,
+        }
+        let cases = vec![
+            Case {
+                snaps: vec![(1, 1), (10, 1)],
+                logs: vec![(2, 3), (4, 4), (11, 13)],
+                expect: None, // ok
+            },
+            Case {
+                snaps: vec![],
+                logs: vec![(TIKV_INITIAL_INDEX, TIKV_INITIAL_INDEX + 1)],
+                expect: None,
+            },
+            Case {
+                snaps: vec![],
+                logs: vec![
+                    (TIKV_INITIAL_INDEX, TIKV_INITIAL_INDEX + 2),
+                    (TIKV_INITIAL_INDEX + 3, TIKV_INITIAL_INDEX + 3), // duplicated entry
+                    (TIKV_INITIAL_INDEX + 3, TIKV_INITIAL_INDEX + 4),
+                ],
+                expect: None,
+            },
+            Case {
+                snaps: vec![],
+                logs: vec![(11, 11), (12, 12), (13, 13), (6, 8), (9, 10), (9, 9)],
+                expect: None,
+            },
+            Case {
+                snaps: vec![(805, 1)],
+                logs: vec![(806, 806), (807, 812), (812, 812), (813, 836)],
+                expect: None,
+            },
+            Case {
+                snaps: vec![],
+                logs: vec![(2, 3)],
+                expect: Some("gap between"),
+            },
+            Case {
+                snaps: vec![(1, 1)],
+                logs: vec![(2, 3), (4, 4), (11, 13)],
+                expect: Some("gap between"),
+            },
+            Case {
+                snaps: vec![(1, 1)],
+                logs: vec![(2, 3), (4, 4), (5, 5)],
+                expect: None,
+            },
+            Case {
+                snaps: vec![(1, 1)],
+                logs: vec![(2, 3), (4, 3)],
+                expect: Some("out of order"),
+            },
+        ];
+        for case in cases {
+            let tmp = TempDir::new("test_check_data").unwrap();
+            let base = Path::new("current");
+            let storage = LocalStorage::new(tmp.path()).unwrap();
+            storage.make_dir(&region_path(base, 1)).unwrap();
+            for s in &case.snaps {
+                storage
+                    .make_dir(&snapshot_dir(base, 1, s.1, s.0, 0))
+                    .unwrap();
+            }
+            for l in &case.logs {
+                storage
+                    .save_file(&log_path(base, 1, l.0, l.1), &[])
+                    .unwrap();
+            }
+            let mut region_events = HashMap::new();
+            region_events.insert(1, Default::default());
+            if let Err(e) = check_data(region_events, base, &storage) {
+                assert!(
+                    format!("{:?}", e).contains(
+                        case.expect
+                            .unwrap_or_else(|| panic!("{:?} | {:?}", e, case))
+                    ),
+                    "{:?} | {:?}",
+                    e,
+                    case
+                );
+            } else {
+                assert!(case.expect.is_none(), "{:?}", case);
+            }
+        }
     }
 }

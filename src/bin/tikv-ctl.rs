@@ -1733,10 +1733,18 @@ fn main() {
                 v1!("backup meta:\n{:#?}", meta);
             }
         } else if matches.subcommand_matches("check").is_some() {
-            if let Err(e) = bm.check_meta() {
-                v1!("Bad backup meta detected:\n{}", e);
-            } else {
-                v1!("backup meta is good!");
+            match bm.check_meta() {
+                Ok(events) => {
+                    v1!("Backup meta is good!");
+                    if let Err(e) = bm.check_data(events) {
+                        v1!("Bad backup data detected:\n{}", e);
+                    } else {
+                        v1!("Backup data is good!");
+                    }
+                }
+                Err(e) => {
+                    v1!("Bad backup meta detected:\n{}", e);
+                }
             }
         }
         return;
