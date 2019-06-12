@@ -759,21 +759,25 @@ impl Peer {
         let metrics = &mut ctx.raft_metrics.message;
         for msg in msgs {
             let msg_type = msg.get_msg_type();
-            self.send_raft_message(msg, trans);
             match msg_type {
                 MessageType::MsgAppend => metrics.append += 1,
-                MessageType::MsgAppendResponse => metrics.append_resp += 1,
+                MessageType::MsgAppendResponse => {
+                    if msg.get_request_snapshot()
+                        && msg.get_reject()
+                        && msg.get_reject_hint() == raft::INVALID_INDEX
+                    {
+                        self.pending_request_snapshots.push_msg(
+                            self.get_store().applied_index(),
+                            self.region().get_region_epoch().to_owned(),
+                        );
+                        metrics.request_snapshot += 1;
+                    }
+                    metrics.append_resp += 1;
+                }
                 MessageType::MsgRequestPreVote => metrics.prevote += 1,
                 MessageType::MsgRequestPreVoteResponse => metrics.prevote_resp += 1,
                 MessageType::MsgRequestVote => metrics.vote += 1,
                 MessageType::MsgRequestVoteResponse => metrics.vote_resp += 1,
-                MessageType::MsgRequestSnapshot => {
-                    self.pending_request_snapshots.push_msg(
-                        self.get_store().applied_index(),
-                        self.region().get_region_epoch().to_owned(),
-                    );
-                    metrics.request_snapshot += 1;
-                }
                 MessageType::MsgSnapshot => metrics.snapshot += 1,
                 MessageType::MsgHeartbeat => metrics.heartbeat += 1,
                 MessageType::MsgHeartbeatResponse => metrics.heartbeat_resp += 1,
@@ -801,6 +805,7 @@ impl Peer {
                 | MessageType::MsgReadIndex
                 | MessageType::MsgReadIndexResp => {}
             }
+            self.send_raft_message(msg, trans);
         }
     }
 

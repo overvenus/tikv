@@ -1337,7 +1337,7 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
     // Check if this peer can handle request_snapshot.
     fn check_request_snapshot(&mut self, msg: &RaftMessage) -> bool {
         let m = msg.get_message();
-        if MessageType::MsgRequestSnapshot != m.get_msg_type()
+        if m.get_request_snapshot()
             || !(m.get_reject() && m.get_reject_hint() == raft::INVALID_INDEX)
         {
             // If it's not a request snapshot, then go on.
