@@ -691,8 +691,8 @@ fn check_data(region_events: RegionEvents, base: &Path, storage: &dyn Storage) -
             // Ignore duplicate raft logs, it is caused by commit merge.
             if index2 + 1 != i1 && index2 != i1 {
                 // [0, TIKV_INITIAL_INDEX] is suppose to be empty.
-                if !(index2 == 0 && i1 == TIKV_INITIAL_INDEX)
-                    && !snap_vec.iter().any(|i| i + 1 == i1)
+                if !(index2 == 0 && i1 == TIKV_INITIAL_INDEX
+                    || snap_vec.iter().any(|i| i + 1 == i1))
                 {
                     err += &format!(
                         "gap between logs region_id: {} [{}_{}, {}_{}]\n",

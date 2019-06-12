@@ -1684,7 +1684,34 @@ fn main() {
                                 .takes_value(true)
                                 .help("Only display events of the region")
                         ),
-                ),
+                )
+                .subcommand(
+                    SubCommand::with_name("data")
+                        .about("Dump the content of backup data (snapshots and raft logs)")
+                        .arg(
+                            Arg::with_name("region")
+                                .short("r")
+                                .long("region")
+                                .takes_value(true)
+                                .help("The id of a region")
+                        )
+                        .subcommand(
+                            SubCommand::with_name("log")
+                                .arg(
+                                    Arg::with_name("first")
+                                        .short("f")
+                                        .long("first")
+                                        .takes_value(true)
+                                )
+                                .arg(
+                                    Arg::with_name("last")
+                                        .short("l")
+                                        .long("last")
+                                        .takes_value(true)
+                                )
+                        )
+                )
+                ,
         );
 
     let matches = app.clone().get_matches();
@@ -1744,6 +1771,24 @@ fn main() {
                 }
                 Err(e) => {
                     v1!("Bad backup meta detected:\n{}", e);
+                }
+            }
+        } else if let Some(matches) = matches.subcommand_matches("data") {
+            let id: u64 = matches.value_of("region").unwrap().parse().unwrap();
+            if let Some(matches) = matches.subcommand_matches("log") {
+                let first: u64 = matches.value_of("first").unwrap().parse().unwrap();
+                let last: u64 = matches.value_of("last").unwrap().parse().unwrap();
+                let mut buf = vec![];
+                bm.storage
+                    .read_file(&bm.log_path(id, first, last), &mut buf)
+                    .unwrap();
+                let mut entry_batch = kvproto::backup::EntryBatch::new();
+                entry_batch.merge_from_bytes(&buf).unwrap();
+                v1!("Entries [{}, {}] for region {}", first, last, id);
+                for e in entry_batch.get_entries() {
+                    let mut cmd = RaftCmdRequest::new();
+                    cmd.merge_from_bytes(e.get_data()).unwrap();
+                    v1!("entry {:?}\ndata: {:?}", e, cmd);
                 }
             }
         }
