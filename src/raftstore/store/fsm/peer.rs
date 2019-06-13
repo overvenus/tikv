@@ -1451,6 +1451,9 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
         if meta.regions.remove(&region_id).is_none() && !merged_by_target {
             panic!("{} meta corruption detected", self.fsm.peer.tag,)
         }
+        if let Some(backup_mgr) = self.ctx.backup_mgr.as_ref() {
+            backup_mgr.stop_backup_region(self.region_id()).unwrap();
+        }
     }
 
     fn on_ready_change_peer(&mut self, cp: ChangePeer) {

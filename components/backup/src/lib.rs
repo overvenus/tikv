@@ -20,11 +20,12 @@ extern crate slog_global;
 extern crate quick_error;
 
 use std::collections::hash_map::{Entry, HashMap};
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Error as IoError, ErrorKind, Read, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::RwLock;
 use std::{error, result};
 
 use kvproto::backup::{BackupEvent, BackupEvent_Event, BackupMeta, BackupState, Error as ErrorPb};
@@ -228,6 +229,7 @@ impl Storage for LocalStorage {
 
 struct Meta {
     backup_meta: BackupMeta,
+    backup_regions: HashSet<u64>,
     buf: Vec<u8>,
 }
 
@@ -266,13 +268,25 @@ impl Meta {
         storage.save_file(&path, &self.buf)?;
         Ok(())
     }
+
+    fn start(&mut self, region_id: u64) {
+        self.backup_regions.insert(region_id);
+    }
+
+    fn stop(&mut self, region_id: u64) {
+        self.backup_regions.remove(&region_id);
+    }
+
+    fn is_started(&self, region_id: u64) -> bool {
+        self.backup_regions.contains(&region_id)
+    }
 }
 
 pub struct BackupManager {
     pub dependency: Box<dyn Dependency>,
     pub storage: Box<dyn Storage>,
     current: PathBuf,
-    meta: Mutex<Meta>,
+    meta: RwLock<Meta>,
     backuping: AtomicBool,
     cluster_id: u64,
 
@@ -316,6 +330,7 @@ impl BackupManager {
         debug!("backup meta"; "meta" => ?backup_meta);
         let meta = Meta {
             backup_meta,
+            backup_regions: HashSet::new(),
             buf: vec![],
         };
         let last_number = meta.last_dependency();
@@ -336,7 +351,7 @@ impl BackupManager {
             current,
             backuping,
             cluster_id,
-            meta: Mutex::new(meta),
+            meta: RwLock::new(meta),
         })
     }
 
@@ -355,7 +370,7 @@ impl BackupManager {
     }
 
     pub fn backup_meta(&self) -> BackupMeta {
-        self.meta.lock().unwrap().backup_meta.clone()
+        self.meta.read().unwrap().backup_meta.clone()
     }
 
     pub fn tmp_dir(&self, prefix: &str) -> Result<TempDir> {
@@ -383,6 +398,15 @@ impl BackupManager {
                 return Err(Error::Io(e));
             }
         }
+        self.meta.write().unwrap().start(region_id);
+        Ok(())
+    }
+
+    pub fn stop_backup_region(&self, region_id: u64) -> Result<()> {
+        if !self.backuping.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.meta.write().unwrap().stop(region_id);
         Ok(())
     }
 
@@ -392,6 +416,9 @@ impl BackupManager {
 
     pub fn save_logs(&self, region_id: u64, first: u64, last: u64, content: &[u8]) -> Result<()> {
         if !self.backuping.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if !self.meta.read().unwrap().is_started(region_id) {
             return Ok(());
         }
         let dst = self.log_path(region_id, first, last);
@@ -405,6 +432,9 @@ impl BackupManager {
 
     pub fn save_snapshot(&self, region_id: u64, term: u64, index: u64, src: &Path) -> Result<()> {
         if !self.backuping.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if !self.meta.read().unwrap().is_started(region_id) {
             return Ok(());
         }
         let dep = self.dependency.alloc_number();
@@ -426,7 +456,7 @@ impl BackupManager {
         if !self.backuping.load(Ordering::Acquire) {
             return Ok(());
         }
-        let mut meta = self.meta.lock().unwrap();
+        let mut meta = self.meta.write().unwrap();
         for event in events {
             meta.backup_meta.mut_events().push(event);
         }
@@ -436,13 +466,14 @@ impl BackupManager {
     }
 
     pub fn step(&self, request: BackupState) -> Result<u64> {
-        let mut meta = self.meta.lock().unwrap();
+        let mut meta = self.meta.write().unwrap();
         let state = meta.step(request)?;
         self.on_state_change(state);
         let dep = self.dependency.alloc_number();
         match state {
             BackupState::Stop => {
                 self.backuping.store(false, Ordering::Release);
+                meta.backup_regions.clear();
             }
             BackupState::StartFullBackup => {
                 if meta.backup_meta.get_start_full_backup_dependency() != 0 {
@@ -726,6 +757,7 @@ mod tests {
         use std::collections::HashSet;
         let mut meta = Meta {
             backup_meta: Default::default(),
+            backup_regions: HashSet::new(),
             buf: vec![],
         };
         let mut correct = HashSet::new();
@@ -887,6 +919,7 @@ mod tests {
 
         let src = path.join("src");
         bm.start_backup_region(1).unwrap();
+        assert!(bm.meta.read().unwrap().backup_regions.contains(&1));
         // Test if it ignores ErrorKind::AlreadyExists.
         bm.start_backup_region(1).unwrap();
 
@@ -922,13 +955,23 @@ mod tests {
         }
         check_meta(&bm, bm.dependency.get() - 1, magic_contents);
 
+        // After stop, it should not save further data.
+        let mut buf = vec![];
+        bm.stop_backup_region(1).unwrap();
+        bm.save_logs(1, 101, 102, magic_contents).unwrap();
+        bm.storage
+            .read_file(&bm.log_path(1, 101, 102), &mut buf)
+            .unwrap_err();
         drop(bm);
+
+        // Restart BackupManager.
         let ls = LocalStorage::new(&path).unwrap();
         let bm = BackupManager::new(0, &path, Box::new(ls)).unwrap();
         check_meta(&bm, bm.dependency.get() - 1, magic_contents);
 
+        buf.clear();
+        bm.start_backup_region(1).unwrap();
         bm.save_logs(1, 10, 100, magic_contents).unwrap();
-        let mut buf = vec![];
         bm.storage
             .read_file(&bm.log_path(1, 10, 100), &mut buf)
             .unwrap();
