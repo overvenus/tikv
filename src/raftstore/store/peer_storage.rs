@@ -853,6 +853,15 @@ impl PeerStorage {
             ));
         }
 
+        assert!(
+            snap.get_metadata().get_index() >= self.applied_index(),
+            "{} applied_index {} snapshot meta {:?} data {:?}",
+            self.tag,
+            self.applied_index(),
+            snap.get_metadata(),
+            snap_data
+        );
+
         if self.is_initialized() {
             // we can only delete the old data when the peer is initialized.
             // TODO(backup): do not clean raft log if the snapshot is requested.
