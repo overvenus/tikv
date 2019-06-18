@@ -1812,8 +1812,10 @@ impl ApplyDelegate {
         let ids: Vec<_> = regions.iter().map(|r| r.get_id()).collect();
         self.push_backup_event(ctx, BackupEvent_Event::Split, &ids);
         if let Some(bm) = ctx.backup_mgr.as_ref() {
-            for id in ids {
-                bm.start_backup_region(id).unwrap();
+            if bm.is_region_started(self.region_id()) {
+                for id in ids {
+                    bm.start_backup_region(id).unwrap();
+                }
             }
         }
         Ok((

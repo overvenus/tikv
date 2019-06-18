@@ -1,5 +1,6 @@
 mod test_service;
 mod test_simple;
+mod test_split;
 
 use test_raftstore::*;
 use tikv_util::config::{ReadableDuration, ReadableSize};

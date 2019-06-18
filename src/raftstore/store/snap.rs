@@ -984,6 +984,9 @@ impl Snapshot for Snap {
 
         if let Some(backup_mgr) = self.backup_mgr.as_ref() {
             check_abort(&options.abort)?;
+            if !backup_mgr.is_region_started(self.key.region_id) {
+                return Ok(());
+            }
             let tmp_dir = box_try!(backup_mgr.tmp_dir(&format!("{}", self.key)));
             // Meta file
             let meta_dst = tmp_dir

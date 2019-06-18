@@ -51,6 +51,10 @@ fn test_service_backup_region() {
     req.set_context(ctx);
     let resp = client.backup_region(&req).unwrap();
     assert!(!resp.get_error().has_region_error(), "{:?}", resp);
+
+    req.mut_context().mut_region_epoch().set_version(1000);
+    let resp = client.backup_region(&req).unwrap();
+    assert!(resp.get_error().has_region_error(), "{:?}", resp);
 }
 
 #[test]

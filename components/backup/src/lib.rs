@@ -179,9 +179,7 @@ impl BackupManager {
             "{:?}",
             meta.backup_meta
         );
-        // TODO: Stop backup by default.
-        // let backuping = AtomicBool::new(BackupState::Stop != meta.state());
-        let backuping = AtomicBool::new(true);
+        let backuping = AtomicBool::new(BackupState::Stop != meta.state());
         Ok(BackupManager {
             dependency,
             storage,
@@ -222,6 +220,10 @@ impl BackupManager {
 
     pub fn region_path(&self, region_id: u64) -> PathBuf {
         region_path(&self.current, region_id)
+    }
+
+    pub fn is_region_started(&self, region_id: u64) -> bool {
+        self.meta.read().unwrap().is_started(region_id)
     }
 
     pub fn start_backup_region(&self, region_id: u64) -> Result<()> {
@@ -312,16 +314,17 @@ impl BackupManager {
             BackupState::Stop => {
                 self.backuping.store(false, Ordering::Release);
                 meta.backup_regions.clear();
+                info!("stop backup");
             }
             BackupState::StartFullBackup => {
+                info!("start full backup");
                 if meta.backup_meta.get_start_full_backup_dependency() != 0 {
                     // Rotate the current dir.
+                    let rotate_name = meta.last_dependency();
                     self.storage
-                        .rename_dir(
-                            self.current_dir(),
-                            Path::new(&format!("{}", meta.last_dependency())),
-                        )
+                        .rename_dir(self.current_dir(), Path::new(&format!("{}", rotate_name)))
                         .unwrap();
+                    info!("rotate current dir"; "rotate_to" => rotate_name);
                 }
                 self.storage.make_dir(self.current_dir()).unwrap();
                 meta.backup_meta.set_start_full_backup_dependency(dep);
@@ -330,10 +333,12 @@ impl BackupManager {
             BackupState::FinishFullBackup => {
                 meta.backup_meta.set_finish_full_backup_dependency(dep);
                 assert!(self.backuping.load(Ordering::Acquire));
+                info!("finish full backup");
             }
             BackupState::IncrementalBackup => {
                 meta.backup_meta.mut_inc_backup_dependencies().push(dep);
                 assert!(self.backuping.load(Ordering::Acquire));
+                info!("finish incremental backup");
             }
             BackupState::Unknown => panic!("unexpected state unknown"),
         }

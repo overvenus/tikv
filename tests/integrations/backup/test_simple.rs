@@ -23,6 +23,43 @@ fn check_snapshot(bm: &BackupManager, region_id: u64, cf_count: usize) {
 }
 
 #[test]
+fn test_start_backup_region() {
+    let mut cluster = new_server_cluster(0, 2);
+    let pd_client = Arc::clone(&cluster.pd_client);
+    // Disable default max peer count check.
+    pd_client.disable_default_operator();
+
+    // Now region 1 only has peer (1, 1);
+    let r1 = cluster.run_with_backup(&[2]);
+    // Add learner (2, 2) to region 1.
+    pd_client.must_add_peer(r1, new_learner_peer(2, 2));
+    pd_client.must_none_pending_peer(new_learner_peer(2, 2));
+    // Check there is no backup data.
+    let backup_mgr2 = cluster.sim.rl().get_backup_mgr(2).unwrap();
+    backup_mgr2
+        .storage
+        .list_dir(&backup_mgr2.current_dir().join(format!("{}", r1)))
+        .unwrap_err();
+
+    // Start backup regoin r1.
+    backup_mgr2.start_backup_region(r1).unwrap();
+    // And check if it starts backup.
+    let (key, value) = (b"k1", b"v1");
+    cluster.must_put(key, value);
+    assert_eq!(cluster.get(key), Some(value.to_vec()));
+    // Split cmds do flush log files.
+    let region = cluster.get_region(b"");
+    cluster.must_split(&region, b"k1");
+    must_wait_condition(|| {
+        let list = backup_mgr2
+            .storage
+            .list_dir(&backup_mgr2.current_dir().join(format!("{}", r1)))
+            .unwrap();
+        list.len() >= 2
+    });
+}
+
+#[test]
 fn test_server_simple_snapshot() {
     let mut cluster = new_server_cluster(0, 4);
     let pd_client = Arc::clone(&cluster.pd_client);
@@ -31,23 +68,27 @@ fn test_server_simple_snapshot() {
 
     // Now region 1 only has peer (1, 1);
     let r1 = cluster.run_with_backup(&[2, 3, 4]);
+    let backup_mgr2 = cluster.sim.rl().get_backup_mgr(2).unwrap();
+    // HACK! start backup region r1 even if it's not created.
+    backup_mgr2.start_backup_region(r1).unwrap();
 
     // Add learner (2, 2) to region 1.
     pd_client.must_add_peer(r1, new_learner_peer(2, 2));
     pd_client.must_none_pending_peer(new_learner_peer(2, 2));
     // Check all cfs are emptry.
-    let backup_mgr2 = cluster.sim.rl().get_backup_mgr(2).unwrap();
     check_snapshot(&backup_mgr2, r1, 0);
 
     let (key, value) = (b"k1", b"v1");
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
+    let backup_mgr3 = cluster.sim.rl().get_backup_mgr(3).unwrap();
+    // HACK! start backup region r1 even if it's not created.
+    backup_mgr3.start_backup_region(r1).unwrap();
     // Add learner (3, 3) to region 1.
     pd_client.must_add_peer(r1, new_learner_peer(3, 3));
     pd_client.must_none_pending_peer(new_learner_peer(3, 3));
     // Check only default cf is not emptry.
-    let backup_mgr3 = cluster.sim.rl().get_backup_mgr(3).unwrap();
     check_snapshot(&backup_mgr3, r1, 1);
 
     // Check only default is not emptry.
@@ -59,11 +100,13 @@ fn test_server_simple_snapshot() {
     cluster.must_put_cf(CF_WRITE, key, value);
     assert_eq!(cluster.get_cf(CF_WRITE, key), Some(value.to_vec()));
 
+    let backup_mgr4 = cluster.sim.rl().get_backup_mgr(4).unwrap();
+    // HACK! start backup region r1 even if it's not created.
+    backup_mgr4.start_backup_region(r1).unwrap();
     // Add learner (4, 4) to region 1.
     pd_client.must_add_peer(r1, new_learner_peer(4, 4));
     pd_client.must_none_pending_peer(new_learner_peer(4, 4));
     // Check all cfs are not emptry.
-    let backup_mgr4 = cluster.sim.rl().get_backup_mgr(4).unwrap();
     check_snapshot(&backup_mgr4, r1, 3);
 }
 
@@ -78,11 +121,14 @@ fn test_server_simple_replication() {
     // Now region 1 only has peer (1, 1);
     let r1 = cluster.run_with_backup(&[2]);
 
+    let backup_mgr2 = cluster.sim.rl().get_backup_mgr(2).unwrap();
+    // HACK! start backup region r1 even if it's not created.
+    backup_mgr2.start_backup_region(r1).unwrap();
+
     // Add learner (2, 2) to region 1.
     pd_client.must_add_peer(r1, new_learner_peer(2, 2));
     pd_client.must_none_pending_peer(new_learner_peer(2, 2));
     // Check all cfs are emptry.
-    let backup_mgr2 = cluster.sim.rl().get_backup_mgr(2).unwrap();
     check_snapshot(&backup_mgr2, r1, 0);
     let check_list_dir = |region_id, count| {
         let list = backup_mgr2
@@ -125,11 +171,14 @@ fn test_server_simple_request_snasphot() {
     // Now region 1 only has peer (1, 1);
     let r1 = cluster.run_with_backup(&[2]);
 
+    let backup_mgr2 = cluster.sim.rl().get_backup_mgr(2).unwrap();
+    // HACK! start backup region r1 even if it's not created.
+    backup_mgr2.start_backup_region(r1).unwrap();
+
     // Add learner (2, 2) to region 1.
     pd_client.must_add_peer(r1, new_learner_peer(2, 2));
     pd_client.must_none_pending_peer(new_learner_peer(2, 2));
     // Check all cfs are emptry.
-    let backup_mgr2 = cluster.sim.rl().get_backup_mgr(2).unwrap();
     check_snapshot(&backup_mgr2, r1, 0);
 
     // Write something then request a snapshot.
@@ -150,17 +199,23 @@ fn test_server_simple_request_snasphot() {
     router2.send(r1, req_snap).unwrap();
     rx.recv_timeout(Duration::from_secs(5)).unwrap();
 
-    let start = Instant::now();
-    loop {
+    must_wait_condition(|| {
         let list = backup_mgr2
             .storage
             .list_dir(&backup_mgr2.region_path(r1))
             .unwrap();
-        if list.len() == 2 {
+        list.len() == 2
+    });
+}
+
+fn must_wait_condition<F: Fn() -> bool>(condition: F) {
+    let start = Instant::now();
+    loop {
+        if condition() {
             break;
         }
         if start.elapsed() > Duration::from_secs(5) {
-            panic!("should be 2 snapshot dir, {:?}", list);
+            panic!("timed out");
         }
     }
 }
