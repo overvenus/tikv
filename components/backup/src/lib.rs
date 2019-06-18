@@ -137,12 +137,6 @@ impl BackupManager {
         info!("create backup manager"; "base" => base.display());
 
         let current = Path::new(CURRENT_DIR).to_owned();
-        // TODO(backup): do not create the dir until start_full_backup.
-        if let Err(e) = storage.make_dir(&current) {
-            if e.kind() != ErrorKind::AlreadyExists {
-                return Err(Error::Io(e));
-            }
-        }
         let auxiliary = base.join("auxiliary");
         maybe_create_dir(&auxiliary).unwrap();
 
@@ -310,23 +304,26 @@ impl BackupManager {
         let state = meta.step(request)?;
         self.on_state_change(state);
         let dep = self.dependency.alloc_number();
+        let meta_path = self.current.join(BACKUP_META_NAME);
         match state {
             BackupState::Stop => {
                 self.backuping.store(false, Ordering::Release);
                 meta.backup_regions.clear();
+                if meta.backup_meta.get_start_full_backup_dependency() != 0 {
+                    meta.save_to(&meta_path, &self.storage).unwrap();
+                    // Rotate the current dir.
+                    self.rotate_current_dir(dep);
+                }
                 info!("stop backup");
+                return Ok(dep);
             }
             BackupState::StartFullBackup => {
                 info!("start full backup");
-                if meta.backup_meta.get_start_full_backup_dependency() != 0 {
-                    // Rotate the current dir.
-                    let rotate_name = meta.last_dependency();
-                    self.storage
-                        .rename_dir(self.current_dir(), Path::new(&format!("{}", rotate_name)))
-                        .unwrap();
-                    info!("rotate current dir"; "rotate_to" => rotate_name);
+                if let Err(e) = self.storage.make_dir(self.current_dir()) {
+                    if e.kind() != ErrorKind::AlreadyExists {
+                        return Err(Error::Io(e));
+                    }
                 }
-                self.storage.make_dir(self.current_dir()).unwrap();
                 meta.backup_meta.set_start_full_backup_dependency(dep);
                 self.backuping.store(true, Ordering::Release);
             }
@@ -342,9 +339,15 @@ impl BackupManager {
             }
             BackupState::Unknown => panic!("unexpected state unknown"),
         }
-        let meta_path = self.current.join(BACKUP_META_NAME);
         meta.save_to(&meta_path, &self.storage).unwrap();
         Ok(dep)
+    }
+
+    fn rotate_current_dir(&self, rotate_to: u64) {
+        self.storage
+            .rename_dir(self.current_dir(), Path::new(&format!("{}", rotate_to)))
+            .unwrap();
+        info!("rotate current dir"; "rotate_to" => rotate_to);
     }
 
     pub fn check_cluster_id(&self, cluster_id: u64) -> Result<()> {
@@ -448,8 +451,8 @@ mod tests {
             assert_eq!(count, files.len(), "{:?}", files);
             files.len()
         };
-        // For now, current dir is created during initializing backup manager.
-        let len = check_file_count(1 /* current */ + 1 /* auxiliary */ + 1 /* localtmp */);
+        // The current dir will not be created until starting full backup.
+        let len = check_file_count(1 /* auxiliary */ + 1 /* localtmp */);
 
         bm.step(BackupState::Stop).unwrap();
         let len = check_file_count(len);
@@ -457,7 +460,7 @@ mod tests {
 
         // Do not rotate if it is the first backup.
         bm.step(BackupState::StartFullBackup).unwrap();
-        let len = check_file_count(len);
+        let len = check_file_count(len + 1 /* current */);
         assert!(bm.backuping.load(Ordering::Acquire));
 
         bm.step(BackupState::FinishFullBackup).unwrap();
@@ -474,7 +477,7 @@ mod tests {
         assert!(!bm.backuping.load(Ordering::Acquire));
 
         bm.step(BackupState::StartFullBackup).unwrap();
-        check_file_count(len + 1);
+        check_file_count(len + 1 /* current */);
         assert!(bm.backuping.load(Ordering::Acquire));
     }
 
