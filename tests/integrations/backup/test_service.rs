@@ -8,12 +8,18 @@ use kvproto::backup::*;
 use kvproto::backup_grpc::*;
 use kvproto::kvrpcpb::*;
 
+use backup::BackupManager;
 use test_raftstore::*;
 use tikv_util::HandyRwLock;
 
 use super::configure_for_backup;
 
-fn must_new_backup_cluster_and_client() -> (Cluster<ServerCluster>, BackupClient, u64) {
+fn must_new_backup_cluster_and_client() -> (
+    Cluster<ServerCluster>,
+    Arc<BackupManager>,
+    BackupClient,
+    u64,
+) {
     let count = 2;
     let mut cluster = new_server_cluster(1, count);
     configure_for_backup(&mut cluster);
@@ -22,17 +28,18 @@ fn must_new_backup_cluster_and_client() -> (Cluster<ServerCluster>, BackupClient
     cluster.pd_client.disable_default_operator();
     let backup_store = 2;
     let region_id = cluster.run_with_backup(&[backup_store]);
+    let bm = cluster.sim.rl().get_backup_mgr(2).unwrap();
 
     let env = Arc::new(Environment::new(1));
     let channel = ChannelBuilder::new(env).connect(cluster.sim.rl().get_addr(backup_store));
     let client = BackupClient::new(channel);
 
-    (cluster, client, region_id)
+    (cluster, bm, client, region_id)
 }
 
 #[test]
 fn test_service_backup_region() {
-    let (cluster, client, region_id) = must_new_backup_cluster_and_client();
+    let (cluster, bm, client, region_id) = must_new_backup_cluster_and_client();
 
     // Add learner (2, 2) to region 1.
     cluster
@@ -51,6 +58,10 @@ fn test_service_backup_region() {
     req.set_context(ctx);
     let resp = client.backup_region(&req).unwrap();
     assert!(!resp.get_error().has_region_error(), "{:?}", resp);
+    bm.storage
+        .list_dir(&bm.current_dir().join(format!("{}", region_id)))
+        .unwrap();
+    assert!(bm.is_region_started(region_id));
 
     req.mut_context().mut_region_epoch().set_version(1000);
     let resp = client.backup_region(&req).unwrap();
@@ -59,7 +70,7 @@ fn test_service_backup_region() {
 
 #[test]
 fn test_service_backup() {
-    let (cluster, client, _) = must_new_backup_cluster_and_client();
+    let (cluster, _, client, _) = must_new_backup_cluster_and_client();
 
     let mut req = BackupRequest::new();
     let resp = client.backup(&req).unwrap();

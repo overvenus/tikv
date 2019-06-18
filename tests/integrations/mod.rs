@@ -33,7 +33,7 @@ mod storage;
 
 // The prefix "_" here is to guarantee running this case first.
 #[test]
-fn _0_ci_setup() {
+fn _0_ci_setupbackup() {
     test_util::setup_for_ci();
 }
 

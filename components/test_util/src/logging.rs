@@ -108,6 +108,7 @@ pub fn init_log_for_test() {
         "integrations::",
         "failpoints::",
         "raft::",
+        "backup",
         // Collects logs for test components.
         "test_",
     ];

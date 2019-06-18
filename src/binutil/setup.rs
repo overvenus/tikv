@@ -42,6 +42,7 @@ pub fn initial_logger(config: &TiKvConfig) {
         "benches::".to_owned(),
         "integrations::".to_owned(),
         "failpoints::".to_owned(),
+        "backup".to_owned(),
         // Collects logs for test components.
         "test_".to_owned(),
     ];

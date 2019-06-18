@@ -90,6 +90,18 @@ impl<T: RaftStoreRouter + 'static> backup_grpc::Backup for Service<T> {
         let timer = GRPC_MSG_HISTOGRAM_VEC.backup_region.start_coarse_timer();
 
         let region_id = req.get_context().get_region_id();
+        if let Err(e) = self.backup_mgr.start_backup_region(region_id) {
+            warn!("backup region rpc failed";
+                "request" => "backup_region",
+                "err" => ?e,
+                "request" => ?req,
+            );
+            let mut resp = BackupRegionResponse::new();
+            resp.set_error(e.into());
+            ctx.spawn(sink.success(resp).then(|_| Ok(())));
+            return;
+        }
+
         let (cb, future) = paired_future_callback();
         let request = CasualMessage::RequestSnapshot {
             region_epoch: req.mut_context().take_region_epoch(),
@@ -97,7 +109,7 @@ impl<T: RaftStoreRouter + 'static> backup_grpc::Backup for Service<T> {
         };
 
         if let Err(e) = self.ch.casual_send(region_id, request) {
-            warn!("backup rpc failed";
+            warn!("backup region rpc failed";
                 "request" => "backup_region",
                 "err" => ?e,
                 "request" => ?req,
@@ -124,7 +136,7 @@ impl<T: RaftStoreRouter + 'static> backup_grpc::Backup for Service<T> {
             .and_then(|res| sink.success(res).map_err(ServerError::from))
             .map(|_| timer.observe_duration())
             .map_err(move |e| {
-                warn!("backup rpc failed";
+                warn!("backup region rpc failed";
                     "request" => "backup_region",
                     "err" => ?e,
                     "request" => ?req,
