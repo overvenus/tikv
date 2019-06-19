@@ -67,6 +67,37 @@ impl ReadIndexRequest {
             slice::from_raw_parts(id, 8)
         }
     }
+
+    fn push_command(&mut self, req: RaftCmdRequest, cb: Callback) {
+        RAFT_READ_INDEX_PENDING_COUNT.inc();
+        self.cmds.push((req, cb));
+    }
+
+    fn with_command(
+        id: u64,
+        req: RaftCmdRequest,
+        cb: Callback,
+        renew_lease_time: Timespec,
+    ) -> Self {
+        RAFT_READ_INDEX_PENDING_COUNT.inc();
+        let mut cmds = MustConsumeVec::with_capacity("callback of index read", 1);
+        cmds.push((req, cb));
+        ReadIndexRequest {
+            id,
+            cmds,
+            renew_lease_time,
+            read_index: None,
+        }
+    }
+}
+
+impl Drop for ReadIndexRequest {
+    fn drop(&mut self) {
+        let dur = (monotonic_raw_now() - self.renew_lease_time)
+            .to_std()
+            .unwrap();
+        RAFT_READ_INDEX_PENDING_DURATION.observe(duration_to_sec(dur));
+    }
 }
 
 #[derive(Default)]
@@ -84,6 +115,7 @@ impl ReadIndexQueue {
 
     fn clear_uncommitted(&mut self, term: u64) {
         for mut read in self.reads.drain(self.ready_cnt..) {
+            RAFT_READ_INDEX_PENDING_COUNT.sub(read.cmds.len() as i64);
             for (_, cb) in read.cmds.drain(..) {
                 apply::notify_stale_req(term, cb);
             }
@@ -576,6 +608,7 @@ impl Peer {
         }
 
         for mut read in self.pending_reads.reads.drain(..) {
+            RAFT_READ_INDEX_PENDING_COUNT.sub(read.cmds.len() as i64);
             for (_, cb) in read.cmds.drain(..) {
                 apply::notify_req_region_removed(region.get_id(), cb);
             }
@@ -1174,15 +1207,6 @@ impl Peer {
             }
         }
 
-        // Check whether there is a pending generate snapshot task, the task
-        // needs to be sent the apply system.
-        if let Some(gen_task) = self.mut_store().take_gen_snap_task() {
-            self.pending_request_snapshot_count
-                .fetch_add(1, Ordering::SeqCst);
-            ctx.apply_router
-                .schedule_task(self.region_id, ApplyTask::Snapshot(gen_task));
-        }
-
         if !self
             .raft_group
             .has_ready_since(Some(self.last_applying_idx))
@@ -1359,6 +1383,16 @@ impl Peer {
                 ctx.apply_router
                     .schedule_task(self.region_id, ApplyTask::apply(apply));
             }
+            // Check whether there is a pending generate snapshot task, the task
+            // needs to be sent to the apply system.
+            // Always sending snapshot task behind apply task, so it gets latest
+            // snapshot.
+            if let Some(gen_task) = self.mut_store().take_gen_snap_task() {
+                self.pending_request_snapshot_count
+                    .fetch_add(1, Ordering::SeqCst);
+                ctx.apply_router
+                    .schedule_task(self.region_id, ApplyTask::Snapshot(gen_task));
+            }
         }
 
         self.apply_reads(ctx, &ready);
@@ -1377,6 +1411,8 @@ impl Peer {
         if self.pending_reads.ready_cnt > 0 {
             for _ in 0..self.pending_reads.ready_cnt {
                 let mut read = self.pending_reads.reads.pop_front().unwrap();
+                RAFT_READ_INDEX_PENDING_COUNT.sub(read.cmds.len() as i64);
+
                 let is_read_index_request = read.cmds.len() == 1
                     && read.cmds[0].0.get_requests().len() == 1
                     && read.cmds[0].0.get_requests()[0].get_cmd_type() == CmdType::ReadIndex;
@@ -1404,18 +1440,18 @@ impl Peer {
         // update the `read_index` of read request that before this successful
         // `ready`.
         if !self.is_leader() && !ready.read_states.is_empty() {
+            // NOTE: there could still be some read requests following, which will be cleared in
+            // `clear_uncommitted` later.
             for state in &ready.read_states {
                 self.pending_reads
                     .advance(state.request_ctx.as_slice(), state.index);
                 self.post_pending_read_index_on_replica(ctx);
             }
-            return;
-        }
-
-        if self.ready_to_handle_read() {
+        } else if self.ready_to_handle_read() {
             for state in &ready.read_states {
                 let mut read = self.pending_reads.reads.pop_front().unwrap();
                 assert_eq!(state.request_ctx.as_slice(), read.binary_id());
+                RAFT_READ_INDEX_PENDING_COUNT.sub(read.cmds.len() as i64);
                 for (req, cb) in read.cmds.drain(..) {
                     cb.invoke_read(self.handle_read(ctx, req, true, Some(state.index)));
                 }
@@ -1487,6 +1523,7 @@ impl Peer {
             if self.pending_reads.ready_cnt > 0 && self.ready_to_handle_read() {
                 for _ in 0..self.pending_reads.ready_cnt {
                     let mut read = self.pending_reads.reads.pop_front().unwrap();
+                    RAFT_READ_INDEX_PENDING_COUNT.sub(read.cmds.len() as i64);
                     for (req, cb) in read.cmds.drain(..) {
                         cb.invoke_read(self.handle_read(ctx, req, true, read.read_index));
                     }
@@ -1656,15 +1693,24 @@ impl Peer {
                     term: self.term(),
                     renew_lease_time: None,
                 };
-                self.post_propose(meta, is_conf_change, cb);
+                self.post_propose(ctx, meta, is_conf_change, cb);
                 true
             }
         }
     }
 
-    fn post_propose(&mut self, mut meta: ProposalMeta, is_conf_change: bool, cb: Callback) {
+    fn post_propose<T, C>(
+        &mut self,
+        poll_ctx: &mut PollContext<T, C>,
+        mut meta: ProposalMeta,
+        is_conf_change: bool,
+        cb: Callback,
+    ) {
         // Try to renew leader lease on every consistent read/write request.
-        meta.renew_lease_time = Some(monotonic_raw_now());
+        if poll_ctx.lease_time.is_none() {
+            poll_ctx.lease_time = Some(monotonic_raw_now());
+        }
+        meta.renew_lease_time = poll_ctx.lease_time;
 
         if !cb.is_none() {
             let p = Proposal::new(is_conf_change, meta.index, meta.term, cb);
@@ -1905,7 +1951,7 @@ impl Peer {
                     if let Some(read) = self.pending_reads.reads.back_mut() {
                         let max_lease = poll_ctx.cfg.raft_store_max_leader_lease();
                         if read.renew_lease_time + max_lease > renew_lease_time {
-                            read.cmds.push((req, cb));
+                            read.push_command(req, cb);
                             return false;
                         }
                     }
@@ -1937,14 +1983,9 @@ impl Peer {
             return false;
         }
 
-        let mut cmds = MustConsumeVec::with_capacity("callback of index read", 1);
-        cmds.push((req, cb));
-        self.pending_reads.reads.push_back(ReadIndexRequest {
-            id,
-            cmds,
-            renew_lease_time,
-            read_index: None,
-        });
+        let read_proposal = ReadIndexRequest::with_command(id, req, cb, renew_lease_time);
+        self.pending_reads.reads.push_back(read_proposal);
+
         // TimeoutNow has been sent out, so we need to propose explicitly to
         // update leader lease.
         if self.leader_lease.inspect(Some(renew_lease_time)) == LeaseState::Suspect {
@@ -1955,7 +1996,7 @@ impl Peer {
                     term: self.term(),
                     renew_lease_time: Some(renew_lease_time),
                 };
-                self.post_propose(meta, false, Callback::None);
+                self.post_propose(poll_ctx, meta, false, Callback::None);
             }
         }
 
@@ -2292,6 +2333,7 @@ impl Peer {
     pub fn stop(&mut self) {
         self.mut_store().cancel_applying_snap();
         for mut read in self.pending_reads.reads.drain(..) {
+            RAFT_READ_INDEX_PENDING_COUNT.sub(read.cmds.len() as i64);
             read.cmds.clear();
         }
     }
