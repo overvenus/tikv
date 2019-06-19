@@ -151,78 +151,66 @@ impl ReadIndexQueue {
     }
 }
 
-#[derive(Default)]
-struct RequestSnapshotCmds {
-    commit_index: u64,
+struct RequestSnapshotCmd {
     epoch: metapb::RegionEpoch,
-    callbacks: Vec<Callback>,
+    callback: Callback,
 }
 
-struct RequestSnapshotQueue {
-    requests: VecDeque<RequestSnapshotCmds>,
-    current_ready: Option<RequestSnapshotCmds>,
+enum RequestSnapshot {
+    None,
+    Pending(RequestSnapshotCmd),
+    Applying(RequestSnapshotCmd),
 }
 
-impl RequestSnapshotQueue {
-    const SHRINK_CACHE_CAPACITY: usize = 4;
-
-    fn new() -> RequestSnapshotQueue {
-        RequestSnapshotQueue {
-            requests: VecDeque::new(),
-            current_ready: None,
-        }
+impl RequestSnapshot {
+    fn new() -> RequestSnapshot {
+        RequestSnapshot::None
     }
 
     fn is_empty(&self) -> bool {
-        self.current_ready.is_none() && self.requests.is_empty()
-    }
-
-    fn push_callback(&mut self, callback: Callback) {
-        if self.current_ready.is_none() {
-            self.current_ready = Some(Default::default());
-        }
-        self.current_ready
-            .as_mut()
-            .unwrap()
-            .callbacks
-            .push(callback);
-    }
-
-    fn push_msg(&mut self, commit_index: u64, epoch: metapb::RegionEpoch) {
-        if let Some(mut current) = self.current_ready.take() {
-            current.commit_index = commit_index;
-            current.epoch = epoch;
-            self.requests.push_back(current);
+        match self {
+            RequestSnapshot::None => true,
+            _ => false,
         }
     }
 
-    fn apply(&mut self, region: &metapb::Region, mut resp: RaftCmdResponse) {
-        if let Some(current) = self.current_ready.take() {
-            for cb in current.callbacks {
-                cb.invoke_with_response(resp.clone());
+    fn add_pending(&mut self, epoch: metapb::RegionEpoch, callback: Callback) {
+        assert!(self.is_empty());
+        let cmd = RequestSnapshotCmd { epoch, callback };
+        *self = RequestSnapshot::Pending(cmd);
+    }
+
+    fn is_applying(&self) -> bool {
+        match self {
+            RequestSnapshot::Applying(_) => true,
+            _ => false,
+        }
+    }
+
+    fn maybe_apply(&mut self) {
+        if self.is_empty() || self.is_applying() {
+            return;
+        }
+        match mem::replace(self, RequestSnapshot::None) {
+            RequestSnapshot::Pending(cmd) => {
+                *self = RequestSnapshot::Applying(cmd);
             }
+            _ => unreachable!(),
         }
-
-        for req in self.requests.drain(..) {
-            if *region.get_region_epoch() != req.epoch && !resp.get_header().has_error() {
-                cmd_resp::bind_error(
-                    &mut resp,
-                    Error::EpochNotMatch("snapshot".to_owned(), vec![region.to_owned()]),
-                )
-            }
-            for cb in req.callbacks {
-                cb.invoke_with_response(resp.clone());
-            }
-        }
-
-        self.gc();
     }
 
-    fn gc(&mut self) {
-        if self.requests.capacity() > Self::SHRINK_CACHE_CAPACITY
-            && self.requests.len() < Self::SHRINK_CACHE_CAPACITY
-        {
-            self.requests.shrink_to_fit();
+    fn finish_with(&mut self, region: &metapb::Region, mut resp: RaftCmdResponse) {
+        match mem::replace(self, RequestSnapshot::None) {
+            RequestSnapshot::Pending(cmd) | RequestSnapshot::Applying(cmd) => {
+                if *region.get_region_epoch() != cmd.epoch && !resp.get_header().has_error() {
+                    cmd_resp::bind_error(
+                        &mut resp,
+                        Error::EpochNotMatch("snapshot".to_owned(), vec![region.to_owned()]),
+                    )
+                }
+                cmd.callback.invoke_with_response(resp);
+            }
+            RequestSnapshot::None => (),
         }
     }
 }
@@ -364,7 +352,7 @@ pub struct Peer {
     leader_lease: Lease,
     pending_reads: ReadIndexQueue,
     /// Pending request snapshot cmds.
-    pending_request_snapshots: RequestSnapshotQueue,
+    pending_request_snapshot: RequestSnapshot,
 
     /// If it fails to send messages to leader.
     pub leader_unreachable: bool,
@@ -479,7 +467,7 @@ impl Peer {
             pending_remove: false,
             pending_merge_state: None,
             pending_request_snapshot_count: Arc::new(AtomicUsize::new(0)),
-            pending_request_snapshots: RequestSnapshotQueue::new(),
+            pending_request_snapshot: RequestSnapshot::new(),
             last_committed_prepare_merge_idx: 0,
             leader_missing_time: Some(Instant::now()),
             tag,
@@ -793,10 +781,6 @@ impl Peer {
                 MessageType::MsgAppend => metrics.append += 1,
                 MessageType::MsgAppendResponse => {
                     if msg.get_request_snapshot() != raft::INVALID_INDEX {
-                        self.pending_request_snapshots.push_msg(
-                            self.get_store().applied_index(),
-                            self.region().get_region_epoch().to_owned(),
-                        );
                         metrics.request_snapshot += 1;
                     }
                     metrics.append_resp += 1;
@@ -1119,6 +1103,7 @@ impl Peer {
         if self.pending_remove {
             return None;
         }
+        let is_applying_snapshot = self.get_store().is_applying_snapshot();
         if self.mut_store().check_applying_snap() {
             // If we continue to handle all the messages, it may cause too many messages because
             // leader will send all the remaining messages to this follower, which can lead
@@ -1129,6 +1114,12 @@ impl Peer {
                 "peer_id" => self.peer.get_id(),
             );
             return None;
+        }
+        if is_applying_snapshot {
+            // The snapshot has applied.
+            let region = self.raft_group.get_store().region();
+            let resp = RaftCmdResponse::new();
+            self.pending_request_snapshot.finish_with(region, resp);
         }
 
         if !self.pending_messages.is_empty() {
@@ -1280,11 +1271,7 @@ impl Peer {
         }
 
         if apply_snap_result.is_some() {
-            if !self.pending_request_snapshots.is_empty() {
-                let region = self.raft_group.get_store().region();
-                let resp = RaftCmdResponse::new();
-                self.pending_request_snapshots.apply(region, resp);
-            }
+            self.pending_request_snapshot.maybe_apply();
             self.activate(ctx);
             let mut meta = ctx.store_meta.lock().unwrap();
             meta.readers
@@ -1351,13 +1338,11 @@ impl Peer {
                         self.leader_lease.suspect(monotonic_raw_now());
                         merge_to_be_update = false;
                         let region = self.raft_group.get_store().region();
-                        if !self.pending_request_snapshots.is_empty() {
-                            let resp = cmd_resp::err_resp(
-                                Error::Other(box_err!("{} is merging", self.tag)),
-                                self.term(),
-                            );
-                            self.pending_request_snapshots.apply(region, resp);
-                        }
+                        let resp = cmd_resp::err_resp(
+                            Error::Other(box_err!("{} is merging", self.tag)),
+                            self.term(),
+                        );
+                        self.pending_request_snapshot.finish_with(region, resp);
                     }
                 }
             }
@@ -2273,10 +2258,10 @@ impl Peer {
             callback.invoke_with_response(resp);
             return;
         }
-        if self.is_merging() {
+        if self.is_merging() || self.is_splitting() {
             // Snapshot can only be requested when there is no merging progress.
             let resp = cmd_resp::err_resp(
-                Error::Other(box_err!("{} is merging", self.tag)),
+                Error::Other(box_err!("{} is merging or splitting", self.tag)),
                 self.term(),
             );
             callback.invoke_with_response(resp);
@@ -2313,7 +2298,8 @@ impl Peer {
             let resp = cmd_resp::message_error(e);
             callback.invoke_with_response(resp);
         } else {
-            self.pending_request_snapshots.push_callback(callback);
+            self.pending_request_snapshot
+                .add_pending(region_epoch, callback);
         }
     }
 
