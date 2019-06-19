@@ -410,8 +410,6 @@ pub struct Peer {
     /// Approximate size of logs that is applied but not compacted yet.
     pub raft_log_size_hint: u64,
 
-    /// The latest proposed prepare merge commands.
-    last_proposed_prepare_merge_idx: u64,
     /// The index of the latest committed prepare merge command.
     last_committed_prepare_merge_idx: u64,
     /// The merge related state. It indicates this Peer is in merging.
@@ -482,7 +480,6 @@ impl Peer {
             pending_merge_state: None,
             pending_request_snapshot_count: Arc::new(AtomicUsize::new(0)),
             pending_request_snapshots: RequestSnapshotQueue::new(),
-            last_proposed_prepare_merge_idx: 0,
             last_committed_prepare_merge_idx: 0,
             leader_missing_time: Some(Instant::now()),
             tag,
@@ -1103,11 +1100,6 @@ impl Peer {
     pub fn is_merging(&self) -> bool {
         self.last_committed_prepare_merge_idx > self.get_store().applied_index()
             || self.pending_merge_state.is_some()
-    }
-
-    #[inline]
-    pub fn is_merging_strict(&self) -> bool {
-        self.last_proposed_prepare_merge_idx > self.get_store().applied_index() || self.is_merging()
     }
 
     pub fn take_apply_proposals(&mut self) -> Option<RegionProposal> {
@@ -2004,7 +1996,9 @@ impl Peer {
         let mut min = None;
         if let Some(progress) = self.raft_group.status_ref().progress {
             for (id, pr) in progress.iter() {
-                if pr.state == ProgressState::Snapshot {
+                if pr.state == ProgressState::Snapshot
+                    || pr.pending_request_snapshot != INVALID_INDEX
+                {
                     return Err(box_err!(
                         "there is a pending snapshot peer {} [{:?}], skip merge",
                         id,
@@ -2152,9 +2146,6 @@ impl Peer {
             // The message is dropped silently, this usually due to leader absence
             // or transferring leader. Both cases can be considered as NotLeader error.
             return Err(Error::NotLeader(self.region_id, None));
-        }
-        if ctx.contains(ProposalContext::PREPARE_MERGE) {
-            self.last_proposed_prepare_merge_idx = propose_index;
         }
 
         Ok(propose_index)
