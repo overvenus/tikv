@@ -1062,7 +1062,8 @@ impl PeerStorage {
         ready: &Ready,
     ) -> Result<InvokeContext> {
         let mut ctx = InvokeContext::new(self);
-        if !raft::is_empty_snap(&ready.snapshot) {
+        let is_empty_snap = raft::is_empty_snap(&ready.snapshot);
+        if !is_empty_snap {
             fail_point!("raft_before_apply_snap");
             self.apply_snapshot(&mut ctx, &ready.snapshot, &ready_ctx.raft_wb())?;
             fail_point!("raft_after_apply_snap");
@@ -1084,7 +1085,8 @@ impl PeerStorage {
             }
         }
 
-        if ctx.raft_state != self.raft_state {
+        // Always save raft state if it has applied a snapshot.
+        if ctx.raft_state != self.raft_state || !is_empty_snap {
             ctx.save_raft_state_to(ready_ctx.raft_wb_mut())?;
         }
 

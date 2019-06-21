@@ -8,7 +8,7 @@ use crate::server::transport::RaftStoreRouter;
 use crate::server::Error as ServerError;
 use backup::BackupManager;
 use futures::Future;
-use grpcio::{RpcContext, RpcStatus, RpcStatusCode, UnarySink};
+use grpcio::{RpcContext, UnarySink};
 use kvproto::backup::{BackupRegionRequest, BackupRegionResponse, BackupRequest, BackupResponse};
 use kvproto::backup_grpc;
 use tikv_util::future::paired_future_callback;
@@ -26,17 +26,6 @@ impl<T: RaftStoreRouter + 'static> Service<T> {
     /// Constructs a new `Service` which provides the `Tikv` service.
     pub fn new(ch: T, backup_mgr: Arc<BackupManager>) -> Self {
         Service { ch, backup_mgr }
-    }
-
-    fn send_fail_status<M>(
-        &self,
-        ctx: RpcContext<'_>,
-        sink: UnarySink<M>,
-        err: ServerError,
-        code: RpcStatusCode,
-    ) {
-        let status = RpcStatus::new(code, Some(format!("{}", err)));
-        ctx.spawn(sink.fail(status).map_err(|_| ()));
     }
 }
 
@@ -90,13 +79,13 @@ impl<T: RaftStoreRouter + 'static> backup_grpc::Backup for Service<T> {
         let timer = GRPC_MSG_HISTOGRAM_VEC.backup_region.start_coarse_timer();
 
         let region_id = req.get_context().get_region_id();
+        let mut resp = BackupRegionResponse::new();
         if let Err(e) = self.backup_mgr.start_backup_region(region_id) {
             warn!("backup region rpc failed";
                 "request" => "backup_region",
                 "err" => ?e,
                 "request" => ?req,
             );
-            let mut resp = BackupRegionResponse::new();
             resp.set_error(e.into());
             ctx.spawn(sink.success(resp).then(|_| Ok(())));
             return;
@@ -114,19 +103,14 @@ impl<T: RaftStoreRouter + 'static> backup_grpc::Backup for Service<T> {
                 "err" => ?e,
                 "request" => ?req,
             );
-            self.send_fail_status(
-                ctx,
-                sink,
-                ServerError::from(e),
-                RpcStatusCode::ResourceExhausted,
-            );
+            resp.mut_error().set_region_error(e.into());
+            ctx.spawn(sink.success(resp).then(|_| Ok(())));
             return;
         }
 
         let future = future
             .map_err(ServerError::from)
             .map(move |mut v| {
-                let mut resp = BackupRegionResponse::new();
                 if v.response.get_header().has_error() {
                     resp.mut_error()
                         .set_region_error(v.response.mut_header().take_error());
