@@ -359,7 +359,8 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
             }
             CasualMessage::RequestSnapshot {
                 region_epoch,
-                callback,
+                start_cb,
+                end_cb,
             } => {
                 debug!(
                     "start requesting snapshot";
@@ -368,7 +369,7 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
                 );
                 self.fsm
                     .peer
-                    .handle_request_snapshot(region_epoch, callback);
+                    .handle_request_snapshot(region_epoch, start_cb, end_cb);
             }
             CasualMessage::Test(cb) => cb(self.fsm),
         }

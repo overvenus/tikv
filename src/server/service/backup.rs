@@ -2,16 +2,15 @@
 
 use std::sync::Arc;
 
-use crate::raftstore::store::{Callback, CasualMessage};
+use crate::raftstore::store::{Callback, CasualMessage, WriteResponse};
 use crate::server::metrics::*;
 use crate::server::transport::RaftStoreRouter;
-use crate::server::Error as ServerError;
 use backup::BackupManager;
-use futures::Future;
+use futures::sync::mpsc;
+use futures::{Future, Stream};
 use grpcio::{RpcContext, UnarySink};
 use kvproto::backup::{BackupRegionRequest, BackupRegionResponse, BackupRequest, BackupResponse};
 use kvproto::backup_grpc;
-use tikv_util::future::paired_future_callback;
 
 /// Service handles the RPC messages for the `Backup` service.
 #[derive(Clone)]
@@ -79,22 +78,36 @@ impl<T: RaftStoreRouter + 'static> backup_grpc::Backup for Service<T> {
         let timer = GRPC_MSG_HISTOGRAM_VEC.backup_region.start_coarse_timer();
 
         let region_id = req.get_context().get_region_id();
-        let mut resp = BackupRegionResponse::new();
-        if let Err(e) = self.backup_mgr.start_backup_region(region_id) {
-            warn!("backup region rpc failed";
-                "request" => "backup_region",
-                "err" => ?e,
-                "request" => ?req,
-            );
-            resp.set_error(e.into());
-            ctx.spawn(sink.success(resp).then(|_| Ok(())));
-            return;
-        }
+        let backup_mgr = self.backup_mgr.clone();
+        let (tx, future) = mpsc::unbounded::<BackupRegionResponse>();
+        let tx_ = tx.clone();
+        let start_cb = Box::new(move |mut result: WriteResponse| {
+            if result.response.get_header().has_error() {
+                let mut resp = BackupRegionResponse::new();
+                resp.mut_error()
+                    .set_region_error(result.response.mut_header().take_error());
+                warn!("start backup region failed";
+                    "request" => "backup_region",
+                );
+                tx_.unbounded_send(resp).unwrap();
+            } else {
+                backup_mgr.start_backup_region(region_id).unwrap();
+            }
+        });
 
-        let (cb, future) = paired_future_callback();
+        let end_cb = Box::new(move |mut result: WriteResponse| {
+            let mut resp = BackupRegionResponse::new();
+            if result.response.get_header().has_error() {
+                resp.mut_error()
+                    .set_region_error(result.response.mut_header().take_error());
+            }
+            tx.unbounded_send(resp).unwrap();
+        });
+
         let request = CasualMessage::RequestSnapshot {
             region_epoch: req.mut_context().take_region_epoch(),
-            callback: Callback::Write(cb),
+            start_cb: Callback::Write(start_cb),
+            end_cb: Callback::Write(end_cb),
         };
 
         if let Err(e) = self.ch.casual_send(region_id, request) {
@@ -103,27 +116,30 @@ impl<T: RaftStoreRouter + 'static> backup_grpc::Backup for Service<T> {
                 "err" => ?e,
                 "request" => ?req,
             );
+            let mut resp = BackupRegionResponse::new();
             resp.mut_error().set_region_error(e.into());
             ctx.spawn(sink.success(resp).then(|_| Ok(())));
             return;
         }
 
         let future = future
-            .map_err(ServerError::from)
-            .map(move |mut v| {
-                if v.response.get_header().has_error() {
-                    resp.mut_error()
-                        .set_region_error(v.response.mut_header().take_error());
-                }
-                resp
+            .into_future()
+            .map(|(resp, _)| resp.unwrap())
+            .map_err(|(e, _)| e)
+            .and_then(|res| {
+                sink.success(res).map_err(move |e| {
+                    warn!("backup region rpc failed";
+                        "request" => "backup_region",
+                        "err" => ?e,
+                    );
+                })
             })
-            .and_then(|res| sink.success(res).map_err(ServerError::from))
             .map(|_| timer.observe_duration())
             .map_err(move |e| {
                 warn!("backup region rpc failed";
                     "request" => "backup_region",
-                    "err" => ?e,
                     "request" => ?req,
+                    "err" => ?e,
                 );
                 GRPC_MSG_FAIL_COUNTER.backup_region.inc();
             });

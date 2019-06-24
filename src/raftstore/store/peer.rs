@@ -153,7 +153,8 @@ impl ReadIndexQueue {
 
 struct RequestSnapshotCmd {
     epoch: metapb::RegionEpoch,
-    callback: Callback,
+    start_cb: Option<Callback>,
+    end_cb: Callback,
 }
 
 enum RequestSnapshot {
@@ -174,9 +175,14 @@ impl RequestSnapshot {
         }
     }
 
-    fn add_pending(&mut self, epoch: metapb::RegionEpoch, callback: Callback) {
+    fn step_pending(&mut self, epoch: metapb::RegionEpoch, start_cb: Callback, end_cb: Callback) {
         assert!(self.is_empty());
-        let cmd = RequestSnapshotCmd { epoch, callback };
+        let start_cb = Some(start_cb);
+        let cmd = RequestSnapshotCmd {
+            epoch,
+            start_cb,
+            end_cb,
+        };
         *self = RequestSnapshot::Pending(cmd);
     }
 
@@ -187,13 +193,28 @@ impl RequestSnapshot {
         }
     }
 
-    fn maybe_apply(&mut self) {
+    fn step_applying(&mut self, region: &metapb::Region) {
         if self.is_empty() || self.is_applying() {
             return;
         }
         match mem::replace(self, RequestSnapshot::None) {
-            RequestSnapshot::Pending(cmd) => {
-                *self = RequestSnapshot::Applying(cmd);
+            RequestSnapshot::Pending(mut cmd) => {
+                let start_cb = cmd.start_cb.take().unwrap();
+                let mut resp = RaftCmdResponse::new();
+                if *region.get_region_epoch() != cmd.epoch {
+                    cmd_resp::bind_error(
+                        &mut resp,
+                        Error::EpochNotMatch("snapshot".to_owned(), vec![region.to_owned()]),
+                    );
+                    warn!("abort request snapshot";
+                        "epoch" => ?cmd.epoch,
+                        "new_epoch" => ?region.get_region_epoch());
+                } else {
+                    debug!("request snapshot into applying";
+                        "epoch" => ?cmd.epoch);
+                    *self = RequestSnapshot::Applying(cmd);
+                }
+                start_cb.invoke_with_response(resp);
             }
             _ => unreachable!(),
         }
@@ -208,7 +229,7 @@ impl RequestSnapshot {
                         Error::EpochNotMatch("snapshot".to_owned(), vec![region.to_owned()]),
                     )
                 }
-                cmd.callback.invoke_with_response(resp);
+                cmd.end_cb.invoke_with_response(resp);
             }
             RequestSnapshot::None => (),
         }
@@ -1270,8 +1291,8 @@ impl Peer {
             }
         }
 
-        if apply_snap_result.is_some() {
-            self.pending_request_snapshot.maybe_apply();
+        if let Some(res) = apply_snap_result.as_ref() {
+            self.pending_request_snapshot.step_applying(&res.region);
             self.activate(ctx);
             let mut meta = ctx.store_meta.lock().unwrap();
             meta.readers
@@ -2249,13 +2270,14 @@ impl Peer {
     pub fn handle_request_snapshot(
         &mut self,
         region_epoch: metapb::RegionEpoch,
-        callback: Callback,
+        start_cb: Callback,
+        end_cb: Callback,
     ) {
         if self.is_leader() {
             // Snapshot can only be requested when it's not a leader.
             // TODO(backup): check how leader handles snapshots.
             let resp = cmd_resp::err_resp(Error::StaleCommand, self.term());
-            callback.invoke_with_response(resp);
+            start_cb.invoke_with_response(resp);
             return;
         }
         if self.is_merging() || self.is_splitting() {
@@ -2264,7 +2286,7 @@ impl Peer {
                 Error::Other(box_err!("{} is merging or splitting", self.tag)),
                 self.term(),
             );
-            callback.invoke_with_response(resp);
+            start_cb.invoke_with_response(resp);
             return;
         }
         if *self.region().get_region_epoch() != region_epoch {
@@ -2272,7 +2294,7 @@ impl Peer {
                 Error::EpochNotMatch(String::new(), vec![self.region().to_owned()]),
                 self.term(),
             );
-            callback.invoke_with_response(resp);
+            start_cb.invoke_with_response(resp);
             return;
         }
         if self.is_applying_snapshot() || self.has_pending_snapshot() {
@@ -2280,26 +2302,25 @@ impl Peer {
                 Error::Other(box_err!("{} is applying snapshot", self.tag)),
                 self.term(),
             );
-            callback.invoke_with_response(resp);
+            start_cb.invoke_with_response(resp);
             return;
         }
+        let request_index = self.get_store().committed_index();
         info!(
             "start requesting snapshot";
             "region_id" => self.region_id,
-            "peer_id" => self.peer_id()
+            "peer_id" => self.peer_id(),
+            "request_index" => request_index,
         );
-        if let Err(e) = self
-            .raft_group
-            .request_snapshot(self.get_store().committed_index())
-        {
+        if let Err(e) = self.raft_group.request_snapshot(request_index) {
             error!("request snapshot failed";
                 "region_id" => self.region_id,
                 "peer_id" => self.peer_id());
             let resp = cmd_resp::message_error(e);
-            callback.invoke_with_response(resp);
+            start_cb.invoke_with_response(resp);
         } else {
             self.pending_request_snapshot
-                .add_pending(region_epoch, callback);
+                .step_pending(region_epoch, start_cb, end_cb);
         }
     }
 
@@ -2397,6 +2418,7 @@ impl Peer {
             "msg_size" => msg.compute_size(),
             "from" => from_peer.get_id(),
             "to" => to_peer_id,
+            "request_snapshot" => msg.get_request_snapshot(),
         );
 
         send_msg.set_from_peer(from_peer);

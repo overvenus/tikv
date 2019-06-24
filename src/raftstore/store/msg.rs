@@ -214,7 +214,8 @@ pub enum CasualMessage {
     /// Request a snapshot from leader.
     RequestSnapshot {
         region_epoch: RegionEpoch,
-        callback: Callback,
+        start_cb: Callback,
+        end_cb: Callback,
     },
 
     /// A test only message, it is useful when we want to access

@@ -188,16 +188,24 @@ fn test_server_simple_request_snasphot() {
     let region_epoch = cluster.get_region_epoch(r1);
     let router2 = cluster.sim.read().unwrap().get_router(2).unwrap();
     let (tx, rx) = mpsc::channel();
+    let tx_ = tx.clone();
     let req_snap = PeerMsg::CasualMessage(CasualMessage::RequestSnapshot {
         region_epoch,
-        callback: Callback::Write(Box::new(move |resp: WriteResponse| {
+        start_cb: Callback::Write(Box::new(move |resp: WriteResponse| {
             let resp = resp.response;
             assert!(!resp.get_header().has_error(), "{:?}", resp,);
-            tx.send(()).unwrap();
+            tx_.send(1).unwrap();
+        })),
+        end_cb: Callback::Write(Box::new(move |resp: WriteResponse| {
+            let resp = resp.response;
+            assert!(!resp.get_header().has_error(), "{:?}", resp,);
+            tx.send(2).unwrap();
         })),
     });
     router2.send(r1, req_snap).unwrap();
-    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    // The call order must be start cb -> end cb.
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
 
     must_wait_condition(|| {
         let list = backup_mgr2
