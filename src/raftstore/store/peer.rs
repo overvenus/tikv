@@ -1314,7 +1314,7 @@ impl Peer {
             // Snapshot's metadata has been applied.
             self.last_applying_idx = self.get_store().truncated_index();
         } else {
-            let committed_entries = ready.committed_entries.take().unwrap();
+            let mut committed_entries = ready.committed_entries.take().unwrap();
             // leader needs to update lease and last committed split index.
             let mut lease_to_be_updated = self.is_leader();
             let mut split_to_be_updated = self.is_leader();
@@ -1366,6 +1366,12 @@ impl Peer {
                         self.pending_request_snapshot.finish_with(region, resp);
                     }
                 }
+            }
+            if self.raft_group.raft.pending_request_snapshot != INVALID_INDEX {
+                // Skip committed entries that larger than the request snapshot,
+                // because we don't want to apply same entries twice.
+                committed_entries
+                    .retain(|e| e.get_index() < self.raft_group.raft.pending_request_snapshot);
             }
             if !committed_entries.is_empty() {
                 self.last_applying_idx = committed_entries.last().unwrap().get_index();

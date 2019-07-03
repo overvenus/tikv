@@ -446,7 +446,7 @@ fn test_server_snapshot_with_append() {
 }
 
 #[test]
-fn test_request_snapshot_apply_repeatedly() {
+fn test_request_snapshot_same_apply_state() {
     let mut cluster = new_node_cluster(0, 2);
     configure_for_request_snapshot(&mut cluster);
 
@@ -480,4 +480,55 @@ fn test_request_snapshot_apply_repeatedly() {
         "{:?}",
         raft_state
     );
+}
+
+#[test]
+fn test_request_snapshot_apply_repeatedly() {
+    let mut cluster = new_node_cluster(0, 3);
+    configure_for_request_snapshot(&mut cluster);
+
+    let pd_client = Arc::clone(&cluster.pd_client);
+    // Disable default max peer count check.
+    pd_client.disable_default_operator();
+    let region_id = cluster.run_conf_change();
+    pd_client.must_add_peer(region_id, new_peer(2, 2));
+    pd_client.must_add_peer(region_id, new_peer(3, 3));
+    cluster.must_transfer_leader(region_id, new_peer(2, 2));
+
+    let block = Arc::new(AtomicBool::new(true));
+    // Drop all append messages to region 1 at store 1.
+    cluster.add_send_filter(CloneFilterFactory(
+        RegionPacketFilter::new(region_id, 1)
+            .when(block.clone())
+            .direction(Direction::Recv)
+            .msg_type(MessageType::MsgHeartbeat),
+    ));
+
+    // Drop all snapshot messages to region 1 at store 1.
+    cluster.add_send_filter(CloneFilterFactory(
+        RegionPacketFilter::new(region_id, 1)
+            .direction(Direction::Recv)
+            .msg_type(MessageType::MsgSnapshot),
+    ));
+
+    cluster.must_put(b"k1", b"v1");
+
+    // Install snapshot filter before requesting snapshot.
+    let (tx, rx) = mpsc::channel();
+    let notifier = Mutex::new(Some(tx));
+    cluster.sim.wl().add_recv_filter(
+        1,
+        Box::new(RecvSnapshotFilter {
+            notifier,
+            region_id,
+        }),
+    );
+    cluster.must_request_snapshot(1, region_id);
+    rx.recv_timeout(Duration::from_millis(200)).unwrap_err();
+
+    // Do not block message append.
+    block.store(false, Ordering::SeqCst);
+
+    rx.recv_timeout(Duration::from_millis(200)).unwrap_err();
+    must_get_none(&cluster.get_engine(1), b"k1");
 }
