@@ -182,7 +182,7 @@ impl Simulator for ServerCluster {
             )
             .unwrap();
             backup_mgr
-                .step(kvproto::backup::BackupState::StartFullBackup)
+                .step(kvproto::backup::BackupState::Start)
                 .unwrap();
             Some(Arc::new(backup_mgr))
         };
