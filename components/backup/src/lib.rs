@@ -21,6 +21,7 @@ extern crate quick_error;
 
 mod check;
 mod errors;
+mod restore;
 mod storage;
 
 use std::collections::hash_map::HashMap;
@@ -36,6 +37,7 @@ use protobuf::Message;
 use tempdir::TempDir;
 
 pub use errors::{Error, Result};
+pub use restore::{dot, RestoreManager};
 pub use storage::{LocalStorage, Storage};
 
 pub trait Dependency: Sync + Send {
@@ -81,11 +83,11 @@ impl Meta {
         assert!(current != BackupState::Unknown);
         match (current, request) {
             (BackupState::Stop, BackupState::Stop)
-            | (BackupState::Stop, BackupState::StartFullBackup)
-            | (BackupState::StartFullBackup, BackupState::FinishFullBackup)
-            | (BackupState::FinishFullBackup, BackupState::StartFullBackup)
-            | (BackupState::FinishFullBackup, BackupState::IncrementalBackup)
-            | (BackupState::IncrementalBackup, BackupState::IncrementalBackup)
+            | (BackupState::Stop, BackupState::Start)
+            | (BackupState::Start, BackupState::Complete)
+            | (BackupState::Complete, BackupState::Start)
+            | (BackupState::Complete, BackupState::Incremental)
+            | (BackupState::Incremental, BackupState::Incremental)
             | (_, BackupState::Stop) => (),
             (current, request) => {
                 return Err(Error::Step(current, request));
@@ -309,7 +311,7 @@ impl BackupManager {
             BackupState::Stop => {
                 self.backuping.store(false, Ordering::Release);
                 meta.backup_regions.clear();
-                if meta.backup_meta.get_start_full_backup_dependency() != 0 {
+                if meta.backup_meta.get_start_dependency() != 0 {
                     meta.save_to(&meta_path, &self.storage).unwrap();
                     // Rotate the current dir.
                     self.rotate_current_dir(dep);
@@ -317,25 +319,25 @@ impl BackupManager {
                 info!("stop backup");
                 return Ok(dep);
             }
-            BackupState::StartFullBackup => {
+            BackupState::Start => {
                 info!("start full backup");
                 if let Err(e) = self.storage.make_dir(self.current_dir()) {
                     if e.kind() != ErrorKind::AlreadyExists {
                         return Err(Error::Io(e));
                     }
                 }
-                meta.backup_meta.set_start_full_backup_dependency(dep);
+                meta.backup_meta.set_start_dependency(dep);
                 self.backuping.store(true, Ordering::Release);
             }
-            BackupState::FinishFullBackup => {
-                meta.backup_meta.set_finish_full_backup_dependency(dep);
+            BackupState::Complete => {
+                meta.backup_meta.set_complete_dependency(dep);
                 assert!(self.backuping.load(Ordering::Acquire));
-                info!("finish full backup");
+                info!("complete full backup");
             }
-            BackupState::IncrementalBackup => {
-                meta.backup_meta.mut_inc_backup_dependencies().push(dep);
+            BackupState::Incremental => {
+                meta.backup_meta.mut_incremental_dependencies().push(dep);
                 assert!(self.backuping.load(Ordering::Acquire));
-                info!("finish incremental backup");
+                info!("complete incremental backup");
             }
             BackupState::Unknown => panic!("unexpected state unknown"),
         }
@@ -392,28 +394,22 @@ mod tests {
             buf: vec![],
         };
         let mut correct = HashSet::new();
-        correct.insert((BackupState::Stop, BackupState::StartFullBackup));
-        correct.insert((BackupState::StartFullBackup, BackupState::FinishFullBackup));
-        correct.insert((BackupState::FinishFullBackup, BackupState::StartFullBackup));
-        correct.insert((
-            BackupState::FinishFullBackup,
-            BackupState::IncrementalBackup,
-        ));
-        correct.insert((
-            BackupState::IncrementalBackup,
-            BackupState::IncrementalBackup,
-        ));
+        correct.insert((BackupState::Stop, BackupState::Start));
+        correct.insert((BackupState::Start, BackupState::Complete));
+        correct.insert((BackupState::Complete, BackupState::Start));
+        correct.insert((BackupState::Complete, BackupState::Incremental));
+        correct.insert((BackupState::Incremental, BackupState::Incremental));
         correct.insert((BackupState::Stop, BackupState::Stop));
-        correct.insert((BackupState::StartFullBackup, BackupState::Stop));
-        correct.insert((BackupState::FinishFullBackup, BackupState::Stop));
-        correct.insert((BackupState::IncrementalBackup, BackupState::Stop));
+        correct.insert((BackupState::Start, BackupState::Stop));
+        correct.insert((BackupState::Complete, BackupState::Stop));
+        correct.insert((BackupState::Incremental, BackupState::Stop));
 
         let all = vec![
             BackupState::Unknown,
             BackupState::Stop,
-            BackupState::StartFullBackup,
-            BackupState::FinishFullBackup,
-            BackupState::IncrementalBackup,
+            BackupState::Start,
+            BackupState::Complete,
+            BackupState::Incremental,
         ];
 
         for s1 in all.clone() {
@@ -459,15 +455,15 @@ mod tests {
         assert!(!bm.backuping.load(Ordering::Acquire));
 
         // Do not rotate if it is the first backup.
-        bm.step(BackupState::StartFullBackup).unwrap();
+        bm.step(BackupState::Start).unwrap();
         let len = check_file_count(len + 1 /* current */);
         assert!(bm.backuping.load(Ordering::Acquire));
 
-        bm.step(BackupState::FinishFullBackup).unwrap();
+        bm.step(BackupState::Complete).unwrap();
         let len = check_file_count(len);
         assert!(bm.backuping.load(Ordering::Acquire));
 
-        bm.step(BackupState::IncrementalBackup).unwrap();
+        bm.step(BackupState::Incremental).unwrap();
         let len = check_file_count(len);
         assert!(bm.backuping.load(Ordering::Acquire));
 
@@ -476,7 +472,7 @@ mod tests {
         let len = check_file_count(len);
         assert!(!bm.backuping.load(Ordering::Acquire));
 
-        bm.step(BackupState::StartFullBackup).unwrap();
+        bm.step(BackupState::Start).unwrap();
         check_file_count(len + 1 /* current */);
         assert!(bm.backuping.load(Ordering::Acquire));
     }
@@ -494,7 +490,7 @@ mod tests {
         assert_eq!(bm.dependency.alloc_number(), 1);
         assert_eq!(bm.dependency.alloc_number(), 2);
 
-        bm.step(BackupState::StartFullBackup).unwrap();
+        bm.step(BackupState::Start).unwrap();
 
         let src = path.join("src");
         bm.start_backup_region(1).unwrap();
