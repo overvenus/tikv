@@ -23,6 +23,7 @@ mod check;
 mod errors;
 mod restore;
 mod storage;
+mod util;
 
 use std::collections::hash_map::HashMap;
 use std::collections::HashSet;
@@ -39,6 +40,7 @@ use tempdir::TempDir;
 pub use errors::{Error, Result};
 pub use restore::{dot, RestoreManager};
 pub use storage::{LocalStorage, Storage};
+pub use util::BackupMetaBuilder;
 
 pub trait Dependency: Sync + Send {
     fn get(&self) -> u64;
@@ -109,16 +111,50 @@ impl Meta {
         Ok(())
     }
 
-    fn start(&mut self, region_id: u64) {
+    fn start_region(&mut self, region_id: u64) {
         self.backup_regions.insert(region_id);
     }
 
-    fn stop(&mut self, region_id: u64) {
+    fn stop_region(&mut self, region_id: u64) {
         self.backup_regions.remove(&region_id);
     }
 
-    fn is_started(&self, region_id: u64) -> bool {
+    fn is_region_started(&self, region_id: u64) -> bool {
         self.backup_regions.contains(&region_id)
+    }
+
+    fn start(&mut self, dep: u64) {
+        info!("start full backup"; "start_dependency" => dep);
+        self.backup_meta.set_start_dependency(dep);
+    }
+
+    fn complete(&mut self, dep: u64) {
+        info!("complete full backup"; "complete_dependency" => dep);
+        self.backup_meta.set_complete_dependency(dep);
+    }
+
+    fn incremental(&mut self, dep: u64) {
+        self.backup_meta.mut_incremental_dependencies().push(dep);
+        info!("complete incremental backup");
+    }
+
+    fn stop(&mut self) {
+        info!("stop backup";
+            "regions" => self.backup_regions.len(),
+            "start_dependency" =>self.backup_meta.get_start_dependency(),
+            "complete_dependency" => self.backup_meta.get_complete_dependency(),
+            "incremental" => self.backup_meta.get_incremental_dependencies().len(),
+            "events" => self.backup_meta.get_events().len(),
+            "files" => self.backup_meta.get_files().len());
+
+        self.backup_meta.set_start_dependency(0);
+        self.backup_meta.set_complete_dependency(0);
+        self.backup_meta.mut_incremental_dependencies().clear();
+        self.backup_meta.mut_events().clear();
+        self.backup_meta.mut_files().clear();
+
+        self.backup_regions.clear();
+        self.buf.clear();
     }
 }
 
@@ -219,7 +255,7 @@ impl BackupManager {
     }
 
     pub fn is_region_started(&self, region_id: u64) -> bool {
-        self.meta.read().unwrap().is_started(region_id)
+        self.meta.read().unwrap().is_region_started(region_id)
     }
 
     pub fn start_backup_region(&self, region_id: u64) -> Result<()> {
@@ -234,7 +270,7 @@ impl BackupManager {
                 return Err(Error::Io(e));
             }
         }
-        self.meta.write().unwrap().start(region_id);
+        self.meta.write().unwrap().start_region(region_id);
         Ok(())
     }
 
@@ -242,7 +278,7 @@ impl BackupManager {
         if !self.backuping.load(Ordering::Acquire) {
             return Ok(());
         }
-        self.meta.write().unwrap().stop(region_id);
+        self.meta.write().unwrap().stop_region(region_id);
         Ok(())
     }
 
@@ -254,7 +290,7 @@ impl BackupManager {
         if !self.backuping.load(Ordering::Acquire) {
             return Ok(());
         }
-        if !self.meta.read().unwrap().is_started(region_id) {
+        if !self.meta.read().unwrap().is_region_started(region_id) {
             return Ok(());
         }
         let dst = self.log_path(region_id, first, last);
@@ -270,7 +306,7 @@ impl BackupManager {
         if !self.backuping.load(Ordering::Acquire) {
             return Ok(());
         }
-        if !self.meta.read().unwrap().is_started(region_id) {
+        if !self.meta.read().unwrap().is_region_started(region_id) {
             return Ok(());
         }
         let dep = self.dependency.alloc_number();
@@ -310,34 +346,30 @@ impl BackupManager {
         match state {
             BackupState::Stop => {
                 self.backuping.store(false, Ordering::Release);
-                meta.backup_regions.clear();
                 if meta.backup_meta.get_start_dependency() != 0 {
                     meta.save_to(&meta_path, &self.storage).unwrap();
                     // Rotate the current dir.
                     self.rotate_current_dir(dep);
                 }
-                info!("stop backup");
+                meta.stop();
                 return Ok(dep);
             }
             BackupState::Start => {
-                info!("start full backup");
                 if let Err(e) = self.storage.make_dir(self.current_dir()) {
                     if e.kind() != ErrorKind::AlreadyExists {
                         return Err(Error::Io(e));
                     }
                 }
-                meta.backup_meta.set_start_dependency(dep);
+                meta.start(dep);
                 self.backuping.store(true, Ordering::Release);
             }
             BackupState::Complete => {
-                meta.backup_meta.set_complete_dependency(dep);
                 assert!(self.backuping.load(Ordering::Acquire));
-                info!("complete full backup");
+                meta.complete(dep);
             }
             BackupState::Incremental => {
-                meta.backup_meta.mut_incremental_dependencies().push(dep);
                 assert!(self.backuping.load(Ordering::Acquire));
-                info!("complete incremental backup");
+                meta.incremental(dep);
             }
             BackupState::Unknown => panic!("unexpected state unknown"),
         }
@@ -475,6 +507,19 @@ mod tests {
         bm.step(BackupState::Start).unwrap();
         check_file_count(len + 1 /* current */);
         assert!(bm.backuping.load(Ordering::Acquire));
+
+        // New backup must exclude previous meta data.
+        let meta = bm.meta.read().unwrap();
+        assert!(
+            meta.backup_meta.get_events().is_empty()
+                && meta.backup_meta.get_files().is_empty()
+                && meta.backup_meta.get_incremental_dependencies().is_empty()
+                && meta.backup_regions.is_empty()
+                && meta.backup_regions.is_empty(),
+            "{:?} {:?}",
+            meta.backup_meta,
+            meta.backup_regions
+        )
     }
 
     #[test]
