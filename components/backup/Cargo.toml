@@ -20,7 +20,6 @@ protobuf = "~2.0"
 raft = "0.4.3"
 # TODO: use master branch after the next version is released.
 kvproto = { git = "https://github.com/pingcap/kvproto.git", branch = "backup" }
-engine = { path = "../engine" }
 petgraph = "0.4"
 clap = "2.32"
 

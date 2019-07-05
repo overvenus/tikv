@@ -2,19 +2,12 @@
 
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::path::Path;
 
 use kvproto::backup::{BackupEvent, BackupEvent_Event, BackupMeta};
 use petgraph::prelude::NodeIndex;
 use petgraph::*;
-use protobuf::Message;
 
-use crate::Storage;
 use crate::{Error, Result};
-
-pub struct RestoreManager {
-    storage: Box<dyn Storage>,
-}
 
 #[derive(Debug)]
 pub enum EvalNode {
@@ -28,34 +21,6 @@ pub enum EvalNode {
 
 pub type EvalGraph = Graph<EvalNode, ()>;
 
-impl RestoreManager {
-    pub fn new(storage: Box<dyn Storage>) -> Result<RestoreManager> {
-        info!("create restore executor");
-        Ok(RestoreManager { storage })
-    }
-
-    fn backup_meta(&self) -> Result<BackupMeta> {
-        let mut buf = Vec::with_capacity(1024);
-        self.storage
-            .read_file(Path::new(crate::BACKUP_META_NAME), &mut buf)
-            .unwrap();
-        let mut meta = BackupMeta::new();
-        meta.merge_from_bytes(&buf).unwrap();
-        Ok(meta)
-    }
-
-    pub fn eval_graph(&self) -> Result<EvalGraph> {
-        let meta = self.backup_meta().unwrap();
-        let g = build_eval_graph(meta);
-        Ok(g)
-    }
-
-    pub fn total_order_eval(&self) -> Result<(EvalGraph, Vec<NodeIndex<u32>>)> {
-        let g = self.eval_graph()?;
-        toposort(&g).map(|od| (g, od))
-    }
-}
-
 pub fn dot<N: Debug, E: Debug>(g: &Graph<N, E>) -> String {
     format!(
         "{:?}",
@@ -63,7 +28,7 @@ pub fn dot<N: Debug, E: Debug>(g: &Graph<N, E>) -> String {
     )
 }
 
-fn build_eval_graph(mut meta: BackupMeta) -> EvalGraph {
+pub fn build_eval_graph(mut meta: BackupMeta) -> EvalGraph {
     meta.mut_events()
         .sort_by(|l, r| l.get_dependency().cmp(&r.get_dependency()));
     let cap = meta.get_events().len();
@@ -153,13 +118,15 @@ fn build_eval_graph(mut meta: BackupMeta) -> EvalGraph {
                     region_merges.insert(region_id, (idx, event, source));
                 }
             }
-            _ => (),
+            BackupEvent_Event::Snapshot
+            | BackupEvent_Event::Unknown
+            | BackupEvent_Event::RollbackMerge => (),
         }
     }
     g
 }
 
-fn toposort(g: &EvalGraph) -> Result<Vec<NodeIndex<u32>>> {
+pub fn toposort(g: &EvalGraph) -> Result<Vec<NodeIndex<u32>>> {
     match algo::toposort(&g, None) {
         Ok(order) => Ok(order),
         Err(e) => Err(Error::Other(format!("{:?}", e).into())),

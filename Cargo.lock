@@ -120,7 +120,6 @@ name = "backup"
 version = "0.0.1"
 dependencies = [
  "clap 2.32.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "engine 0.0.1",
  "kvproto 0.0.1 (git+https://github.com/pingcap/kvproto.git?branch=backup)",
  "log 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
  "petgraph 0.4.13 (registry+https://github.com/rust-lang/crates.io-index)",
