@@ -4126,8 +4126,7 @@ mod tests {
         system.spawn("test-backup".to_owned(), builder);
 
         router.schedule_task(1, Msg::Registration(reg.clone()));
-        bm.step(kvproto::backup::BackupState::Start)
-            .unwrap();
+        bm.step(kvproto::backup::BackupState::Start).unwrap();
         bm.start_backup_region(1).unwrap();
 
         let entry_batch = RefCell::new(EntryBatch::new());
