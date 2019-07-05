@@ -125,12 +125,14 @@ fn main() {
                 }
             }
         } else if let Some(matches) = matches.subcommand_matches("graph") {
+            let rm = backup::RestoreManager::new(Box::new(ls)).unwrap();
             if matches.subcommand_matches("total").is_some() {
-                let rm = backup::RestoreManager::new(Box::new(ls)).unwrap();
                 let g = rm.total_order_eval().unwrap();
-                println!("{}", backup::dot(&g));
+                println!("{}", backup::dot(&g.0));
+                println!("{:?}", g.1);
             } else {
-                println!("{}", matches.usage());
+                let g = rm.eval_graph().unwrap();
+                println!("{}", backup::dot(&g));
             }
         }
     } else {

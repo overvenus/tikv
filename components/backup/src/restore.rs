@@ -5,11 +5,12 @@ use std::fmt::Debug;
 use std::path::Path;
 
 use kvproto::backup::{BackupEvent, BackupEvent_Event, BackupMeta};
-use petgraph::Graph;
+use petgraph::prelude::NodeIndex;
+use petgraph::*;
 use protobuf::Message;
 
-use crate::Result;
 use crate::Storage;
+use crate::{Error, Result};
 
 pub struct RestoreManager {
     storage: Box<dyn Storage>,
@@ -43,20 +44,26 @@ impl RestoreManager {
         Ok(meta)
     }
 
-    pub fn total_order_eval(&self) -> Result<EvalGraph> {
+    pub fn eval_graph(&self) -> Result<EvalGraph> {
         let meta = self.backup_meta().unwrap();
-        Ok(total_order_eval(meta))
+        let g = build_eval_graph(meta);
+        Ok(g)
+    }
+
+    pub fn total_order_eval(&self) -> Result<(EvalGraph, Vec<NodeIndex<u32>>)> {
+        let g = self.eval_graph()?;
+        toposort(&g).map(|od| (g, od))
     }
 }
 
 pub fn dot<N: Debug, E: Debug>(g: &Graph<N, E>) -> String {
     format!(
         "{:?}",
-        petgraph::dot::Dot::with_config(g, &[petgraph::dot::Config::EdgeNoLabel])
+        dot::Dot::with_config(g, &[dot::Config::EdgeNoLabel])
     )
 }
 
-fn total_order_eval(mut meta: BackupMeta) -> EvalGraph {
+fn build_eval_graph(mut meta: BackupMeta) -> EvalGraph {
     meta.mut_events()
         .sort_by(|l, r| l.get_dependency().cmp(&r.get_dependency()));
     let cap = meta.get_events().len();
@@ -152,6 +159,13 @@ fn total_order_eval(mut meta: BackupMeta) -> EvalGraph {
     g
 }
 
+fn toposort(g: &EvalGraph) -> Result<Vec<NodeIndex<u32>>> {
+    match algo::toposort(&g, None) {
+        Ok(order) => Ok(order),
+        Err(e) => Err(Error::Other(format!("{:?}", e).into())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,11 +176,11 @@ mod tests {
     }
 
     #[test]
-    fn test_total_order_eval_basic() {
+    fn test_build_eval_graph_basic() {
         let mut builder = BackupMetaBuilder::new();
         builder.snapshot(1, 10);
         check_graph(
-            total_order_eval(builder.build()),
+            build_eval_graph(builder.build()),
             r#"digraph {
     0 [label="Event(region_id: 1 index: 10 event: Snapshot dependency: 1)"]
     1 [label="Logs { region_id: 1, start_index: 11, end_index: 0 }"]
@@ -176,7 +190,7 @@ mod tests {
 
         builder.snapshot(2, 10);
         check_graph(
-            total_order_eval(builder.build()),
+            build_eval_graph(builder.build()),
             r#"digraph {
     0 [label="Event(region_id: 1 index: 10 event: Snapshot dependency: 1)"]
     1 [label="Logs { region_id: 1, start_index: 11, end_index: 0 }"]
@@ -192,7 +206,7 @@ mod tests {
         builder.snapshot(1, 10);
         builder.split(1, 12, vec![1, 3]);
         check_graph(
-            total_order_eval(builder.build()),
+            build_eval_graph(builder.build()),
 r#"digraph {
     0 [label="Event(region_id: 1 index: 10 event: Snapshot dependency: 3)"]
     1 [label="Logs { region_id: 1, start_index: 11, end_index: 11 }"]
@@ -205,6 +219,38 @@ r#"digraph {
     1 -> 2
     2 -> 4
 }"#);
-        // println!("{}", dot(&total_order_eval(builder.build())));
+    }
+
+    #[test]
+    fn test_total_order_eval() {
+        let mut builder = BackupMetaBuilder::new();
+        builder.snapshot(1, 10);
+        builder.split(1, 12, vec![1, 3]);
+        builder.snapshot(2, 10);
+        let g = build_eval_graph(builder.build());
+        let od = toposort(&g).unwrap();
+        check_graph(
+            g,
+r#"digraph {
+    0 [label="Event(region_id: 1 index: 10 event: Snapshot dependency: 1)"]
+    1 [label="Logs { region_id: 1, start_index: 11, end_index: 11 }"]
+    2 [label="Event(region_id: 1 index: 12 related_region_ids: 1 related_region_ids: 3 event: Split dependency: 2)"]
+    3 [label="Logs { region_id: 1, start_index: 13, end_index: 0 }"]
+    4 [label="Logs { region_id: 3, start_index: 6, end_index: 0 }"]
+    5 [label="Event(region_id: 2 index: 10 event: Snapshot dependency: 3)"]
+    6 [label="Logs { region_id: 2, start_index: 11, end_index: 0 }"]
+    0 -> 1
+    0 -> 2
+    2 -> 3
+    1 -> 2
+    2 -> 4
+    2 -> 5
+    5 -> 6
+}"#);
+        assert!(
+            od.starts_with(&[NodeIndex::new(0), NodeIndex::new(1), NodeIndex::new(2)]),
+            "{:?}",
+            od
+        );
     }
 }
