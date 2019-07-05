@@ -4,6 +4,9 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use engine::*;
+use kvproto::raft_serverpb::RaftSnapshotData;
+use raft::eraftpb::Snapshot;
+use protobuf::Message;
 use test_raftstore::*;
 use tikv::raftstore::store::*;
 use tikv_util::HandyRwLock;
@@ -20,6 +23,23 @@ fn check_snapshot(bm: &BackupManager, region_id: u64, cf_count: usize) {
     let snap_list = bm.storage.list_dir(&region_list[0]).unwrap();
     // cf files and a meta file.
     assert_eq!(snap_list.len(), cf_count + 1);
+    // Check meta file.
+    for f in snap_list {
+        if "meta" == f.extension().unwrap() {
+            let mut content = vec![];
+            bm.storage.read_file(&f, &mut content).unwrap();
+            let mut snap = Snapshot::new();
+            snap.merge_from_bytes(&content).unwrap();
+            assert!(snap.has_metadata(), "{:?}", snap);
+            let mut snap_data = RaftSnapshotData::new();
+            snap_data.merge_from_bytes(snap.get_data()).unwrap();
+            assert!(
+                snap_data.has_region() && snap_data.has_meta(),
+                "{:?}",
+                snap_data
+            );
+        }
+    }
 }
 
 #[test]
