@@ -3,6 +3,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rand::Rng;
 
@@ -12,7 +13,7 @@ const LOCAL_STORAGE_TMP_DIR: &str = "localtmp";
 const LOCAL_STORAGE_TEP_FILE_SUFFIX: &str = "tmp";
 
 // TODO(backup): Simplify the trait.
-pub trait Storage: Sync + Send {
+pub trait Storage: Sync + Send + 'static {
     fn rename_dir(&self, from: &Path, to: &Path) -> IoResult<()>;
     fn make_dir(&self, path: &Path) -> IoResult<()>;
     fn list_dir(&self, path: &Path) -> IoResult<Vec<PathBuf>>;
@@ -21,7 +22,7 @@ pub trait Storage: Sync + Send {
     fn read_file(&self, path: &Path, buf: &mut Vec<u8>) -> IoResult<()>;
 }
 
-impl Storage for Box<dyn Storage> {
+impl Storage for Arc<dyn Storage> {
     fn rename_dir(&self, from: &Path, to: &Path) -> IoResult<()> {
         (**self).rename_dir(from, to)
     }

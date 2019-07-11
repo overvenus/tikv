@@ -5,8 +5,10 @@
 #[macro_use(
     kv,
     slog_kv,
+    slog_trace,
     slog_debug,
     slog_info,
+    slog_warn,
     slog_error,
     slog_record,
     slog_b,
@@ -31,7 +33,7 @@ use std::fs;
 use std::io::{Error as IoError, ErrorKind, Result as IoResult};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::*;
 
 use kvproto::backup::{BackupEvent, BackupEvent_Event, BackupMeta, BackupState};
 use protobuf::Message;
@@ -160,7 +162,7 @@ impl Meta {
 
 pub struct BackupManager {
     pub dependency: Box<dyn Dependency>,
-    pub storage: Box<dyn Storage>,
+    pub storage: Arc<dyn Storage>,
     current: PathBuf,
     meta: RwLock<Meta>,
     backuping: AtomicBool,
@@ -214,7 +216,7 @@ impl BackupManager {
         let backuping = AtomicBool::new(BackupState::Stop != meta.state());
         Ok(BackupManager {
             dependency,
-            storage,
+            storage: storage.into(),
             auxiliary,
             current,
             backuping,
@@ -298,11 +300,11 @@ impl BackupManager {
         Ok(())
     }
 
-    pub fn snapshot_dir(&self, region_id: u64, term: u64, index: u64, dependency: u64) -> PathBuf {
-        snapshot_dir(&self.current, region_id, term, index, dependency)
+    pub fn snapshot_dir(&self, region_id: u64, index: u64, dependency: u64) -> PathBuf {
+        snapshot_dir(&self.current, region_id, index, dependency)
     }
 
-    pub fn save_snapshot(&self, region_id: u64, term: u64, index: u64, src: &Path) -> Result<()> {
+    pub fn save_snapshot(&self, region_id: u64, index: u64, src: &Path) -> Result<()> {
         if !self.backuping.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -310,7 +312,7 @@ impl BackupManager {
             return Ok(());
         }
         let dep = self.dependency.alloc_number();
-        let dst = self.snapshot_dir(region_id, term, index, dep);
+        let dst = self.snapshot_dir(region_id, index, dep);
         self.storage.save_dir(&dst, src).unwrap();
         let mut event = BackupEvent::new();
         event.set_region_id(region_id);
@@ -397,8 +399,8 @@ fn region_path(base: &Path, region_id: u64) -> PathBuf {
     base.join(format!("{}", region_id))
 }
 
-fn snapshot_dir(base: &Path, region_id: u64, term: u64, index: u64, dependency: u64) -> PathBuf {
-    base.join(format!("{}/{}@{}_{}", region_id, index, term, dependency))
+fn snapshot_dir(base: &Path, region_id: u64, index: u64, dependency: u64) -> PathBuf {
+    base.join(format!("{}/{}@{}", region_id, index, dependency))
 }
 
 fn log_path(base: &Path, region_id: u64, first: u64, last: u64) -> PathBuf {
@@ -545,7 +547,7 @@ mod tests {
 
         let magic_contents = b"a";
         make_snap_dir(&src, magic_contents);
-        bm.save_snapshot(1, 2, 3, &src).unwrap();
+        bm.save_snapshot(1, 3, &src).unwrap();
 
         fn check_meta(bm: &BackupManager, dependency: u64, contents: &[u8]) {
             let mut buf = vec![];
@@ -561,7 +563,7 @@ mod tests {
             assert_eq!(events[0].get_index(), 3);
             assert_eq!(events[0].get_dependency(), dependency);
 
-            let snap_dir = bm.snapshot_dir(1, 2, 3, dependency);
+            let snap_dir = bm.snapshot_dir(1, 3, dependency);
             let mut buf = vec![];
             bm.storage
                 .read_file(&snap_dir.join("a.sst"), &mut buf)

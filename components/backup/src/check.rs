@@ -409,9 +409,7 @@ mod tests {
             let storage = LocalStorage::new(tmp.path()).unwrap();
             storage.make_dir(&region_path(base, 1)).unwrap();
             for s in &case.snaps {
-                storage
-                    .make_dir(&snapshot_dir(base, 1, s.1, s.0, 0))
-                    .unwrap();
+                storage.make_dir(&snapshot_dir(base, 1, s.0, 0)).unwrap();
             }
             for l in &case.logs {
                 storage

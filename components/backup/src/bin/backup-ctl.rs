@@ -1,5 +1,6 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::sync::*;
 use std::u64;
 
 use clap::{crate_authors, crate_version, App, AppSettings, Arg, SubCommand};
@@ -125,7 +126,7 @@ fn main() {
                 }
             }
         } else if let Some(matches) = matches.subcommand_matches("graph") {
-            let rm = backup::RestoreManager::new(Box::new(ls)).unwrap();
+            let rm = backup::RestoreManager::new(path.to_owned(), Arc::new(ls)).unwrap();
             if matches.subcommand_matches("total").is_some() {
                 let g = rm.total_order_eval().unwrap();
                 println!("{}", backup::dot(&g.0));
