@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 
 use kvproto::backup::{BackupEvent, BackupEvent_Event, BackupMeta};
-use petgraph::prelude::NodeIndex;
 use petgraph::*;
 
 use crate::{Error, Result};
@@ -20,6 +19,7 @@ pub enum EvalNode {
 }
 
 pub type EvalGraph = Graph<EvalNode, ()>;
+pub type NodeIndex = petgraph::prelude::NodeIndex<u32>;
 
 pub fn dot<N: Debug, E: Debug>(g: &Graph<N, E>) -> String {
     format!(
@@ -126,7 +126,7 @@ pub fn build_eval_graph(mut meta: BackupMeta) -> EvalGraph {
     g
 }
 
-pub fn toposort(g: &EvalGraph) -> Result<Vec<NodeIndex<u32>>> {
+pub fn toposort(g: &EvalGraph) -> Result<Vec<NodeIndex>> {
     match algo::toposort(&g, None) {
         Ok(order) => Ok(order),
         Err(e) => Err(Error::Other(format!("{:?}", e).into())),

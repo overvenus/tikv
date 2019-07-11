@@ -1,6 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::path::Path;
+use std::path::*;
+use std::sync::*;
 
 use kvproto::backup::BackupMeta;
 use petgraph::prelude::NodeIndex;
@@ -10,17 +11,20 @@ use crate::Result;
 use crate::Storage;
 
 mod eval;
+mod executor;
 
 pub use eval::{dot, EvalGraph, EvalNode};
+pub use executor::Executor;
 
 pub struct RestoreManager {
-    storage: Box<dyn Storage>,
+    base: PathBuf,
+    storage: Arc<dyn Storage>,
 }
 
 impl RestoreManager {
-    pub fn new(storage: Box<dyn Storage>) -> Result<RestoreManager> {
+    pub fn new(base: PathBuf, storage: Arc<dyn Storage>) -> Result<RestoreManager> {
         info!("create restore executor");
-        Ok(RestoreManager { storage })
+        Ok(RestoreManager { base, storage })
     }
 
     fn backup_meta(&self) -> Result<BackupMeta> {
@@ -42,5 +46,15 @@ impl RestoreManager {
     pub fn total_order_eval(&self) -> Result<(EvalGraph, Vec<NodeIndex<u32>>)> {
         let g = self.eval_graph()?;
         eval::toposort(&g).map(|od| (g, od))
+    }
+
+    pub fn executor(&self) -> Result<Executor> {
+        let (g, od) = self.total_order_eval().unwrap();
+        Ok(Executor::new(
+            self.storage.clone(),
+            g,
+            od,
+            self.base.clone(),
+        ))
     }
 }
