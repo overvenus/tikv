@@ -23,6 +23,7 @@ use grpcio::{CallOption, ChannelBuilder, Environment};
 use protobuf::Message;
 use protobuf::RepeatedField;
 
+use backup::{BackupManager, LocalStorage};
 use engine::rocks;
 use engine::rocks::util::security::encrypted_env_from_cipher_file;
 use engine::Engines;
@@ -38,7 +39,7 @@ use raft::eraftpb::{ConfChange, Entry, EntryType};
 use tikv::binutil as util;
 use tikv::config::TiKvConfig;
 use tikv::pd::{Config as PdConfig, PdClient, RpcClient};
-use tikv::raftstore::store::{keys, BackupManager, LocalStorage, INIT_EPOCH_CONF_VER};
+use tikv::raftstore::store::{keys, INIT_EPOCH_CONF_VER};
 use tikv::server::debug::{BottommostLevelCompaction, Debugger, RegionInfo};
 use tikv::storage::Key;
 use tikv_util::security::{SecurityConfig, SecurityManager};

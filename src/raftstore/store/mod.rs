@@ -43,7 +43,6 @@ pub use self::snap::{
 };
 pub use self::transport::{CasualRouter, ProposalRouter, StoreRouter, Transport};
 pub use self::worker::{KeyEntry, LocalReader, RegionTask};
-pub use backup::{BackupManager, Dependency, LocalStorage};
 
 // Only used in tests
 #[cfg(test)]

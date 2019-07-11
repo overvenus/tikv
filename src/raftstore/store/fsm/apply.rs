@@ -10,6 +10,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::{cmp, usize};
 
+use backup::BackupManager;
 use crossbeam::channel::{TryRecvError, TrySendError};
 use engine::rocks;
 use engine::rocks::Writable;
@@ -40,7 +41,7 @@ use crate::raftstore::store::msg::{Callback, PeerMsg};
 use crate::raftstore::store::peer::Peer;
 use crate::raftstore::store::peer_storage::{self, write_initial_apply_state, write_peer_state};
 use crate::raftstore::store::util::check_region_epoch;
-use crate::raftstore::store::{cmd_resp, keys, util, BackupManager, Config};
+use crate::raftstore::store::{cmd_resp, keys, util, Config};
 use crate::raftstore::{Error, Result};
 use tikv_util::mpsc::{loose_bounded, LooseBoundedSender, Receiver};
 use tikv_util::time::{duration_to_sec, Instant, SlowTimer};

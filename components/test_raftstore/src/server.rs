@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use std::{thread, usize};
 
+use backup::{BackupManager, LocalStorage};
 use grpcio::{EnvBuilder, Error as GrpcError};
 use kvproto::raft_cmdpb::*;
 use kvproto::raft_serverpb;
@@ -16,7 +17,7 @@ use tikv::coprocessor;
 use tikv::import::{ImportSSTService, SSTImporter};
 use tikv::raftstore::coprocessor::{CoprocessorHost, RegionInfoAccessor};
 use tikv::raftstore::store::fsm::{RaftBatchSystem, RaftRouter};
-use tikv::raftstore::store::{BackupManager, Callback, LocalReader, LocalStorage, SnapManager};
+use tikv::raftstore::store::{Callback, LocalReader, SnapManager};
 use tikv::raftstore::Result;
 use tikv::server::load_statistics::ThreadLoad;
 use tikv::server::resolve::{self, Task as ResolveTask};

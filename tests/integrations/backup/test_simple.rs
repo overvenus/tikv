@@ -5,11 +5,12 @@ use std::time::{Duration, Instant};
 
 use engine::*;
 use kvproto::raft_serverpb::RaftSnapshotData;
-use raft::eraftpb::Snapshot;
 use protobuf::Message;
+use raft::eraftpb::Snapshot;
 use test_raftstore::*;
 use tikv::raftstore::store::*;
 use tikv_util::HandyRwLock;
+use backup::BackupManager;
 
 use super::configure_for_backup;
 

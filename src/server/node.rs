@@ -12,13 +12,14 @@ use crate::raftstore::coprocessor::dispatcher::CoprocessorHost;
 use crate::raftstore::store::fsm::store::StoreMeta;
 use crate::raftstore::store::fsm::{RaftBatchSystem, RaftRouter};
 use crate::raftstore::store::{
-    self, initial_region, keys, BackupManager, Config as StoreConfig, SnapManager, Transport,
+    self, initial_region, keys, Config as StoreConfig, SnapManager, Transport,
 };
 use crate::server::readpool::ReadPool;
 use crate::server::Config as ServerConfig;
 use crate::server::ServerRaftStoreRouter;
 use crate::storage::lock_manager::{DetectorScheduler, WaiterMgrScheduler};
 use crate::storage::{Config as StorageConfig, RaftKv, Storage};
+use backup::BackupManager;
 use engine::rocks::DB;
 use engine::Engines;
 use engine::Peekable;

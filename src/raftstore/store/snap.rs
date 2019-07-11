@@ -884,11 +884,7 @@ impl Snapshot for Snap {
                 debug!("copy cf file"; "src" => cf_file.path.display(), "dst" => dst.display());
                 box_try!(fs::copy(&cf_file.path, dst));
             }
-            box_try!(backup_mgr.save_snapshot(
-                self.key.region_id,
-                self.key.idx,
-                tmp_dir.path()
-            ));
+            box_try!(backup_mgr.save_snapshot(self.key.region_id, self.key.idx, tmp_dir.path()));
             return Ok(());
         }
 
