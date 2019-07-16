@@ -3,10 +3,13 @@
 use std::fs::{self, File};
 use std::io::{Read, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
+use super::log_storage::{LogStorage, DEFAULT_FILE_CAPACITY};
 
 use rand::Rng;
 
 use super::maybe_create_dir;
+use kvproto::backup::EntryBatch;
+use std::sync::Arc;
 
 const LOCAL_STORAGE_TMP_DIR: &str = "localtmp";
 const LOCAL_STORAGE_TEP_FILE_SUFFIX: &str = "tmp";
@@ -19,6 +22,8 @@ pub trait Storage: Sync + Send {
     fn save_dir(&self, path: &Path, src: &Path) -> IoResult<()>;
     fn save_file(&self, path: &Path, content: &[u8]) -> IoResult<()>;
     fn read_file(&self, path: &Path, buf: &mut Vec<u8>) -> IoResult<()>;
+    fn put(&self, batch: &mut EntryBatch) -> bool;
+    fn sync(&self) -> bool;
 }
 
 impl Storage for Box<dyn Storage> {
@@ -40,21 +45,30 @@ impl Storage for Box<dyn Storage> {
     fn read_file(&self, path: &Path, buf: &mut Vec<u8>) -> IoResult<()> {
         (**self).read_file(path, buf)
     }
+    fn put(&self, batch: &mut EntryBatch) -> bool {
+        (**self).put(batch)
+    }
+    fn sync(&self) -> bool {
+        (**self).sync()
+    }
 }
 
 #[derive(Clone)]
 pub struct LocalStorage {
     base: PathBuf,
     tmp: PathBuf,
+    log: Arc<LogStorage>,
 }
 
 impl LocalStorage {
     pub fn new(base: &Path) -> IoResult<LocalStorage> {
         info!("create local storage"; "base" => base.display());
         let tmp = base.join(LOCAL_STORAGE_TMP_DIR);
+        let log = LogStorage::open(base.to_str().unwrap(), DEFAULT_FILE_CAPACITY)?;
         maybe_create_dir(&tmp)?;
         Ok(LocalStorage {
             base: base.to_owned(),
+            log: Arc::new(log),
             tmp,
         })
     }
@@ -125,6 +139,13 @@ impl Storage for LocalStorage {
     fn read_file(&self, path: &Path, buf: &mut Vec<u8>) -> IoResult<()> {
         let mut file = File::open(self.base.join(path))?;
         file.read_to_end(buf).map(|_| ())
+    }
+
+    fn put(&self, batch: &mut EntryBatch) -> bool {
+        self.log.put(batch)
+    }
+    fn sync(&self) -> bool {
+        self.log.sync()
     }
 }
 

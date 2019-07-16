@@ -18,8 +18,10 @@ quick-error = "1.2.2"
 tempdir = "0.3"
 protobuf = "~2.0"
 raft = "0.4.3"
+errno = "0.2.4"
+libc = "0.2"
 # TODO: use master branch after the next version is released.
-kvproto = { git = "https://github.com/pingcap/kvproto.git", branch = "backup" }
+kvproto = { git = "https://github.com/Little-Wallace/kvproto.git", branch = "lw_backup" }
 engine = { path = "../engine" }
 petgraph = "0.4"
 clap = "2.32"

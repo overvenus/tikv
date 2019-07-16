@@ -23,6 +23,8 @@ mod check;
 mod errors;
 mod restore;
 mod storage;
+mod log_storage;
+mod file_util;
 
 use std::collections::hash_map::HashMap;
 use std::collections::HashSet;
@@ -32,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock;
 
-use kvproto::backup::{BackupEvent, BackupEvent_Event, BackupMeta, BackupState};
+use kvproto::backup::{BackupEvent, BackupEvent_Event, BackupMeta, BackupState, EntryBatch};
 use protobuf::Message;
 use tempdir::TempDir;
 
@@ -248,6 +250,20 @@ impl BackupManager {
 
     pub fn log_path(&self, region_id: u64, first: u64, last: u64) -> PathBuf {
         log_path(&self.current, region_id, first, last)
+    }
+
+    pub fn put(&self, batch: &mut EntryBatch) -> bool {
+        if !self.backuping.load(Ordering::Acquire) {
+            return true;
+        }
+        if !self.meta.read().unwrap().is_started(batch.region_id) {
+            return true;
+        }
+        self.storage.put(batch)
+    }
+
+    pub fn sync(&self) -> bool {
+        self.storage.sync()
     }
 
     pub fn save_logs(&self, region_id: u64, first: u64, last: u64, content: &[u8]) -> Result<()> {

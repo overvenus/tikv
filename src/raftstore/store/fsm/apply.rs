@@ -527,10 +527,11 @@ impl ApplyContext {
 
                 // Save raft log entries.
                 // TODO(backup): gc large buffer.
-                self.entry_batch_buf.clear();
-                entry_batch.write_to_vec(&mut self.entry_batch_buf).unwrap();
-                bm.save_logs(region_id, first, last, &self.entry_batch_buf)
-                    .unwrap();
+//                self.entry_batch_buf.clear();
+//                entry_batch.write_to_vec(&mut self.entry_batch_buf).unwrap();
+//                bm.save_logs(region_id, first, last, &self.entry_batch_buf)
+//                    .unwrap();
+                bm.put(entry_batch);
                 entry_batch.mut_entries().clear();
 
                 // Collect events.
@@ -539,6 +540,7 @@ impl ApplyContext {
             }
             // Save events.
             bm.save_events(self.event_batch_buf.drain(..)).unwrap();
+            bm.sync();
         }
 
         // Write to engine
