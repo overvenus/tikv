@@ -200,24 +200,23 @@ pub struct LogManager {
     pub active_log_capacity: usize,
     pub active_file : FileMetaIndex,
     pub all_files: Vec<FileMetaIndex>,
-    dir: String,
+    dir: PathBuf,
     pub write_buffer: Vec<u8>
 }
 
 
 impl LogManager {
-    pub fn new(active_file: FileMetaIndex, active_log_capacity: usize, dir: &str, all_files: Vec<FileMetaIndex>) -> LogManager {
+    pub fn new(active_file: FileMetaIndex, active_log_capacity: usize, dir: PathBuf, all_files: Vec<FileMetaIndex>) -> LogManager {
         LogManager {
             active_log_capacity,
             all_files,
             active_file,
-            dir: String::from(dir),
+            dir,
             write_buffer: Vec::default()
         }
     }
 
-    pub fn open(dir: &str, filenames: Vec<(u64,String)>, active_prefix: u64, active_log_capacity: usize) -> IoResult<LogManager> {
-        let path = Path::new(dir);
+    pub fn open(path: &Path, filenames: Vec<(u64,String)>, active_prefix: u64, active_log_capacity: usize) -> IoResult<LogManager> {
         let mut all_files = Vec::new();
         for (file_prefix, file_name) in filenames.iter() {
             let file_path = path.join(file_name);
@@ -235,9 +234,9 @@ impl LogManager {
             let file_meta = FileMetaIndex::read_meta(fd, &file_path, mode)?;
             all_files.push(file_meta);
         }
-        let new_fd = new_log_file(dir, active_prefix);
+        let new_fd = new_log_file(path.to_path_buf(), active_prefix);
         let active_file = FileMetaIndex::create(new_fd, active_prefix);
-        Ok(LogManager::new(active_file, active_log_capacity, dir,  all_files))
+        Ok(LogManager::new(active_file, active_log_capacity, path.to_path_buf(),  all_files))
     }
 
     pub fn dump(&mut self) {
@@ -246,7 +245,7 @@ impl LogManager {
         meta.content_size = self.active_file.size as u64;
         write_file_meta(self.active_file.fd, meta);
         println!("dump a log file with {}", prefix - 1);
-        let new_fd = new_log_file(self.dir.as_str(), prefix);
+        let new_fd = new_log_file(self.dir.clone(), prefix);
         let new_file = FileMetaIndex::create(new_fd, prefix);
         let old_file = std::mem::replace(&mut self.active_file, new_file);
         self.all_files.push(old_file);
@@ -264,22 +263,28 @@ impl Drop for LogManager {
 
 pub struct LogStorage {
     log_manager : RwLock<LogManager>,
-    dir: String,
+    // dir: String,
 }
 
 
 
 impl LogStorage {
-    pub fn new(dir: &str, log_manager: LogManager) -> LogStorage {
+    pub fn new(log_manager: LogManager) -> LogStorage {
         LogStorage {
             log_manager: RwLock::new(log_manager),
-            dir: dir.to_string(),
+            // dir: dir.to_string(),
         }
     }
 
     pub fn open(dir: &str, active_log_capacity: usize) -> IoResult<LogStorage> {
-        let path = Path::new(dir).join(CURRENT_DIR);
+        let root = Path::new(dir);
+        let path = root.join(CURRENT_DIR);
         if !path.exists() {
+            if !root.exists() {
+                info!("Create raft log directory: {}", root.display());
+                fs::create_dir(root)
+                    .unwrap_or_else(|e| panic!("Create raft log directory failed, err: {:?}", e));
+            }
             info!("Create raft log directory: {}", path.display());
             fs::create_dir(path.clone())
                 .unwrap_or_else(|e| panic!("Create raft log directory failed, err: {:?}", e));
@@ -292,7 +297,7 @@ impl LogStorage {
         let mut max_file_num: u64 = 0;
         let mut log_files = vec![];
 
-        for entry in fs::read_dir(path)? {
+        for entry in fs::read_dir(path.clone())? {
             let entry = entry?;
             let file_path = entry.path();
             if !file_path.is_file() {
@@ -318,8 +323,8 @@ impl LogStorage {
             max_file_num + 1
         };
         log_files.sort_by_key(|a| a.0);
-        let log_manager = LogManager::open(dir, log_files, active_prefix, active_log_capacity)?;
-        Ok(LogStorage::new(dir, log_manager))
+        let log_manager = LogManager::open(path.as_path(), log_files, active_prefix, active_log_capacity)?;
+        Ok(LogStorage::new(log_manager))
     }
 
     pub fn iter(&self) -> BatchEntryIterator {
@@ -465,8 +470,8 @@ fn extract_file_num(file_name: &str) -> IoResult<u64> {
     }
 }
 
-fn new_log_file(dir: &str, file_num: u64) -> libc::c_int {
-    let mut path = PathBuf::from(dir);
+fn new_log_file(dir: PathBuf, file_num: u64) -> libc::c_int {
+    let mut path = dir.clone();
     path.push(generate_file_name(file_num));
 
     let path_cstr = CString::new(path.as_path().to_str().unwrap().as_bytes()).unwrap();
@@ -647,7 +652,5 @@ mod tests {
         pipe_log.sync();
         assert_eq!(1, pipe_log.file_num());
     }
-
-
 }
 
