@@ -254,9 +254,11 @@ impl BackupManager {
 
     pub fn put(&self, batch: &mut EntryBatch) -> bool {
         if !self.backuping.load(Ordering::Acquire) {
+            info!("backup not start");
             return true;
         }
         if !self.meta.read().unwrap().is_started(batch.region_id) {
+            info!("region not start"; "region_id" => batch.region_id);
             return true;
         }
         self.storage.put(batch)

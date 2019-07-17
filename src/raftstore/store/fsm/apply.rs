@@ -522,8 +522,8 @@ impl ApplyContext {
                     }
                     continue;
                 }
-                let first = entry_batch.get_entries().first().unwrap().get_index();
-                let last = entry_batch.get_entries().last().unwrap().get_index();
+//                let first = entry_batch.get_entries().first().unwrap().get_index();
+//                let last = entry_batch.get_entries().last().unwrap().get_index();
 
                 // Save raft log entries.
                 // TODO(backup): gc large buffer.
@@ -531,6 +531,7 @@ impl ApplyContext {
 //                entry_batch.write_to_vec(&mut self.entry_batch_buf).unwrap();
 //                bm.save_logs(region_id, first, last, &self.entry_batch_buf)
 //                    .unwrap();
+                entry_batch.region_id = region_id;
                 bm.put(entry_batch);
                 entry_batch.mut_entries().clear();
 

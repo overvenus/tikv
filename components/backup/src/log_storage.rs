@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::ffi::CString;
 use super::{Error, Result};
 use super::file_util::{deserialize, serialize, pread_int, pread, write, sync, close, seek_to_end,BatchEntryIterator};
+use super::CURRENT_DIR;
 use protobuf::Message;
 use std::u64;
 
@@ -138,8 +139,14 @@ impl FileMetaIndex {
             return Err(IoError::new(ErrorKind::Other, "read meta failed"));
         }
         let mut meta = FileMeta::new();
-        meta.merge_from_bytes(result_buf.as_slice());
-        return Ok(FileMetaIndex::new(fd, meta));
+        match meta.merge_from_bytes(result_buf.as_slice()) {
+            Ok(_) => {
+                return Ok(FileMetaIndex::new(fd, meta));
+            },
+            Err(_) => {
+                return Err(IoError::new(ErrorKind::Other, "deserialize meta failed"));
+            }
+        }
     }
 
     fn check_meta(fd: libc::c_int, path: &PathBuf) -> bool {
@@ -210,7 +217,7 @@ impl LogManager {
     }
 
     pub fn open(dir: &str, filenames: Vec<(u64,String)>, active_prefix: u64, active_log_capacity: usize) -> IoResult<LogManager> {
-        let mut path = Path::new(dir);
+        let path = Path::new(dir);
         let mut all_files = Vec::new();
         for (file_prefix, file_name) in filenames.iter() {
             let file_path = path.join(file_name);
@@ -271,10 +278,10 @@ impl LogStorage {
     }
 
     pub fn open(dir: &str, active_log_capacity: usize) -> IoResult<LogStorage> {
-        let path = Path::new(dir);
+        let path = Path::new(dir).join(CURRENT_DIR);
         if !path.exists() {
-            info!("Create raft log directory: {}", dir);
-            fs::create_dir(dir)
+            info!("Create raft log directory: {}", path.display());
+            fs::create_dir(path.clone())
                 .unwrap_or_else(|e| panic!("Create raft log directory failed, err: {:?}", e));
         }
 
@@ -310,7 +317,6 @@ impl LogStorage {
         } else {
             max_file_num + 1
         };
-        println!("open file num: {}", log_files.len());
         log_files.sort_by_key(|a| a.0);
         let log_manager = LogManager::open(dir, log_files, active_prefix, active_log_capacity)?;
         Ok(LogStorage::new(dir, log_manager))
@@ -384,11 +390,12 @@ impl LogStorage {
         }
         let mut log_manager = self.log_manager.write().unwrap();
         if !update_raft_meta(&mut log_manager.active_file.meta, batch) {
+            info!("put batch failed"; "batch_region_id" => batch.region_id);
             return false;
         }
         let buf = serialize(batch.compute_size());
-        log_manager.write_buffer.write_all(buf.as_ref());
-        batch.write_to_vec(&mut log_manager.write_buffer);
+        log_manager.write_buffer.write_all(buf.as_ref()).unwrap();
+        batch.write_to_vec(&mut log_manager.write_buffer).unwrap();
         return true;
     }
 
@@ -411,6 +418,7 @@ impl LogStorage {
         log.active_file.size += log.write_buffer.len();
         log.write_buffer.clear();
         if log.active_file.size >= log.active_log_capacity {
+            info!("close current active log and write into file meta"; "file" => log.active_file.file_name.clone());
             log.dump();
         } else {
             sync(log.active_file.fd);
@@ -439,12 +447,12 @@ impl LogStorage {
     }
 
     fn file_num(&self) -> usize {
-        let mut log = self.log_manager.write().unwrap();
+        let log = self.log_manager.write().unwrap();
         return log.all_files.len();
     }
 
     fn size(&self) -> usize {
-        let mut log = self.log_manager.write().unwrap();
+        let log = self.log_manager.write().unwrap();
         return log.active_file.size;
     }
 }
@@ -484,7 +492,7 @@ fn write_file_meta(fd: libc::c_int, meta: FileMeta) {
     let mut meta_buf = Vec::with_capacity(meta_len as usize + 256);
     meta_buf.extend_from_slice(MAGIC_STR);
     meta.write_to_vec(&mut meta_buf);
-    let mut buf = serialize(meta_len);
+    let buf = serialize(meta_len);
     meta_buf.extend_from_slice(buf.as_ref());
     meta_buf.extend_from_slice(MAGIC_STR);
     write(fd, &mut meta_buf);
@@ -497,7 +505,7 @@ fn update_raft_meta(meta: &mut HashMap<u64, RegionMeta>, batch: &mut EntryBatch)
             if region_meta.end_index + 1 < batch.entries.first().unwrap().index {
                 return false;
             }
-            while !batch.entries.is_empty() && batch.entries.first().unwrap().index < region_meta.end_index {
+            while !batch.entries.is_empty() && batch.entries.first().unwrap().index <= region_meta.end_index {
                 batch.entries.remove(0);
             }
             if batch.entries.is_empty() {
@@ -537,7 +545,7 @@ mod tests {
         meta.content_size = 4;
         meta.path = "log".to_string();
         let meta_len = meta.compute_size();
-        let mut buf = serialize(meta_len);
+        let buf = serialize(meta_len);
         content.extend_from_slice(MAGIC_STR);
         meta.write_to_vec(&mut content);
         content.extend_from_slice(buf.as_ref());
@@ -559,10 +567,10 @@ mod tests {
 
     #[test]
     fn test_pipe_log_open_with_two_log_file() {
-        let temp_dir = TempDir::new("test_file_meta").unwrap();
+        let temp_dir = TempDir::new("test_two_log_file").unwrap();
         let path = temp_dir.path();
         {
-            let mut pipe_log = LogStorage::open(path.to_str().unwrap(), 1024).unwrap();
+            let pipe_log = LogStorage::open(path.to_str().unwrap(), 1024).unwrap();
             for index in 1..6 {
                 let mut batch = EntryBatch::new();
                 batch.region_id = 1;
@@ -571,7 +579,6 @@ mod tests {
                 entry.term = 2;
                 batch.entries.push(entry);
                 assert!(pipe_log.put(&mut batch));
-                let content_size = pipe_log.size();
                 if index % 2 == 0 {
                     pipe_log.sync();
                     pipe_log.dump();
@@ -586,9 +593,9 @@ mod tests {
             pipe_log.put(&mut batch);
             pipe_log.sync();
         }
-        let mut pipe_log = LogStorage::open(path.to_str().unwrap(), 1024).unwrap();
+        let pipe_log = LogStorage::open(path.to_str().unwrap(), 1024).unwrap();
         assert_eq!(3, pipe_log.file_num());
-        let mut result = pipe_log.read(1, 2, u64::MAX);
+        let result = pipe_log.read(1, 2, u64::MAX);
         assert_eq!(4, result.len());
         for i in 0..result.len() {
             assert_eq!(2 + i, result[i].index as usize);
@@ -598,8 +605,49 @@ mod tests {
 
     #[test]
     fn test_pipe_log_write_repeat_entry() {
-
+        let temp_dir = TempDir::new("write_repeat_entry").unwrap();
+        let path = temp_dir.path();
+        let pipe_log = LogStorage::open(path.to_str().unwrap(), 1024).unwrap();
+        for index in 1..6 {
+            let mut batch = EntryBatch::new();
+            batch.region_id = 1;
+            let mut e = RaftEntry::new();
+            e.index = index;
+            e.term = 2;
+            batch.entries.push(e);
+            let mut e2 = RaftEntry::new();
+            e2.index = index + 1;
+            e2.term = 2;
+            batch.entries.push(e2);
+            assert!(pipe_log.put(&mut batch));
+        }
+        pipe_log.sync();
+        let result = pipe_log.read(1, 2, u64::MAX);
+        assert_eq!(5, result.len());
+        for i in 0..result.len() {
+            assert_eq!(2 + i, result[i].index as usize);
+        }
     }
+
+    #[test]
+    fn test_log_dump_over_capacity() {
+        let temp_dir = TempDir::new("dump_over_capacity").unwrap();
+        let path = temp_dir.path();
+        let pipe_log = LogStorage::open(path.to_str().unwrap(), 128).unwrap();
+        assert_eq!(0, pipe_log.file_num());
+        for index in 1..64 {
+            let mut batch = EntryBatch::new();
+            batch.region_id = 1;
+            let mut e = RaftEntry::new();
+            e.index = index;
+            e.term = 2;
+            batch.entries.push(e);
+            assert!(pipe_log.put(&mut batch));
+        }
+        pipe_log.sync();
+        assert_eq!(1, pipe_log.file_num());
+    }
+
 
 }
 
