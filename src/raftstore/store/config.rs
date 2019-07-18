@@ -121,6 +121,9 @@ pub struct Config {
     pub future_poll_size: usize,
     pub hibernate_regions: bool,
 
+    // Disable raftdb wal log.
+    pub disable_raft_wal: bool,
+
     // Deprecated! These two configuration has been moved to Coprocessor.
     // They are preserved for compatibility check.
     #[doc(hidden)]
@@ -193,6 +196,7 @@ impl Default for Config {
             store_pool_size: 2,
             future_poll_size: 1,
             hibernate_regions: false,
+            disable_raft_wal: false,
 
             // They are preserved for compatibility check.
             region_max_size: ReadableSize(0),
@@ -524,6 +528,9 @@ impl Config {
         metrics
             .with_label_values(&["future_poll_size"])
             .set(self.future_poll_size as f64);
+        metrics
+            .with_label_values(&["disable_raft_wal"])
+            .set((self.disable_raft_wal as i32).into());
     }
 }
 
