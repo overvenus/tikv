@@ -193,6 +193,21 @@ impl FileMetaIndex {
             None => false
         }
     }
+
+    pub fn merge_region_meta(region_indexes: &mut HashMap<u64, RegionMeta>, region_metas: &HashMap<u64, RegionMeta>) {
+        for (region_id, meta) in region_metas.iter() {
+            match region_indexes.get_mut(&region_id) {
+                Some(all_meta) => {
+                    if meta.start_index <= all_meta.end_index + 1 && all_meta.end_index < meta.end_index {
+                        all_meta.end_index = meta.end_index;
+                    }
+                },
+                None => {
+                    region_indexes.insert(region_id.clone(), meta.clone());
+                }
+            }
+        }
+    }
 }
 
 
@@ -200,6 +215,7 @@ pub struct LogManager {
     pub active_log_capacity: usize,
     pub active_file : FileMetaIndex,
     pub all_files: Vec<FileMetaIndex>,
+    pub region_indexes: HashMap<u64, RegionMeta>,
     dir: PathBuf,
     pub write_buffer: Vec<u8>
 }
@@ -207,11 +223,16 @@ pub struct LogManager {
 
 impl LogManager {
     pub fn new(active_file: FileMetaIndex, active_log_capacity: usize, dir: PathBuf, all_files: Vec<FileMetaIndex>) -> LogManager {
+        let mut region_indexes = HashMap::new();
+        for f in all_files.iter() {
+            FileMetaIndex::merge_region_meta(&mut region_indexes, &f.meta);
+        }
         LogManager {
             active_log_capacity,
             all_files,
             active_file,
             dir,
+            region_indexes,
             write_buffer: Vec::default()
         }
     }
@@ -394,10 +415,11 @@ impl LogStorage {
             return false;
         }
         let mut log_manager = self.log_manager.write().unwrap();
-        if !update_raft_meta(&mut log_manager.active_file.meta, batch) {
+        if !update_raft_meta(&mut log_manager.region_indexes, batch) {
             info!("put batch failed"; "batch_region_id" => batch.region_id);
             return false;
         }
+        update_raft_meta(&mut log_manager.active_file.meta, batch);
         let buf = serialize(batch.compute_size());
         log_manager.write_buffer.write_all(buf.as_ref()).unwrap();
         batch.write_to_vec(&mut log_manager.write_buffer).unwrap();
@@ -625,6 +647,7 @@ mod tests {
             e2.term = 2;
             batch.entries.push(e2);
             assert!(pipe_log.put(&mut batch));
+            pipe_log.sync();
         }
         pipe_log.sync();
         let result = pipe_log.read(1, 2, u64::MAX);
