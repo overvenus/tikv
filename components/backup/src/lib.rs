@@ -21,10 +21,10 @@ extern crate quick_error;
 
 mod check;
 mod errors;
+mod file_util;
+mod log_storage;
 mod restore;
 mod storage;
-mod log_storage;
-mod file_util;
 
 use std::collections::hash_map::HashMap;
 use std::collections::HashSet;
@@ -255,11 +255,11 @@ impl BackupManager {
     pub fn put(&self, batch: &mut EntryBatch) -> bool {
         if !self.backuping.load(Ordering::Acquire) {
             info!("backup not start");
-            return true;
+            return false;
         }
         if !self.meta.read().unwrap().is_started(batch.region_id) {
             info!("region not start"; "region_id" => batch.region_id);
-            return true;
+            return false;
         }
         self.storage.put(batch)
     }

@@ -1,9 +1,9 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use super::log_storage::{LogStorage, DEFAULT_FILE_CAPACITY};
 use std::fs::{self, File};
 use std::io::{Read, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
-use super::log_storage::{LogStorage, DEFAULT_FILE_CAPACITY};
 
 use rand::Rng;
 

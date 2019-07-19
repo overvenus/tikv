@@ -522,18 +522,12 @@ impl ApplyContext {
                     }
                     continue;
                 }
-//                let first = entry_batch.get_entries().first().unwrap().get_index();
-//                let last = entry_batch.get_entries().last().unwrap().get_index();
-
                 // Save raft log entries.
                 // TODO(backup): gc large buffer.
-//                self.entry_batch_buf.clear();
-//                entry_batch.write_to_vec(&mut self.entry_batch_buf).unwrap();
-//                bm.save_logs(region_id, first, last, &self.entry_batch_buf)
-//                    .unwrap();
                 entry_batch.region_id = region_id;
-                bm.put(entry_batch);
-                entry_batch.mut_entries().clear();
+                if bm.put(entry_batch) {
+                    entry_batch.mut_entries().clear();
+                }
 
                 // Collect events.
                 self.event_batch_buf
@@ -4129,8 +4123,7 @@ mod tests {
         system.spawn("test-backup".to_owned(), builder);
 
         router.schedule_task(1, Msg::Registration(reg.clone()));
-        bm.step(kvproto::backup::BackupState::Start)
-            .unwrap();
+        bm.step(kvproto::backup::BackupState::Start).unwrap();
         bm.start_backup_region(1).unwrap();
 
         let entry_batch = RefCell::new(EntryBatch::new());
