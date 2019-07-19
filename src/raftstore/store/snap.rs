@@ -1093,6 +1093,10 @@ impl SnapManager {
         Ok(())
     }
 
+    pub fn base_path(&self) -> PathBuf {
+        self.core.rl().base.clone().into()
+    }
+
     // Return all snapshots which is idle not being used.
     pub fn list_idle_snap(&self) -> io::Result<Vec<(SnapKey, bool)>> {
         let core = self.core.rl();

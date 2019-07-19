@@ -199,6 +199,7 @@ members = [
   "components/log_wrappers",
   "components/tikv_util",
   "components/backup",
+  "components/restore",
 ]
 
 [profile.dev]

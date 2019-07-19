@@ -2408,6 +2408,7 @@ impl Peer {
                     "region_id" => self.region_id,
                     "peer_id" => self.peer.get_id(),
                     "to_peer" => msg.get_to(),
+                    "msg_type" => ?msg.get_msg_type(),
                 );
                 return;
             }

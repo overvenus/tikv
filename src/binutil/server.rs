@@ -436,7 +436,7 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
 ///
 /// If the max open file descriptor limit is not high enough to support
 /// the main database and the raft database.
-fn pre_start(cfg: &TiKvConfig) {
+pub fn pre_start(cfg: &TiKvConfig) {
     // Before any startup, check system configuration and environment variables.
     check_system_config(&cfg);
     check_environment_variables();
