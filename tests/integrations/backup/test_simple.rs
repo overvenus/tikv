@@ -3,6 +3,7 @@
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
+use backup::BackupManager;
 use engine::*;
 use kvproto::raft_serverpb::RaftSnapshotData;
 use protobuf::Message;
@@ -10,9 +11,6 @@ use raft::eraftpb::Snapshot;
 use test_raftstore::*;
 use tikv::raftstore::store::*;
 use tikv_util::HandyRwLock;
-use backup::BackupManager;
-
-use super::configure_for_backup;
 
 fn check_snapshot(bm: &BackupManager, region_id: u64, cf_count: usize) {
     let region_list = bm

@@ -13,8 +13,6 @@ use backup::BackupManager;
 use test_raftstore::*;
 use tikv_util::HandyRwLock;
 
-use super::configure_for_backup;
-
 fn must_new_backup_cluster_and_client() -> (
     Cluster<ServerCluster>,
     Arc<BackupManager>,
