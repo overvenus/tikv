@@ -45,7 +45,7 @@ impl FilesCache {
     }
 }
 
-struct Wait {
+pub struct Wait {
     rx: mpsc::Receiver<()>,
     count: usize,
 }
@@ -70,9 +70,29 @@ impl Wait {
     }
 }
 
+// TODO: how about Box<dyn Read>?
+#[derive(PartialEq, Default)]
+pub struct SnapFiles {
+    pub meta: (String, Snapshot),
+    pub default: (String, Vec<u8>),
+    pub write: (String, Vec<u8>),
+    pub lock: (String, Vec<u8>),
+}
+
+impl std::fmt::Debug for SnapFiles {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("SnapFiles")
+            .field("meta", &self.meta)
+            .field("default", &(&self.default.0, self.default.1.len()))
+            .field("write", &(&self.write.0, self.write.1.len()))
+            .field("lock", &(&self.lock.0, self.lock.1.len()))
+            .finish()
+    }
+}
+
 pub enum Data {
     Logs(Vec<Entry>),
-    Snapshot(Snapshot),
+    Snapshot(SnapFiles),
 }
 
 pub struct Task {
@@ -93,10 +113,10 @@ impl Task {
         }
     }
 
-    pub fn take_snapshot(&mut self) -> Snapshot {
+    pub fn take_snapshot(&mut self) -> SnapFiles {
         match self.data {
-            Data::Logs(_) => Snapshot::new(),
-            Data::Snapshot(ref mut snap) => mem::replace(snap, Snapshot::new()),
+            Data::Logs(_) => Default::default(),
+            Data::Snapshot(ref mut snap) => mem::replace(snap, Default::default()),
         }
     }
 }
@@ -106,20 +126,43 @@ fn tasks_from_eval_node(
     base: &Path,
     storage: &dyn Storage,
     files_cache: &mut FilesCache,
-) -> (Vec<Task>, Wait) {
-    let read_snap_meta = |region_id, index, dependency| {
+) -> Option<(Vec<Task>, Wait)> {
+    let read_snap = |region_id, index, dependency| {
         let path = snapshot_dir(&base, region_id, index, dependency);
-        let meta_path = storage
-            .list_dir(&path)
-            .unwrap()
-            .into_iter()
-            .find(|f| "meta" == f.extension().unwrap())
-            .unwrap();
-        let mut buf = vec![];
-        storage.read_file(&meta_path, &mut buf).unwrap();
-        let mut snap = Snapshot::new();
-        snap.merge_from_bytes(&buf).unwrap();
-        snap
+        let mut meta = (String::new(), Snapshot::new());
+        let mut default = (String::new(), Vec::new());
+        let mut write = (String::new(), Vec::new());
+        let mut lock = (String::new(), Vec::new());
+        for p in storage.list_dir(&path).unwrap().into_iter() {
+            let file_name = p.file_name().unwrap();
+            let name = file_name.to_str().unwrap();
+            if p.extension().unwrap() == "meta" {
+                let mut buf = vec![];
+                storage.read_file(&p, &mut buf).unwrap();
+                meta.1.merge_from_bytes(&buf).unwrap();
+                meta.0 = name.to_owned();
+                let mut snap_data = kvproto::raft_serverpb::RaftSnapshotData::new();
+                snap_data.merge_from_bytes(meta.1.get_data()).unwrap();
+            } else if name.contains("default") {
+                // default cf
+                default.0 = name.to_owned();
+                storage.read_file(&p, &mut default.1).unwrap();
+            } else if name.contains("write") {
+                // write cf
+                write.0 = name.to_owned();
+                storage.read_file(&p, &mut write.1).unwrap();
+            } else {
+                // lock cf
+                lock.0 = name.to_owned();
+                storage.read_file(&p, &mut lock.1).unwrap();
+            }
+        }
+        SnapFiles {
+            meta,
+            default,
+            write,
+            lock,
+        }
     };
 
     match node {
@@ -131,28 +174,28 @@ fn tasks_from_eval_node(
 
             match event.get_event() {
                 BackupEvent_Event::Snapshot => {
-                    let meta = read_snap_meta(region_id, index, dependency);
-                    (
+                    let snap = read_snap(region_id, index, dependency);
+                    Some((
                         vec![Task {
                             region_id,
                             notify,
-                            data: Data::Snapshot(meta),
+                            data: Data::Snapshot(snap),
                         }],
                         wait,
-                    )
+                    ))
                 }
                 _ => {
                     let files = files_cache.cache(base, storage, region_id);
                     let entries =
-                        fetch_enties(storage, base, files, region_id, index, index).unwrap();
-                    (
+                        fetch_entries(storage, base, files, region_id, index, index).unwrap();
+                    Some((
                         vec![Task {
                             region_id,
                             notify,
                             data: Data::Logs(entries),
                         }],
                         wait,
-                    )
+                    ))
                 }
             }
         }
@@ -166,7 +209,16 @@ fn tasks_from_eval_node(
             let start_index = *start_index;
             let end_index = *end_index;
             let files = files_cache.cache(base, storage, region_id);
-            let total = end_index - start_index + 1;
+            let last = if end_index == 0 {
+                if let Some((end, _)) = files.iter().rev().next() {
+                    *end
+                } else {
+                    return None;
+                }
+            } else {
+                end_index
+            };
+            let total = last - start_index + 1;
             let quotient = total / LOGS_BATCH;
             let remainder = total % LOGS_BATCH;
             let count = quotient + if remainder > 0 { 1 } else { 0 };
@@ -175,7 +227,7 @@ fn tasks_from_eval_node(
             let mut s = start_index;
             for _ in 0..quotient {
                 let entries =
-                    fetch_enties(storage, base, files, region_id, s, s + LOGS_BATCH - 1).unwrap();
+                    fetch_entries(storage, base, files, region_id, s, s + LOGS_BATCH - 1).unwrap();
                 tasks.push(Task {
                     region_id,
                     notify: notify.clone(),
@@ -184,22 +236,16 @@ fn tasks_from_eval_node(
                 s += LOGS_BATCH;
             }
             if remainder > 0 {
-                let entries = fetch_enties(
-                    storage,
-                    base,
-                    files,
-                    region_id,
-                    end_index - remainder + 1,
-                    end_index,
-                )
-                .unwrap();
+                let entries =
+                    fetch_entries(storage, base, files, region_id, last - remainder + 1, last)
+                        .unwrap();
                 tasks.push(Task {
                     region_id,
                     notify: notify.clone(),
                     data: Data::Logs(entries),
                 });
             }
-            (tasks, wait)
+            Some((tasks, wait))
         }
     }
 }
@@ -219,7 +265,7 @@ fn extract_range_from_slice(fstart: u64, fend: u64, start: u64, end: u64) -> (us
     (s, e)
 }
 
-fn fetch_enties(
+fn fetch_entries(
     storage: &dyn Storage,
     base: &Path,
     files: &BTreeMap<u64, u64>,
@@ -243,7 +289,7 @@ fn fetch_enties(
         let entries = batch.entries.to_vec();
         let (s, e) = extract_range_from_slice(fstart, fend, start, end);
         debug!(
-            "fetch_enties {:?} {:?} {:?} {:?}",
+            "fetch_entries {:?} {:?} {:?} {:?}",
             (fstart, fend),
             (s, e),
             (start, end),
@@ -280,7 +326,7 @@ impl Executor {
         }
     }
 
-    fn tasks(self) -> impl Iterator<Item = (Vec<Task>, Wait)> {
+    pub fn tasks(self) -> impl Iterator<Item = (Vec<Task>, Wait)> {
         let Executor {
             storage,
             graph,
@@ -289,7 +335,7 @@ impl Executor {
         } = self;
 
         let mut region_files = FilesCache(HashMap::new());
-        order.into_iter().map(move |idx| {
+        order.into_iter().filter_map(move |idx| {
             let node = &graph[idx];
             tasks_from_eval_node(node, &base, &storage, &mut region_files)
         })
@@ -334,9 +380,9 @@ mod tests {
         batch
     }
     fn snapshot_bytes(region_id: u64, index: u64) -> Vec<u8> {
-        snapshot(region_id, index).write_to_bytes().unwrap()
+        snapshot(region_id, index).meta.1.write_to_bytes().unwrap()
     }
-    fn snapshot(region_id: u64, index: u64) -> Snapshot {
+    fn snapshot(region_id: u64, index: u64) -> SnapFiles {
         let mut snap = Snapshot::new();
         snap.mut_metadata().set_index(index);
         let mut data = RaftSnapshotData::new();
@@ -344,7 +390,13 @@ mod tests {
         region.set_id(region_id);
         data.set_region(region);
         snap.set_data(data.write_to_bytes().unwrap());
-        snap
+        let cf = (String::new(), Vec::new());
+        SnapFiles {
+            meta: (String::new(), snap),
+            default: cf.clone(),
+            write: cf.clone(),
+            lock: cf,
+        }
     }
 
     struct StorageBuilder {
@@ -411,7 +463,7 @@ mod tests {
         let current = bm.current_dir();
         let check = |start, end| {
             assert_eq!(
-                fetch_enties(&ls, current, &map[&region_id], region_id, start, end).unwrap(),
+                fetch_entries(&ls, current, &map[&region_id], region_id, start, end).unwrap(),
                 entries_batch(start, if end == 0 { 14 } else { end })
                     .entries
                     .to_vec(),
@@ -430,6 +482,7 @@ mod tests {
         let temp_dir = TempDir::new("test_tasks_from_eval_node").unwrap();
         let path = temp_dir.path();
         let region_id = 1;
+        let region_id2 = 2;
         let snap_index = 5 * LOGS_BATCH;
         let mut builder = StorageBuilder::new(path);
         builder
@@ -440,28 +493,44 @@ mod tests {
             .snapshot(region_id, snap_index);
         // The latest dependency always larger than the last dep by 1.
         let snap_dep = builder.bm.dependency.get() - 1;
+        // Add snapshot only region2.
+        builder.snapshot(region_id2, snap_index);
         let (bm, FilesCache(map)) = builder.build();
         let ls = LocalStorage::new(&path).unwrap();
         let current = bm.current_dir();
 
+        // Check snasphot only region2
+        let logs_node = EvalNode::Logs {
+            region_id: region_id2,
+            start_index: snap_index + 1,
+            end_index: 0,
+        };
+        let mut cache = FilesCache(HashMap::default());
+        assert!(tasks_from_eval_node(&logs_node, current, &ls, &mut cache).is_none());
+
         // Check whether it can convert eval node to tasks correctly.
         let check = |start, end, count| {
             let logs_node = EvalNode::Logs {
-                region_id: 1,
+                region_id,
                 start_index: start,
                 end_index: end,
             };
             let mut cache = FilesCache(HashMap::default());
-            let (mut tasks, mut w) = tasks_from_eval_node(&logs_node, current, &ls, &mut cache);
+            let (mut tasks, mut w) =
+                tasks_from_eval_node(&logs_node, current, &ls, &mut cache).unwrap();
             assert_eq!(map[&region_id], cache.0[&region_id]);
             assert_eq!(tasks.len(), count);
             let mut s = start;
             for i in 0..count {
-                let e = cmp::min(end, s + LOGS_BATCH - 1);
+                let e = if end != 0 {
+                    cmp::min(end, s + LOGS_BATCH - 1)
+                } else {
+                    s + LOGS_BATCH - 1
+                };
                 let es = tasks[i].take_entries();
                 assert!(es.len() <= LOGS_BATCH as _);
                 assert_eq!(
-                    fetch_enties(&ls, current, &map[&region_id], region_id, s, e).unwrap(),
+                    fetch_entries(&ls, current, &map[&region_id], region_id, s, e).unwrap(),
                     es,
                 );
                 s = e + 1;
@@ -478,6 +547,9 @@ mod tests {
             }
         }
 
+        // Special case, end_index = 0, get all raft logs.
+        check(6, 0, 5);
+
         // Check convert event node to task
         let check_event = |region_id, index, e, dep| {
             let mut event = BackupEvent::new();
@@ -487,10 +559,14 @@ mod tests {
             event.set_dependency(dep);
             let snap_node = EvalNode::Event(event);;
             let mut cache = FilesCache(HashMap::default());
-            let (mut tasks, _) = tasks_from_eval_node(&snap_node, current, &ls, &mut cache);
+            let (mut tasks, _) =
+                tasks_from_eval_node(&snap_node, current, &ls, &mut cache).unwrap();
             assert_eq!(tasks.len(), 1);
             if e == BackupEvent_Event::Snapshot {
-                assert_eq!(tasks[0].take_snapshot(), snapshot(region_id, snap_index));
+                assert_eq!(
+                    tasks[0].take_snapshot().meta.1,
+                    snapshot(region_id, snap_index).meta.1
+                );
             } else {
                 assert_eq!(tasks.len(), 1);
                 assert_eq!(

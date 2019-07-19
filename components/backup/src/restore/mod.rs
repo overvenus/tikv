@@ -14,7 +14,7 @@ mod eval;
 mod executor;
 
 pub use eval::{dot, EvalGraph, EvalNode};
-pub use executor::Executor;
+pub use executor::{Data, Executor, Runnable, Task};
 
 pub struct RestoreManager {
     base: PathBuf,
@@ -23,14 +23,14 @@ pub struct RestoreManager {
 
 impl RestoreManager {
     pub fn new(base: PathBuf, storage: Arc<dyn Storage>) -> Result<RestoreManager> {
-        info!("create restore executor");
+        info!("create restore manager");
         Ok(RestoreManager { base, storage })
     }
 
     fn backup_meta(&self) -> Result<BackupMeta> {
         let mut buf = Vec::with_capacity(1024);
         self.storage
-            .read_file(Path::new(crate::BACKUP_META_NAME), &mut buf)
+            .read_file(&self.base.join(crate::BACKUP_META_NAME), &mut buf)
             .unwrap();
         let mut meta = BackupMeta::new();
         meta.merge_from_bytes(&buf).unwrap();
