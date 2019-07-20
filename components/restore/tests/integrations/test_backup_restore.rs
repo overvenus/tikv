@@ -73,8 +73,7 @@ fn test_backup_and_restore_snapshot() {
     let storage = backup_mgr2.storage.clone();
     let restore_mgr = RestoreManager::new(backup_path.into(), storage).unwrap();
     let mut tasks: Vec<_> = restore_mgr.executor().unwrap().tasks().collect();
-    assert_eq!(tasks.len(), 1); // snapshot
-    let (mut tasks, _w) = tasks.remove(0);
+    let (mut tasks, _w) = tasks.remove(0); // snapshot
 
     // Create restore system.
     let mut cfg = Config::new();
@@ -101,25 +100,18 @@ fn test_backup_and_restore_snapshot() {
     // Wait for create region.
     thread::sleep(time::Duration::from_millis(200));
 
-    let learner = msgs[1].get_to_peer().clone();
-    router.send_raft_message(msgs[1].clone()).unwrap();
-    // Wait for apply snapshot.
-    thread::sleep(time::Duration::from_millis(200));
-    // Must send successfully.
-    let mut req = RaftCmdRequest::new();
-    req.mut_header().set_region_id(r1);
-    req.mut_header().set_peer(learner);
-    req.set_status_request(new_region_detail_cmd());
     let (tx, rx) = mpsc::channel();
-    let cmd = RaftCommand::new(
-        req,
-        Callback::Read(Box::new(move |resp| {
-            tx.send(resp).unwrap();
-        })),
-    );
-    router.send_raft_command(cmd).unwrap();
+    router.send(
+        r1,
+        PeerMsg::RestoreMessage(RestoreMessage {
+            msg: msgs[1].clone(),
+            callback: Callback::Read(Box::new(move |resp| {
+                tx.send(resp).unwrap();
+            })),
+        }),
+    ).unwrap();
     let resp = rx.recv_timeout(time::Duration::from_secs(5)).unwrap();
-    assert!(!format!("{:?}", resp).contains("region has not been initialized"));
+    assert!(!resp.response.get_header().has_error(), "{:?}", resp);
 
     system.stop().unwrap();
 }

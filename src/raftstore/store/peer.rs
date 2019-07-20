@@ -151,54 +151,59 @@ impl ReadIndexQueue {
     }
 }
 
-struct RequestSnapshotCmd {
+struct SnapshotCallback {
     epoch: metapb::RegionEpoch,
     start_cb: Option<Callback>,
     end_cb: Callback,
 }
 
-enum RequestSnapshot {
+enum SnapshotHooks {
     None,
-    Pending(RequestSnapshotCmd),
-    Applying(RequestSnapshotCmd),
+    Pending(SnapshotCallback),
+    Applying(SnapshotCallback),
 }
 
-impl RequestSnapshot {
-    fn new() -> RequestSnapshot {
-        RequestSnapshot::None
+impl SnapshotHooks {
+    fn new() -> SnapshotHooks {
+        SnapshotHooks::None
+    }
+
+    fn hook_finish(&mut self, snap_cb: SnapshotCallback) {
+        assert!(self.is_empty());
+        *self = SnapshotHooks::Applying(snap_cb);
     }
 
     fn is_empty(&self) -> bool {
         match self {
-            RequestSnapshot::None => true,
+            SnapshotHooks::None => true,
             _ => false,
         }
     }
 
-    fn step_pending(&mut self, epoch: metapb::RegionEpoch, start_cb: Callback, end_cb: Callback) {
+    fn on_pending(&mut self, epoch: metapb::RegionEpoch, start_cb: Callback, end_cb: Callback) {
         assert!(self.is_empty());
         let start_cb = Some(start_cb);
-        let cmd = RequestSnapshotCmd {
+        let cmd = SnapshotCallback {
             epoch,
             start_cb,
             end_cb,
         };
-        *self = RequestSnapshot::Pending(cmd);
+        *self = SnapshotHooks::Pending(cmd);
     }
 
     fn is_applying(&self) -> bool {
         match self {
-            RequestSnapshot::Applying(_) => true,
+            SnapshotHooks::Applying(_) => true,
             _ => false,
         }
     }
 
-    fn step_applying(&mut self, region: &metapb::Region) {
+    fn on_applying(&mut self, region: &metapb::Region) {
         if self.is_empty() || self.is_applying() {
             return;
         }
-        match mem::replace(self, RequestSnapshot::None) {
-            RequestSnapshot::Pending(mut cmd) => {
+        match mem::replace(self, SnapshotHooks::None) {
+            SnapshotHooks::Pending(mut cmd) => {
                 let start_cb = cmd.start_cb.take().unwrap();
                 let mut resp = RaftCmdResponse::new();
                 if *region.get_region_epoch() != cmd.epoch {
@@ -212,7 +217,7 @@ impl RequestSnapshot {
                 } else {
                     debug!("request snapshot into applying";
                         "epoch" => ?cmd.epoch);
-                    *self = RequestSnapshot::Applying(cmd);
+                    *self = SnapshotHooks::Applying(cmd);
                 }
                 start_cb.invoke_with_response(resp);
             }
@@ -220,9 +225,9 @@ impl RequestSnapshot {
         }
     }
 
-    fn finish_with(&mut self, region: &metapb::Region, mut resp: RaftCmdResponse) {
-        match mem::replace(self, RequestSnapshot::None) {
-            RequestSnapshot::Pending(cmd) | RequestSnapshot::Applying(cmd) => {
+    fn on_finish(&mut self, region: &metapb::Region, mut resp: RaftCmdResponse) {
+        match mem::replace(self, SnapshotHooks::None) {
+            SnapshotHooks::Pending(cmd) | SnapshotHooks::Applying(cmd) => {
                 if *region.get_region_epoch() != cmd.epoch && !resp.get_header().has_error() {
                     cmd_resp::bind_error(
                         &mut resp,
@@ -231,7 +236,7 @@ impl RequestSnapshot {
                 }
                 cmd.end_cb.invoke_with_response(resp);
             }
-            RequestSnapshot::None => (),
+            SnapshotHooks::None => (),
         }
     }
 }
@@ -373,7 +378,8 @@ pub struct Peer {
     leader_lease: Lease,
     pending_reads: ReadIndexQueue,
     /// Pending request snapshot cmds.
-    pending_request_snapshot: RequestSnapshot,
+    // TODO(backup): move it to coprocessor.
+    snapshot_hooks: SnapshotHooks,
 
     /// If it fails to send messages to leader.
     pub leader_unreachable: bool,
@@ -488,7 +494,7 @@ impl Peer {
             pending_remove: false,
             pending_merge_state: None,
             pending_request_snapshot_count: Arc::new(AtomicUsize::new(0)),
-            pending_request_snapshot: RequestSnapshot::new(),
+            snapshot_hooks: SnapshotHooks::new(),
             last_committed_prepare_merge_idx: 0,
             leader_missing_time: Some(Instant::now()),
             tag,
@@ -1022,7 +1028,7 @@ impl Peer {
     fn on_role_changed<T, C>(&mut self, ctx: &mut PollContext<T, C>, ready: &Ready) {
         // Update leader lease when the Raft state changes.
         if let Some(ref ss) = ready.ss {
-            // TODO(backup): should we clean pending_request_snapshot?
+            // TODO(backup): should we clean snapshot_hooks?
             match ss.raft_state {
                 StateRole::Leader => {
                     // The local read can only be performed after a new leader has applied
@@ -1140,7 +1146,7 @@ impl Peer {
             // The snapshot has applied.
             let region = self.raft_group.get_store().region();
             let resp = RaftCmdResponse::new();
-            self.pending_request_snapshot.finish_with(region, resp);
+            self.snapshot_hooks.on_finish(region, resp);
         }
 
         if !self.pending_messages.is_empty() {
@@ -1292,7 +1298,7 @@ impl Peer {
         }
 
         if let Some(res) = apply_snap_result.as_ref() {
-            self.pending_request_snapshot.step_applying(&res.region);
+            self.snapshot_hooks.on_applying(&res.region);
             self.activate(ctx);
             let mut meta = ctx.store_meta.lock().unwrap();
             meta.readers
@@ -1363,7 +1369,7 @@ impl Peer {
                             Error::Other(box_err!("{} is merging", self.tag)),
                             self.term(),
                         );
-                        self.pending_request_snapshot.finish_with(region, resp);
+                        self.snapshot_hooks.on_finish(region, resp);
                     }
                 }
             }
@@ -2325,9 +2331,19 @@ impl Peer {
             let resp = cmd_resp::message_error(e);
             start_cb.invoke_with_response(resp);
         } else {
-            self.pending_request_snapshot
-                .step_pending(region_epoch, start_cb, end_cb);
+            self.snapshot_hooks
+                .on_pending(region_epoch, start_cb, end_cb);
         }
+    }
+
+    /// Call the callback when a snapshot has been applied.
+    pub fn hook_snasphot_finish(&mut self, epoch: metapb::RegionEpoch, cb: Callback) {
+        let snap_cb = SnapshotCallback {
+            epoch,
+            start_cb: None,
+            end_cb: cb,
+        };
+        self.snapshot_hooks.hook_finish(snap_cb);
     }
 
     pub fn term(&self) -> u64 {

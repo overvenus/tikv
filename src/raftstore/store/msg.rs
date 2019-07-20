@@ -268,6 +268,14 @@ impl fmt::Debug for CasualMessage {
     }
 }
 
+/// Messages used as restore data from backup files
+// TODO: Remove this message by notifying a caller by coprocessor events.
+#[derive(Debug)]
+pub struct RestoreMessage {
+    pub msg: RaftMessage,
+    pub callback: Callback,
+}
+
 /// Raft command is the command that is expected to be proposed by the
 /// leader of the target raft group.
 #[derive(Debug)]
@@ -312,6 +320,8 @@ pub enum PeerMsg {
     Noop,
     /// Message that is not important and can be dropped occasionally.
     CasualMessage(CasualMessage),
+    /// Restore messages.
+    RestoreMessage(RestoreMessage),
     /// Ask region to report a heartbeat to PD.
     HeartbeatPd,
 }
@@ -331,6 +341,7 @@ impl fmt::Debug for PeerMsg {
             PeerMsg::Start => write!(fmt, "Startup"),
             PeerMsg::Noop => write!(fmt, "Noop"),
             PeerMsg::CasualMessage(msg) => write!(fmt, "CasualMessage {:?}", msg),
+            PeerMsg::RestoreMessage(msg) => write!(fmt, "RestoreMessage {:?}", msg),
             PeerMsg::HeartbeatPd => write!(fmt, "HeartbeatPd"),
         }
     }
