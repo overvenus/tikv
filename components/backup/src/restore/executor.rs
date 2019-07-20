@@ -45,6 +45,7 @@ impl FilesCache {
     }
 }
 
+#[derive(Debug)]
 pub struct Wait {
     rx: mpsc::Receiver<()>,
     count: usize,
@@ -90,11 +91,13 @@ impl std::fmt::Debug for SnapFiles {
     }
 }
 
+#[derive(Debug)]
 pub enum Data {
     Logs(Vec<Entry>),
     Snapshot(SnapFiles),
 }
 
+#[derive(Debug)]
 pub struct Task {
     pub region_id: u64,
     pub data: Data,

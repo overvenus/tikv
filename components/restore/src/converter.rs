@@ -98,6 +98,8 @@ impl Converter {
                 self.snapshot_to_messages(s.meta.1.clone())
             }
             Data::Logs(es) => {
+                // TODO: how to choose a correct peer as leader?
+                //       peer can be remove.
                 assert_ne!(0, region.get_id());
                 vec![]
             }
