@@ -65,7 +65,7 @@ pub trait AdminObserver: Coprocessor {
     fn pre_apply_admin(&self, _: &mut ObserverContext<'_>, _: &AdminRequest) {}
 
     /// Hook to call after applying admin request.
-    fn post_apply_admin(&self, _: &mut ObserverContext<'_>, _: &mut AdminResponse) {}
+    fn post_apply_admin(&self, _: &mut ObserverContext<'_>, _: &mut AdminResponse, _: u64) {}
 }
 
 pub trait QueryObserver: Coprocessor {
@@ -84,7 +84,13 @@ pub trait QueryObserver: Coprocessor {
     fn pre_apply_query(&self, _: &mut ObserverContext<'_>, _: &[Request]) {}
 
     /// Hook to call after applying write request.
-    fn post_apply_query(&self, _: &mut ObserverContext<'_>, _: &mut RepeatedField<Response>) {}
+    fn post_apply_query(
+        &self,
+        _: &mut ObserverContext<'_>,
+        _: &mut RepeatedField<Response>,
+        _: u64,
+    ) {
+    }
 }
 
 /// SplitChecker is invoked during a split check scan, and decides to use
