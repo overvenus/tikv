@@ -161,6 +161,7 @@ default-features = false
 "log:0.4.6" = { git = "https://github.com/busyjay/log", branch = "revert-to-static" }
 # "https://github.com/pingcap/kvproto.git#kvproto:0.0.1" = { path = "/home/stn/kvproto" }
 "raft:0.4.3" = { git = "https://github.com/pingcap/raft-rs/", branch = "0.4.x" }
+# "raft:0.4.3" = { path = "/home/stn/raft-rs" }
 
 [dev-dependencies]
 panic_hook = { path = "components/panic_hook" }

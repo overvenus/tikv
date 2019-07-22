@@ -26,7 +26,7 @@ fn test_create_peer() {
     cfg.raftdb_path = engines.raft.path().to_owned();
 
     let (region, learner_store) = fixture_region();
-    let cvrt = Converter::new(learner_store, snap_mgr.clone());
+    let mut cvrt = Converter::new(learner_store, snap_mgr.clone());
     let mut system = RestoreSystem::new(
         1,
         learner_store,
@@ -45,7 +45,8 @@ fn test_create_peer() {
     snap.set_data(snap_data.write_to_bytes().unwrap());
     snap.mut_metadata().set_index(6);
     snap.mut_metadata().set_term(6);
-    let msgs = cvrt.snapshot_to_messages(snap);
+    cvrt.update_region(region.clone());
+    let msgs = cvrt.snapshot_to_messages(&region, snap);
     let learner = msgs[0].get_to_peer().clone();
     router.send_raft_message(msgs[0].clone()).unwrap();
     thread::sleep(time::Duration::from_millis(200));

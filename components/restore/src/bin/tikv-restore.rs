@@ -339,9 +339,16 @@ fn run_raft_server(cfg: &TiKvConfig, store_id: u64) {
         );
     }
 
-    restore_system
-        .stop()
-        .unwrap_or_else(|s| fatal!("failed to stop restore system: {}", s));
+    let apply_notify = restore_system
+        .start()
+        .unwrap_or_else(|s| fatal!("failed to start restore system: {}", s));
+
+    // let runner = worker::Runner {
+    //     router,
+    //     apply_notify,
+    // };
+    // let storage = backup::LocalStorage::new(base: &Path)
+    // backup::RestoreManager::new(base: &Path, Arc::new(storage));
 
     let server_cfg = cfg.server.clone();
     let mut status_enabled = cfg.metric.address.is_empty() && !server_cfg.status_addr.is_empty();

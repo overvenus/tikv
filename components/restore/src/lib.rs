@@ -22,6 +22,7 @@ extern crate slog_global;
 
 mod converter;
 mod mock;
+mod observer;
 mod system;
 mod worker;
 

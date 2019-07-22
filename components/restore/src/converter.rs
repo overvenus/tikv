@@ -13,9 +13,17 @@ use raft::eraftpb::*;
 
 use tikv::raftstore::store::{SnapEntry, SnapKey, SnapManager};
 
+#[derive(Default)]
+pub struct RegionPrgress {
+    pub region: Region,
+    pub last_index: u64,
+    pub last_term: u64,
+}
+
 pub struct Converter {
     store_id: u64,
     snap_base: PathBuf,
+    progress: HashMap<u64, RegionPrgress>,
 }
 
 impl Converter {
@@ -23,25 +31,45 @@ impl Converter {
         Converter {
             store_id,
             snap_base: snap_mgr.base_path(),
+            progress: HashMap::new(),
         }
     }
 
-    pub fn snapshot_to_messages(&self, mut snap: Snapshot) -> Vec<RaftMessage> {
-        let mut snap_data = RaftSnapshotData::new();
-        snap_data.merge_from_bytes(snap.get_data()).unwrap();
-        let region = snap_data.get_region();
-        let epoch = snap_data.get_region().get_region_epoch().to_owned();
-        let (from, to) = find_leader_and_learner(self.store_id, region);
+    pub fn update_region(&mut self, region: Region) {
+        let region_id = region.get_id();
+        self.progress.entry(region_id).or_default().region = region;
+    }
 
+    pub fn update_last_entry(&mut self, region_id: u64, index: u64, term: u64) {
+        let mut progress = self.progress.get_mut(&region_id).unwrap();
+        progress.last_index = index;
+        progress.last_term = term;
+    }
+
+    pub fn progress(&self, region_id: u64) -> &RegionPrgress {
+        &self.progress[&region_id]
+    }
+
+    fn new_raft_message(&self, region_id: u64) -> RaftMessage {
+        let progress = &self.progress[&region_id];
+        let region = &progress.region;
+        let epoch = region.get_region_epoch().to_owned();
+        let (leader, learner) = find_leader_and_learner(self.store_id, region);
+        let mut msg = RaftMessage::new();
+        msg.set_region_id(region_id);
+        msg.set_to_peer(learner);
+        msg.set_from_peer(leader);
+        msg.set_region_epoch(epoch);
+        msg
+    }
+
+    pub fn snapshot_to_messages(&self, region: &Region, mut snap: Snapshot) -> Vec<RaftMessage> {
         // The first msg creates a peer.
-        let mut first_msg = RaftMessage::new();
-        first_msg.set_region_id(region.get_id());
-        first_msg.set_to_peer(to);
-        first_msg.set_from_peer(from);
+        let region_id = region.get_id();
+        let mut first_msg = self.new_raft_message(region_id);
         first_msg
             .mut_message()
             .set_msg_type(MessageType::MsgHeartbeat);
-        first_msg.set_region_epoch(epoch);
 
         let mut snap_msg = first_msg.clone();
         fill_snapshot_conf(&mut snap, region);
@@ -52,33 +80,21 @@ impl Converter {
         vec![first_msg, snap_msg]
     }
 
-    pub fn entries_to_messages(&self, mut snap: Snapshot) -> Vec<RaftMessage> {
-        let mut snap_data = RaftSnapshotData::new();
-        snap_data.merge_from_bytes(snap.get_data()).unwrap();
-        let region = snap_data.get_region();
-        let epoch = snap_data.get_region().get_region_epoch().to_owned();
-        let (from, to) = find_leader_and_learner(self.store_id, region);
-
-        // The first msg creates a peer.
-        let mut first_msg = RaftMessage::new();
-        first_msg.set_region_id(region.get_id());
-        first_msg.set_to_peer(to);
-        first_msg.set_from_peer(from);
-        first_msg
+    pub fn entries_to_messages(&self, region_id: u64, es: Vec<Entry>) -> Vec<RaftMessage> {
+        let progress = &self.progress[&region_id];
+        let commit_idx = es.last().unwrap().get_index();
+        let mut commit_msg = self.new_raft_message(region_id);
+        commit_msg
             .mut_message()
-            .set_msg_type(MessageType::MsgHeartbeat);
-        first_msg.set_region_epoch(epoch);
-
-        let mut snap_msg = first_msg.clone();
-        fill_snapshot_conf(&mut snap, region);
-        snap_msg
-            .mut_message()
-            .set_msg_type(MessageType::MsgSnapshot);
-        snap_msg.mut_message().set_snapshot(snap);
-        vec![first_msg, snap_msg]
+            .set_msg_type(MessageType::MsgAppend);
+        commit_msg.mut_message().set_commit(commit_idx);
+        commit_msg.mut_message().set_entries(es.into());
+        commit_msg.mut_message().set_log_term(progress.last_term);
+        commit_msg.mut_message().set_index(progress.last_index);
+        vec![commit_msg]
     }
 
-    pub fn convert(&self, region: Region, data: Data) -> Vec<RaftMessage> {
+    pub fn convert(&mut self, region_id: u64, data: Data) -> Vec<RaftMessage> {
         match data {
             Data::Snapshot(s) => {
                 // Write cf files
@@ -95,13 +111,21 @@ impl Converter {
                 let mut snap_data = RaftSnapshotData::new();
                 snap_data.merge_from_bytes(s.meta.1.get_data()).unwrap();
                 fs::write(p, snap_data.get_meta().write_to_bytes().unwrap()).unwrap();
-                self.snapshot_to_messages(s.meta.1.clone())
+                let region = snap_data.get_region();
+                self.update_region(region.clone());
+                let index = s.meta.1.get_metadata().get_index();
+                let term = s.meta.1.get_metadata().get_term();
+                let msgs = self.snapshot_to_messages(region, s.meta.1.clone());
+                self.update_last_entry(region.get_id(), index, term);
+                msgs
             }
             Data::Logs(es) => {
-                // TODO: how to choose a correct peer as leader?
-                //       peer can be remove.
-                assert_ne!(0, region.get_id());
-                vec![]
+                assert_ne!(0, region_id);
+                let index = es.last().unwrap().get_index();
+                let term = es.last().unwrap().get_term();
+                let msgs = self.entries_to_messages(region_id, es);
+                self.update_last_entry(region_id, index, term);
+                msgs
             }
         }
     }
@@ -139,17 +163,7 @@ fn find_leader_and_learner(learner_store: u64, region: &Region) -> (Peer, Peer) 
 mod tests {
     use super::*;
 
-    use tikv::raftstore::store::util;
-
-    fn fixture_region() -> (Region, u64) {
-        let mut region = Region::new();
-        region.mut_region_epoch().set_version(1);
-        region.mut_region_epoch().set_conf_ver(1);
-        region.mut_peers().push(util::new_peer(1, 2));
-        region.mut_peers().push(util::new_peer(2, 3));
-        region.mut_peers().push(util::new_learner_peer(3, 4));
-        (region, 3)
-    }
+    use crate::mock::fixture_region;
 
     #[test]
     fn test_find_leader_and_learner() {
