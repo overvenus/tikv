@@ -24,9 +24,10 @@ fn test_create_peer() {
     let (router, raft_system) = create_raft_batch_system(&cfg);
     let (engines, snap_mgr) = create_engines_and_snap_mgr(router.clone());
     cfg.raftdb_path = engines.raft.path().to_owned();
+    let snap_path = snap_mgr.base_path();
 
     let (region, learner_store) = fixture_region();
-    let mut cvrt = Converter::new(learner_store, snap_mgr.clone());
+    let mut cvrt = Converter::new(learner_store, &snap_path);
     let mut system = RestoreSystem::new(
         1,
         learner_store,

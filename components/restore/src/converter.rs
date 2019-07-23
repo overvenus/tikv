@@ -27,10 +27,10 @@ pub struct Converter {
 }
 
 impl Converter {
-    pub fn new(store_id: u64, snap_mgr: SnapManager) -> Converter {
+    pub fn new(store_id: u64, snap_path: &Path) -> Converter {
         Converter {
             store_id,
-            snap_base: snap_mgr.base_path(),
+            snap_base: snap_path.to_owned(),
             progress: HashMap::new(),
         }
     }

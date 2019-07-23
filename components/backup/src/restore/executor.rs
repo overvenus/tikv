@@ -109,6 +109,13 @@ impl Task {
         self.notify.send(()).unwrap();
     }
 
+    pub fn is_snapshot(&self) -> bool {
+        match self.data {
+            Data::Snapshot(_) => true,
+            Data::Logs(_) => false,
+        }
+    }
+
     pub fn take_entries(&mut self) -> Vec<Entry> {
         match self.data {
             Data::Logs(ref mut es) => mem::replace(es, vec![]),

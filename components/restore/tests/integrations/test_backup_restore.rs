@@ -87,7 +87,8 @@ fn test_backup_and_restore_snapshot() {
     let (router, raft_system) = create_raft_batch_system(&cfg);
     let (engines, snap_mgr) = create_engines_and_snap_mgr(router.clone());
     cfg.raftdb_path = engines.raft.path().to_owned();
-    let mut cvrt = Converter::new(2 /* learner_store */, snap_mgr.clone());
+    let snap_path = snap_mgr.base_path();
+    let mut cvrt = Converter::new(2 /* learner_store */, &snap_path);
     let mut system = RestoreSystem::new(
         1,
         2, /* learner_store */

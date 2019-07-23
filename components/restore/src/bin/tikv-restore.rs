@@ -167,6 +167,12 @@ fn main() {
                 .value_name("ID")
                 .help("Sets Restored Store ID"),
         )
+        .arg(
+            Arg::with_name("back_path")
+                .long("back_path")
+                .value_name("PATH")
+                .help("Sets Backup Files Path"),
+        )
         .get_matches();
 
     let mut config = matches
@@ -190,11 +196,14 @@ fn main() {
         .unwrap_or_else(|e| {
             fatal!("invalid store id: {}", e);
         });
+    let backup_path = matches.value_of("backup_path").unwrap_or_else(|| {
+        fatal!("empty backup path",);
+    });
 
-    run_tikv_restore(config, store_id);
+    run_tikv_restore(config, store_id, backup_path);
 }
 
-fn run_tikv_restore(mut config: TiKvConfig, store_id: u64) {
+fn run_tikv_restore(mut config: TiKvConfig, store_id: u64, path: &str) {
     if let Err(e) = check_and_persist_critical_config(&config) {
         fatal!("critical config check failed: {}", e);
     }
@@ -222,10 +231,10 @@ fn run_tikv_restore(mut config: TiKvConfig, store_id: u64) {
     server::pre_start(&config);
 
     let _m = Monitor::default();
-    run_raft_server(&config, store_id);
+    run_raft_server(&config, store_id, path);
 }
 
-fn run_raft_server(cfg: &TiKvConfig, store_id: u64) {
+fn run_raft_server(cfg: &TiKvConfig, store_id: u64, path: &str) {
     let store_path = Path::new(&cfg.storage.data_dir);
     let lock_path = store_path.join(Path::new("LOCK"));
     let db_path = store_path.join(Path::new(DEFAULT_ROCKSDB_SUB_DIR));
@@ -316,7 +325,7 @@ fn run_raft_server(cfg: &TiKvConfig, store_id: u64) {
         store_id,
         cfg.raft_store.clone(),
         engines.clone(),
-        router,
+        router.clone(),
         system,
         snap_mgr,
     );
@@ -343,12 +352,16 @@ fn run_raft_server(cfg: &TiKvConfig, store_id: u64) {
         .start()
         .unwrap_or_else(|s| fatal!("failed to start restore system: {}", s));
 
-    // let runner = worker::Runner {
-    //     router,
-    //     apply_notify,
-    // };
-    // let storage = backup::LocalStorage::new(base: &Path)
-    // backup::RestoreManager::new(base: &Path, Arc::new(storage));
+    let p = Path::new(path);
+    let runner = restore::Runner::new(router, apply_notify, store_id, &snap_path);
+    let storage = backup::LocalStorage::new(p)
+        .unwrap_or_else(|e| fatal!("failed to create local storage: {}", e));
+    let manager = backup::RestoreManager::new(p.to_owned(), Arc::new(storage))
+        .unwrap_or_else(|e| fatal!("failed to create restore manager: {}", e));
+    let executor = manager
+        .executor()
+        .unwrap_or_else(|e| fatal!("failed to create restore exector: {}", e));
+    executor.execute(runner);
 
     let server_cfg = cfg.server.clone();
     let mut status_enabled = cfg.metric.address.is_empty() && !server_cfg.status_addr.is_empty();
