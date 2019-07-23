@@ -6,7 +6,6 @@ use std::mem;
 use std::ops::Bound::{Included, Unbounded};
 use std::path::*;
 use std::sync::*;
-use std::time::*;
 
 use kvproto::backup::*;
 use protobuf::Message;
@@ -14,7 +13,7 @@ use raft::eraftpb::Entry;
 use raft::eraftpb::Snapshot;
 
 use super::eval::*;
-use crate::{log_path, region_path, snapshot_dir, Error, Result, Storage};
+use crate::{log_path, region_path, snapshot_dir, Result, Storage};
 
 const LOGS_BATCH: u64 = 100;
 
@@ -42,32 +41,6 @@ impl FilesCache {
             }
             map
         })
-    }
-}
-
-#[derive(Debug)]
-pub struct Wait {
-    rx: mpsc::Receiver<()>,
-    count: usize,
-}
-
-impl Wait {
-    fn new(count: usize) -> (mpsc::Sender<()>, Wait) {
-        assert!(count > 0);
-        let (tx, rx) = mpsc::channel();
-        (tx, Wait { count, rx })
-    }
-
-    fn wait_timeout(&mut self, t: Duration) -> Result<bool> {
-        while self.count > 0 {
-            match self.rx.recv_timeout(t) {
-                Ok(_) => (),
-                Err(mpsc::RecvTimeoutError::Timeout) => return Ok(false),
-                Err(e) => return Err(Error::Other(e.into())),
-            }
-            self.count -= 1;
-        }
-        Ok(true)
     }
 }
 
@@ -101,14 +74,9 @@ pub enum Data {
 pub struct Task {
     pub region_id: u64,
     pub data: Data,
-    notify: mpsc::Sender<()>,
 }
 
 impl Task {
-    pub fn done(&self) {
-        self.notify.send(()).unwrap();
-    }
-
     pub fn is_snapshot(&self) -> bool {
         match self.data {
             Data::Snapshot(_) => true,
@@ -136,7 +104,7 @@ fn tasks_from_eval_node(
     base: &Path,
     storage: &dyn Storage,
     files_cache: &mut FilesCache,
-) -> Option<(Vec<Task>, Wait)> {
+) -> Option<Vec<Task>> {
     let read_snap = |region_id, index, dependency| {
         let path = snapshot_dir(&base, region_id, index, dependency);
         let mut meta = (String::new(), Snapshot::new());
@@ -180,32 +148,23 @@ fn tasks_from_eval_node(
             let region_id = event.get_region_id();
             let index = event.get_index();
             let dependency = event.get_dependency();
-            let (notify, wait) = Wait::new(1);
 
             match event.get_event() {
                 BackupEvent_Event::Snapshot => {
                     let snap = read_snap(region_id, index, dependency);
-                    Some((
-                        vec![Task {
-                            region_id,
-                            notify,
-                            data: Data::Snapshot(snap),
-                        }],
-                        wait,
-                    ))
+                    Some(vec![Task {
+                        region_id,
+                        data: Data::Snapshot(snap),
+                    }])
                 }
                 _ => {
                     let files = files_cache.cache(base, storage, region_id);
                     let entries =
                         fetch_entries(storage, base, files, region_id, index, index).unwrap();
-                    Some((
-                        vec![Task {
-                            region_id,
-                            notify,
-                            data: Data::Logs(entries),
-                        }],
-                        wait,
-                    ))
+                    Some(vec![Task {
+                        region_id,
+                        data: Data::Logs(entries),
+                    }])
                 }
             }
         }
@@ -232,7 +191,6 @@ fn tasks_from_eval_node(
             let quotient = total / LOGS_BATCH;
             let remainder = total % LOGS_BATCH;
             let count = quotient + if remainder > 0 { 1 } else { 0 };
-            let (notify, wait) = Wait::new(count as _);
             let mut tasks = Vec::with_capacity(count as _);
             let mut s = start_index;
             for _ in 0..quotient {
@@ -240,7 +198,6 @@ fn tasks_from_eval_node(
                     fetch_entries(storage, base, files, region_id, s, s + LOGS_BATCH - 1).unwrap();
                 tasks.push(Task {
                     region_id,
-                    notify: notify.clone(),
                     data: Data::Logs(entries),
                 });
                 s += LOGS_BATCH;
@@ -251,11 +208,10 @@ fn tasks_from_eval_node(
                         .unwrap();
                 tasks.push(Task {
                     region_id,
-                    notify: notify.clone(),
                     data: Data::Logs(entries),
                 });
             }
-            Some((tasks, wait))
+            Some(tasks)
         }
     }
 }
@@ -336,7 +292,7 @@ impl Executor {
         }
     }
 
-    pub fn tasks(self) -> impl Iterator<Item = (Vec<Task>, Wait)> {
+    pub fn tasks(self) -> impl Iterator<Item = Vec<Task>> {
         let Executor {
             storage,
             graph,
@@ -352,18 +308,9 @@ impl Executor {
     }
 
     pub fn execute<R: Runnable>(self, mut runnable: R) {
-        for (tasks, mut w) in self.tasks() {
-            let len = tasks.len();
+        for tasks in self.tasks() {
             for t in tasks {
                 runnable.run(t);
-            }
-            loop {
-                let done = w.wait_timeout(Duration::from_secs(1)).unwrap();
-                if done {
-                    break;
-                } else {
-                    warn!("execute task too long"; "tasks" => len);
-                }
             }
         }
     }
@@ -589,21 +536,5 @@ mod tests {
         // Check convert event node to task
         check_event(region_id, snap_index, BackupEvent_Event::Snapshot, snap_dep);
         check_event(region_id, 6, BackupEvent_Event::Split, 0);
-    }
-
-    #[test]
-    fn test_wait() {
-        for count in 1..20 {
-            let (sender, mut w) = Wait::new(count as _);
-            for _ in 0..count {
-                assert!(!w.wait_timeout(Duration::from_millis(1)).unwrap());
-                sender.send(()).unwrap();
-            }
-            assert!(w.wait_timeout(Duration::from_millis(count)).unwrap());
-        }
-
-        // Drop sender should wait an error.
-        let (_, mut w) = Wait::new(1);
-        w.wait_timeout(Duration::from_millis(100)).unwrap_err();
     }
 }

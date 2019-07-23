@@ -8,7 +8,6 @@
     slog_trace,
     slog_debug,
     slog_info,
-    slog_warn,
     slog_error,
     slog_record,
     slog_b,

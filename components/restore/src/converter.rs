@@ -40,7 +40,7 @@ impl Converter {
         self.progress.entry(region_id).or_default().region = region;
     }
 
-    pub fn update_last_entry(&mut self, region_id: u64, index: u64, term: u64) {
+    fn update_last_entry(&mut self, region_id: u64, index: u64, term: u64) {
         let mut progress = self.progress.get_mut(&region_id).unwrap();
         progress.last_index = index;
         progress.last_term = term;

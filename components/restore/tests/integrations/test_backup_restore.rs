@@ -61,9 +61,10 @@ fn test_backup_and_restore_snapshot() {
     );
 
     // Write some raft log.
-    cluster.must_put_cf(CF_DEFAULT, key, value);
-    cluster.must_put_cf(CF_DEFAULT, key, value);
-    cluster.must_put_cf(CF_DEFAULT, key, value);
+    let (key2, value2) = (b"kkkk_kkkk2", b"v2");
+    cluster.must_put_cf(CF_DEFAULT, key2, value2);
+    cluster.must_put_cf(CF_WRITE, key2, value2);
+    cluster.must_put_cf(CF_LOCK, key2, value2);
 
     // Finish backup.
     // TODO: remove sleep, we should reguard backup progress
@@ -79,8 +80,6 @@ fn test_backup_and_restore_snapshot() {
     let backup_path = format!("{}", dep);
     let storage = backup_mgr2.storage.clone();
     let restore_mgr = RestoreManager::new(backup_path.into(), storage).unwrap();
-    let mut tasks: Vec<_> = restore_mgr.executor().unwrap().tasks().collect();
-    assert!(tasks.len() > 1, "{:?}", tasks); // snapshot + raft logs
 
     // Create restore system.
     let mut cfg = Config::new();
@@ -88,12 +87,11 @@ fn test_backup_and_restore_snapshot() {
     let (engines, snap_mgr) = create_engines_and_snap_mgr(router.clone());
     cfg.raftdb_path = engines.raft.path().to_owned();
     let snap_path = snap_mgr.base_path();
-    let mut cvrt = Converter::new(2 /* learner_store */, &snap_path);
     let mut system = RestoreSystem::new(
         1,
         2, /* learner_store */
         cfg,
-        engines,
+        engines.clone(),
         router.clone(),
         raft_system,
         snap_mgr,
@@ -101,51 +99,13 @@ fn test_backup_and_restore_snapshot() {
     system.bootstrap().unwrap();
     let apply_rx = system.start().unwrap();
 
-    let (mut snap_msgs, _) = tasks.remove(0);
-    let msgs = cvrt.convert(0, snap_msgs.remove(0).data);
-    // Create region.
-    router.send_raft_message(msgs[0].clone()).unwrap();
-    // Wait for create region.
-    thread::sleep(time::Duration::from_millis(200));
+    let runner = Runner::new(router.clone(), apply_rx, 2, &snap_path);
+    restore_mgr.executor().unwrap().execute(runner);
 
-    let (tx, rx) = mpsc::channel();
-    router
-        .send(
-            r1,
-            PeerMsg::RestoreMessage(RestoreMessage {
-                msg: msgs[1].clone(), // The actuall snapshot message.
-                callback: Callback::Read(Box::new(move |resp| {
-                    tx.send(resp).unwrap();
-                })),
-            }),
-        )
-        .unwrap();
-    let resp = rx.recv_timeout(time::Duration::from_secs(5)).unwrap();
-    assert!(!resp.response.get_header().has_error(), "{:?}", resp);
-
-    let must_apply = |index| {
-        let start = Instant::now();
-        loop {
-            let (apply_index, _) = apply_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-            if apply_index >= index {
-                break;
-            }
-            if start.elapsed() >= Duration::from_secs(5) {
-                panic!("apply too long");
-            }
-        }
-    };
-    // Restore raft logs.
-    for (task, _) in tasks {
-        for t in task {
-            assert_eq!(r1, t.region_id);
-            let msgs = cvrt.convert(r1, t.data);
-            for m in msgs {
-                router.send(r1, PeerMsg::RaftMessage(m)).unwrap();
-            }
-            let pr = cvrt.progress(r1);
-            must_apply(pr.last_index);
-        }
+    for cf in &[CF_DEFAULT, CF_LOCK, CF_WRITE] {
+        let handle = engines.kv.cf_handle(cf).unwrap();
+        assert_eq!(engines.kv.get_cf(handle, &keys::data_key(key)).unwrap().unwrap(), value);
+        assert_eq!(engines.kv.get_cf(handle,&keys::data_key(key2)).unwrap().unwrap(), value2);
     }
 
     system.stop().unwrap();
