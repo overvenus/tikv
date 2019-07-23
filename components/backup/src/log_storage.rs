@@ -13,7 +13,7 @@ use std::io::{Error as IoError, ErrorKind, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::u64;
 
 #[cfg(target_os = "linux")]
@@ -32,7 +32,7 @@ const FILE_NAME_LEN: usize = FILE_NUM_LEN + LOG_SUFFIX_LEN;
 // pub const FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
 // pub const VERSION: &[u8] = b"v1.0.0";
 pub const DEFAULT_FILE_CAPACITY: usize = 512 * 1024 * 1024;
-pub const MAX_WRITE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
+// pub const MAX_WRITE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
 const MAGIC_STR: &[u8] = b"haha";
 
@@ -55,10 +55,10 @@ impl FileMetaIndex {
         return meta;
     }
 
-    pub fn create(fd: libc::c_int, active_prefix: u64) -> FileMetaIndex {
+    pub fn create(fd: libc::c_int, file_name: String) -> FileMetaIndex {
         FileMetaIndex {
             fd,
-            file_name: generate_file_name(active_prefix),
+            file_name,
             size: 0,
             meta: HashMap::new(),
         }
@@ -218,6 +218,7 @@ pub struct LogManager {
     pub all_files: Vec<FileMetaIndex>,
     pub region_indexes: HashMap<u64, RegionMeta>,
     dir: PathBuf,
+    begin_write: std::time::Instant,
     pub write_buffer: Option<Vec<u8>>,
     pub sync_buffer: Option<Vec<u8>>,
 }
@@ -241,6 +242,7 @@ impl LogManager {
             region_indexes,
             write_buffer: Some(Vec::default()),
             sync_buffer: Some(Vec::default()),
+            begin_write: Instant::now(),
         }
     }
 
@@ -267,8 +269,9 @@ impl LogManager {
             let file_meta = FileMetaIndex::read_meta(fd, &file_path, mode)?;
             all_files.push(file_meta);
         }
-        let new_fd = new_log_file(path.to_path_buf(), active_prefix);
-        let active_file = FileMetaIndex::create(new_fd, active_prefix);
+        let file_name = generate_file_name(active_prefix);
+        let new_fd = new_log_file(path.to_path_buf(), file_name.clone());
+        let active_file = FileMetaIndex::create(new_fd, file_name);
         Ok(LogManager::new(
             active_file,
             active_log_capacity,
@@ -277,26 +280,46 @@ impl LogManager {
         ))
     }
 
-    pub fn dump(&mut self) {
-        let write_buffer = self.write_buffer.as_mut().unwrap();
-        if !write_buffer.is_empty() {
-            write(self.active_file.fd, write_buffer);
-            self.active_file.size += write_buffer.len();
-            write_buffer.clear();
-        }
-        let prefix = extract_file_num(self.active_file.file_name.as_str()).unwrap() + 1;
+    pub fn dump_meta(&mut self) {
+        let mut write_buffer = self.write_buffer.as_mut().unwrap();
+        self.active_file.size += write_buffer.len();
+        let write_cost = self.begin_write.elapsed();
+        info!("log file write cost time (second)"; "file" => self.active_file.file_name.clone(), "time" => write_cost.as_millis() as u64);
+        let prefix = extract_file_num(self.active_file.file_name.as_str()).unwrap();
+        let file_name = generate_file_name(prefix + 1);
         let mut meta = self.active_file.to_file_meta();
         meta.content_size = self.active_file.size as u64;
-        write_file_meta(self.active_file.fd, meta);
-        let new_fd = new_log_file(self.dir.clone(), prefix);
-        let new_file = FileMetaIndex::create(new_fd, prefix);
+        write_buffer.extend_from_slice(MAGIC_STR);
+        meta.write_to_vec(&mut write_buffer).unwrap();
+        let buf = serialize(meta.compute_size());
+        write_buffer.extend_from_slice(buf.as_ref());
+        write_buffer.extend_from_slice(MAGIC_STR);
+
+        let write_cost = self.begin_write.elapsed();
+        let new_file = FileMetaIndex::create(-1, file_name);
         let old_file = std::mem::replace(&mut self.active_file, new_file);
+        self.begin_write = Instant::now();
         self.all_files.push(old_file);
     }
 
-    pub fn write_into_buffer(&mut self, batch: &mut EntryBatch) -> bool {
+    fn dump(&mut self) {
+        let fd = self.active_file.fd;
+        self.dump_meta();
         let mut write_buffer = self.write_buffer.as_mut().unwrap();
-        if write_buffer.len() > MAX_WRITE_BUFFER_SIZE {
+        write(fd, write_buffer);
+        sync(fd);
+        write_buffer.clear();
+        let new_fd = new_log_file(self.dir.clone(), self.active_file.file_name.clone());
+        self.active_file.fd = new_fd;
+    }
+
+
+    pub fn write_into_buffer(&mut self, batch: &mut EntryBatch) -> bool {
+        if batch.entries.is_empty() {
+            return true;
+        }
+        let mut write_buffer = self.write_buffer.as_mut().unwrap();
+        if write_buffer.len() > self.active_log_capacity {
             return false;
         }
         let buf = serialize(batch.compute_size());
@@ -450,46 +473,54 @@ impl LogStorage {
         if batch.entries.is_empty() {
             return true;
         }
-        let mut first = true;
-        loop {
+        {
+            let mut log_manager = self.log_manager.write().unwrap();
+            if !update_raft_meta(&mut log_manager.region_indexes, batch)
+                || !update_raft_meta(&mut log_manager.active_file.meta, batch)
             {
-                let mut log_manager = self.log_manager.write().unwrap();
-                if first {
-                    if !update_raft_meta(&mut log_manager.region_indexes, batch)
-                        || !update_raft_meta(&mut log_manager.active_file.meta, batch)
-                    {
-                        info!("put batch failed"; "batch_region_id" => batch.region_id);
-                        return false;
-                    }
-                    first = false;
-                }
-                if log_manager.write_into_buffer(batch) {
-                    return true;
-                }
-            }
-            info!("write into buffer failed, try sync");
-            if !self.sync() {
-                info!("sync failed");
+                info!("put batch failed"; "batch_region_id" => batch.region_id);
                 return false;
             }
+            if 0 == log_manager.active_file.size {
+                log_manager.begin_write = Instant::now();
+            }
+            if log_manager.write_into_buffer(batch) {
+                return true;
+            }
+
         }
-        return true;
+        while self.sync() {
+            let mut log_manager = self.log_manager.write().unwrap();
+            if log_manager.write_into_buffer(batch) {
+                return true;
+            }
+            info!("write into buffer failed, try sync");
+        }
+        info!("sync failed");
+        return false;
+
     }
 
     pub fn sync(&self) -> bool {
         let _guard = self.lock.lock().unwrap();
-        let (mut sync_task, fd) = {
+        let mut need_dump = false;
+        let (mut sync_task, mut fd) = {
             let mut log = self.log_manager.write().unwrap();
             assert!(log.write_buffer.is_some());
+            let fd = log.active_file.fd;
             if let Some(sync_task) = log.write_buffer.as_ref() {
                 if sync_task.is_empty() {
                     return true;
+                } else if sync_task.len() + log.active_file.size > log.active_log_capacity {
+                    log.dump_meta();
+                    need_dump = true;
                 }
             }
             let task = log.write_buffer.take();
             log.write_buffer = log.sync_buffer.take();
-            (task, log.active_file.fd)
+            (task, fd)
         };
+        let begin_dump = Instant::now();
         let write_buffer = sync_task.as_mut().unwrap();
         if !write(fd, write_buffer) {
             error!("flush buffer to file failed");
@@ -497,13 +528,16 @@ impl LogStorage {
         }
         sync(fd);
         let mut log = self.log_manager.write().unwrap();
-        log.active_file.size += write_buffer.len();
+        if need_dump {
+            let new_fd = new_log_file(log.dir.clone(), log.active_file.file_name.clone());
+            log.active_file.fd = new_fd;
+            assert_eq!(0, log.active_file.size);
+            info!("log file write sync last buffer cost"; "time" => begin_dump.elapsed().as_millis() as u64);
+        } else {
+            log.active_file.size += write_buffer.len();
+        }
         write_buffer.clear();
         log.sync_buffer = sync_task;
-        if log.active_file.size >= log.active_log_capacity {
-            info!("close current active log and write into file meta"; "file" => log.active_file.file_name.clone());
-            log.dump();
-        }
         true
     }
 
@@ -530,9 +564,9 @@ fn extract_file_num(file_name: &str) -> IoResult<u64> {
     }
 }
 
-fn new_log_file(dir: PathBuf, file_num: u64) -> libc::c_int {
+fn new_log_file(dir: PathBuf, file_name: String) -> libc::c_int {
     let mut path = dir.clone();
-    path.push(generate_file_name(file_num));
+    path.push(file_name);
     let path_cstr = CString::new(path.as_path().to_str().unwrap().as_bytes()).unwrap();
     let fd = unsafe {
         libc::open(
@@ -704,7 +738,7 @@ mod tests {
     fn test_log_dump_over_capacity() {
         let temp_dir = TempDir::new("dump_over_capacity").unwrap();
         let path = temp_dir.path();
-        let pipe_log = LogStorage::open(path.to_str().unwrap(), 128).unwrap();
+        let pipe_log = LogStorage::open(path.to_str().unwrap(), 512).unwrap();
         assert_eq!(0, pipe_log.file_num());
         for index in 1..64 {
             let mut batch = EntryBatch::new();
@@ -719,55 +753,59 @@ mod tests {
         assert_eq!(1, pipe_log.file_num());
     }
 
+    fn inner_test_write_multi_thread(path: &Path, thread_num: u64) {
+        let log = LogStorage::open(path.to_str().unwrap(), 1024).unwrap();
+        let storage = Arc::new(log);
+        let mut handlers = Vec::new();
+        for i in 0..thread_num {
+            let storage2 = storage.clone();
+            let handler = std::thread::spawn(move || {
+                for index in 1..1025 {
+                    let mut batch = EntryBatch::new();
+                    batch.region_id = i + 1;
+                    let mut e = RaftEntry::new();
+                    e.index = index;
+                    e.term = 2;
+                    batch.entries.push(e);
+                    assert!(storage2.put(&mut batch));
+                    if index % 2 == 0 {
+                        storage2.sync();
+                    }
+                }
+            });
+            handlers.push(handler);
+        }
+        while !handlers.is_empty() {
+            let h = handlers.pop().unwrap();
+            h.join();
+        }
+
+        let mut file_num = storage.file_num();
+        assert!(file_num > 1);
+        file_num = storage.file_num();
+        println!("total write log number: {}", file_num);
+        for i in 0..thread_num {
+            let result = storage.read(i + 1, 1, u64::MAX);
+            assert_eq!(1024, result.len());
+            for i in 0..result.len() {
+                assert_eq!(1 + i, result[i].index as usize);
+            }
+        }
+    }
+
     #[test]
     fn test_multi_thread_pipe_write() {
         println!("pipe write test begin");
         let temp_dir = TempDir::new("dump_over_capacity").unwrap();
         let path = temp_dir.path();
+        inner_test_write_multi_thread(path, 6);
         let log = LogStorage::open(path.to_str().unwrap(), 1024).unwrap();
-        let storage = Arc::new(log);
-        let storage2 = storage.clone();
-        let handler = std::thread::spawn(move || {
-            for index in 1..1025 {
-                let mut batch = EntryBatch::new();
-                batch.region_id = 1;
-                let mut e = RaftEntry::new();
-                e.index = index;
-                e.term = 2;
-                batch.entries.push(e);
-                assert!(storage2.put(&mut batch));
-                if index % 2 == 0 {
-                    storage2.sync();
-                }
-            }
-        });
-        let mut file_num = storage.file_num();
-        assert!(file_num < 1);
-        for index in 1..1025 {
-            let mut batch = EntryBatch::new();
-            batch.region_id = 2;
-            let mut e = RaftEntry::new();
-            e.index = index;
-            e.term = 2;
-            batch.entries.push(e);
-            assert!(storage.put(&mut batch));
-            if index % 2 == 0 {
-                storage.sync();
-            }
-        }
-        let result2 = storage.read(2, 1, u64::MAX);
-        assert_eq!(1024, result2.len());
-        for i in 0..result2.len() {
-            assert_eq!(1 + i, result2[i].index as usize);
-        }
-        handler.join().unwrap();
-        file_num = storage.file_num();
-        println!("total write log number: {}", file_num);
-
-        let result = storage.read(1, 1, u64::MAX);
-        assert_eq!(1024, result.len());
-        for i in 0..result.len() {
-            assert_eq!(1 + i, result[i].index as usize);
+        let guard = log.log_manager.read().unwrap();
+        let meta = &guard.region_indexes;
+        assert_eq!(6, meta.len());
+        for (_, region_meta) in meta.iter() {
+            assert_eq!(1, region_meta.start_index);
+            assert_eq!(1024, region_meta.end_index);
         }
     }
 }
