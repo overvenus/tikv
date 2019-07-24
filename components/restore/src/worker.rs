@@ -38,43 +38,78 @@ impl Runner {
         }
     }
 
-    fn restore_snapshot(&mut self, region_id: u64, mut msgs: Vec<RaftMessage>) {
-        assert_eq!(msgs.len(), 2 /* create peer and snapshot */);
-        let frist_message = msgs.remove(0);
-        let snap_message = msgs.remove(0);
-
-        let (tx, rx) = mpsc::channel();
-        let mut peer_msg = PeerMsg::RestoreMessage(RestoreMessage {
-            msg: snap_message, // The actuall snapshot message.
-            callback: Callback::Read(Box::new(move |resp| {
-                tx.send(resp).unwrap();
-            })),
-        });
-
-        // Create region.
-        self.router.send_raft_message(frist_message).unwrap();
+    fn restore_snapshot<I: Iterator<Item = RaftMessage>>(&mut self, region_id: u64, msgs: I) {
+        info!("restore snapshot"; "region_id" => region_id);
 
         let start = Instant::now();
-        loop {
-            // Wait for create region.
-            thread::sleep(Duration::from_millis(100));
+        let mut is_frist_message = true;
+        for m in msgs {
+            if is_frist_message {
+                // Create region.
+                self.router.send_raft_message(m.clone()).unwrap();
 
-            // Try send snapshot message.
-            if let Err(e) = self.router.send(region_id, peer_msg) {
-                peer_msg = e.into_inner();
+                let start = Instant::now();
+                loop {
+                    // Wait for create region.
+                    thread::sleep(Duration::from_millis(100));
+                    let dur = start.elapsed();
+                    if dur > Duration::from_secs(5) {
+                        warn!("restore apply snapshot slow";
+                            "take" => ?dur,
+                            "region_id" => region_id);
+                    }
+                    if self
+                        .router
+                        .send(region_id, PeerMsg::RaftMessage(m.clone()))
+                        .is_err()
+                    {
+                        continue;
+                    } else {
+                        // Send Ok mean the peer has been created.
+                        break;
+                    }
+                }
+                is_frist_message = false
             } else {
-                let resp = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-                assert!(!resp.response.get_header().has_error(), "{:?}", resp);
-                return;
-            }
-            let dur = start.elapsed();
-            if dur < Duration::from_secs(5) {
-                warn!("restore apply slow"; "take" => ?dur);
+                let (tx, rx) = mpsc::channel();
+                let peer_msg = PeerMsg::RestoreMessage(RestoreMessage {
+                    msg: m, // The actuall snapshot message.
+                    callback: Callback::Read(Box::new(move |resp| {
+                        tx.send(resp).unwrap();
+                    })),
+                });
+
+                // Send snapshot message.
+                self.router.send(region_id, peer_msg).unwrap();
+
+                loop {
+                    // Wait for create region.
+                    thread::sleep(Duration::from_millis(100));
+
+                    match rx.recv_timeout(Duration::from_secs(1)) {
+                        Ok(resp) => {
+                            assert!(!resp.response.get_header().has_error(), "{:?}", resp);
+                            return;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => (),
+                        e @ Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            panic!("restore snapshot region {} {:?}", region_id, e);
+                        }
+                    }
+                    let dur = start.elapsed();
+                    if dur > Duration::from_secs(5) {
+                        warn!("restore apply snapshot slow";
+                            "take" => ?dur,
+                            "region_id" => region_id);
+                    }
+                }
             }
         }
     }
 
-    fn restore_entries(&mut self, region_id: u64, msgs: Vec<RaftMessage>) {
+    fn restore_entries<I: Iterator<Item = RaftMessage>>(&mut self, region_id: u64, msgs: I) {
+        info!("restore entries"; "region_id" => region_id);
+
         let mut dur = Duration::new(0, 0);
         for msg in msgs {
             self.router
@@ -94,7 +129,11 @@ impl Runner {
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     dur += Duration::from_secs(1);
-                    warn!("restore apply slow"; "take" => ?dur);
+                    if dur > Duration::from_secs(5) {
+                        warn!("restore apply entries slow";
+                            "take" => ?dur,
+                            "region_id" => region_id);
+                    }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => panic!("restore apply disconnected"),
             }

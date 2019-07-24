@@ -168,8 +168,8 @@ fn main() {
                 .help("Sets Restored Store ID"),
         )
         .arg(
-            Arg::with_name("back_path")
-                .long("back_path")
+            Arg::with_name("backup_path")
+                .long("backup_path")
                 .value_name("PATH")
                 .help("Sets Backup Files Path"),
         )
@@ -348,21 +348,6 @@ fn run_raft_server(cfg: &TiKvConfig, store_id: u64, path: &str) {
         );
     }
 
-    let apply_notify = restore_system
-        .start()
-        .unwrap_or_else(|s| fatal!("failed to start restore system: {}", s));
-
-    let p = Path::new(path);
-    let runner = restore::Runner::new(router, apply_notify, store_id, &snap_path);
-    let storage = backup::LocalStorage::new(p)
-        .unwrap_or_else(|e| fatal!("failed to create local storage: {}", e));
-    let manager = backup::RestoreManager::new(p.to_owned(), Arc::new(storage))
-        .unwrap_or_else(|e| fatal!("failed to create restore manager: {}", e));
-    let executor = manager
-        .executor()
-        .unwrap_or_else(|e| fatal!("failed to create restore exector: {}", e));
-    executor.execute(runner);
-
     let server_cfg = cfg.server.clone();
     let mut status_enabled = cfg.metric.address.is_empty() && !server_cfg.status_addr.is_empty();
 
@@ -378,6 +363,21 @@ fn run_raft_server(cfg: &TiKvConfig, store_id: u64, path: &str) {
             status_enabled = false;
         }
     }
+
+    let apply_notify = restore_system
+        .start()
+        .unwrap_or_else(|s| fatal!("failed to start restore system: {}", s));
+
+    let p = Path::new(path);
+    let runner = restore::Runner::new(router, apply_notify, store_id, &snap_path);
+    let storage = backup::LocalStorage::new(p)
+        .unwrap_or_else(|e| fatal!("failed to create local storage: {}", e));
+    let manager = backup::RestoreManager::new(p.to_owned(), Arc::new(storage))
+        .unwrap_or_else(|e| fatal!("failed to create restore manager: {}", e));
+    let executor = manager
+        .executor()
+        .unwrap_or_else(|e| fatal!("failed to create restore exector: {}", e));
+    executor.execute(runner);
 
     signal_handler::handle_signal(Some(engines));
 

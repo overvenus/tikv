@@ -5,6 +5,7 @@ use std::collections::*;
 use std::mem;
 use std::ops::Bound::{Included, Unbounded};
 use std::path::*;
+use std::time::*;
 use std::sync::*;
 
 use kvproto::backup::*;
@@ -308,11 +309,14 @@ impl Executor {
     }
 
     pub fn execute<R: Runnable>(self, mut runnable: R) {
+        let start = Instant::now();
+        info!("start restore");
         for tasks in self.tasks() {
             for t in tasks {
                 runnable.run(t);
             }
         }
+        info!("finish restore"; "take" => ?start.elapsed());
     }
 }
 

@@ -22,7 +22,8 @@ fn test_create_peer() {
     super::init();
     let mut cfg = Config::new();
     let (router, raft_system) = create_raft_batch_system(&cfg);
-    let (engines, snap_mgr) = create_engines_and_snap_mgr(router.clone());
+    let dir = tempdir::TempDir::new("test_create_peer").unwrap();
+    let (engines, snap_mgr) = create_engines_and_snap_mgr(router.clone(), dir.path());
     cfg.raftdb_path = engines.raft.path().to_owned();
     let snap_path = snap_mgr.base_path();
 
@@ -76,7 +77,8 @@ fn test_bootstarp() {
     super::init();
     let mut cfg = Config::new();
     let (router, raft_system) = create_raft_batch_system(&cfg);
-    let (engines, snap_mgr) = create_engines_and_snap_mgr(router.clone());
+    let dir = tempdir::TempDir::new("test_bootstarp").unwrap();
+    let (engines, snap_mgr) = create_engines_and_snap_mgr(router.clone(), dir.path());
     cfg.raftdb_path = engines.raft.path().to_owned();
 
     let mut system = RestoreSystem::new(1, 2, cfg, engines, router.clone(), raft_system, snap_mgr);

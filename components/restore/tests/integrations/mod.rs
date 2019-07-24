@@ -26,7 +26,7 @@ use std::sync::*;
 use std::{thread, time};
 
 use engine::{Engines, CF_DEFAULT};
-use kvproto::metapb::*;
+use kvproto::metapb::{Peer, Region};
 use kvproto::raft_serverpb::*;
 use tikv::raftstore::store::fsm::*;
 use tikv::raftstore::store::msg::*;
@@ -45,9 +45,11 @@ pub fn fixture_region() -> (Region, u64) {
     (region, 3)
 }
 
-pub fn create_engines_and_snap_mgr(router: RaftRouter) -> (engine::Engines, SnapManager) {
-    let dir = tempdir::TempDir::new("test_coverter").unwrap();
-    let kv_path = dir.path().join("kv");
+pub fn create_engines_and_snap_mgr(
+    router: RaftRouter,
+    dir: &Path,
+) -> (engine::Engines, SnapManager) {
+    let kv_path = dir.join("kv");
     let cfg = tikv::config::TiKvConfig::default();
     let cache = cfg.storage.block_cache.build_shared_cache();
     let kv_db_opt = cfg.rocksdb.build_opt();
@@ -56,12 +58,12 @@ pub fn create_engines_and_snap_mgr(router: RaftRouter) -> (engine::Engines, Snap
         engine::rocks::util::new_engine_opt(kv_path.to_str().unwrap(), kv_db_opt, kv_cfs_opt)
             .unwrap(),
     );
-    let raft_path = dir.path().join(Path::new("raft"));
+    let raft_path = dir.join(Path::new("raft"));
     let raft_engine = Arc::new(
         engine::rocks::util::new_engine(raft_path.to_str().unwrap(), None, &[CF_DEFAULT], None)
             .unwrap(),
     );
-    let snap_path = dir.path().join(Path::new("snap"));
+    let snap_path = dir.join(Path::new("snap"));
     let s = snap_path.as_path().to_str().unwrap().to_owned();
     let snap_mgr = SnapManager::new(s, Some(router), None);
     (Engines::new(engine, raft_engine, cache.is_some()), snap_mgr)

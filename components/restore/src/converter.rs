@@ -67,11 +67,15 @@ impl Converter {
         // The first msg creates a peer.
         let region_id = region.get_id();
         let mut first_msg = self.new_raft_message(region_id);
+        let mut snap_msg = first_msg.clone();
         first_msg
             .mut_message()
             .set_msg_type(MessageType::MsgHeartbeat);
+        // It is required to attach start key and end key in the first message.
+        // TiKV needs them to decide whether it okay to create a peer.
+        first_msg.set_start_key(region.get_start_key().to_vec());
+        first_msg.set_end_key(region.get_end_key().to_vec());
 
-        let mut snap_msg = first_msg.clone();
         fill_snapshot_conf(&mut snap, region);
         snap_msg
             .mut_message()
@@ -94,30 +98,40 @@ impl Converter {
         vec![commit_msg]
     }
 
-    pub fn convert(&mut self, region_id: u64, data: Data) -> Vec<RaftMessage> {
+    pub fn convert(
+        &mut self,
+        region_id: u64,
+        data: Data,
+    ) -> Box<dyn Iterator<Item = RaftMessage> + 'static> {
         match data {
             Data::Snapshot(s) => {
-                // Write cf files
-                let cfs = [&s.default, &s.write, &s.lock];
-                for f in &cfs {
-                    let p = self.snap_base.join(&f.0);
-                    debug!("convert snapshot"; "file" => ?p, "size" => &f.1.len());
-                    fs::write(p, &f.1).unwrap();
-                }
-                // Write snapshot meta file.
-                let p = self.snap_base.join(&s.meta.0);
-                debug!("convert snapshot"; "file" => ?p, "meta" => ?s.meta.1);
-
                 let mut snap_data = RaftSnapshotData::new();
                 snap_data.merge_from_bytes(s.meta.1.get_data()).unwrap();
-                fs::write(p, snap_data.get_meta().write_to_bytes().unwrap()).unwrap();
                 let region = snap_data.get_region();
                 self.update_region(region.clone());
                 let index = s.meta.1.get_metadata().get_index();
                 let term = s.meta.1.get_metadata().get_term();
-                let msgs = self.snapshot_to_messages(region, s.meta.1.clone());
                 self.update_last_entry(region.get_id(), index, term);
-                msgs
+                let snap_base = self.snap_base.clone();
+                let msgs = self.snapshot_to_messages(region, s.meta.1.clone());
+                Box::new(msgs.into_iter().enumerate().map(move |(i, m)| {
+                    if i == 1 {
+                        // Write cf files
+                        let cfs = [&s.default, &s.write, &s.lock];
+                        for f in &cfs {
+                            let p = snap_base.join(&f.0);
+                            info!("convert snapshot"; "file" => ?p, "size" => &f.1.len());
+                            if !f.1.is_empty() {
+                                fs::write(p, &f.1).unwrap();
+                            }
+                        }
+                        // Write snapshot meta file.
+                        let p = snap_base.join(&s.meta.0);
+                        info!("convert snapshot"; "file" => ?p, "meta" => ?s.meta.1);
+                        fs::write(p, snap_data.get_meta().write_to_bytes().unwrap()).unwrap();
+                    }
+                    m
+                }))
             }
             Data::Logs(es) => {
                 assert_ne!(0, region_id);
@@ -125,7 +139,7 @@ impl Converter {
                 let term = es.last().unwrap().get_term();
                 let msgs = self.entries_to_messages(region_id, es);
                 self.update_last_entry(region_id, index, term);
-                msgs
+                Box::new(msgs.into_iter())
             }
         }
     }

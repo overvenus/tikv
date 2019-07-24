@@ -1143,15 +1143,19 @@ impl ApplyDelegate {
         related_region_ids: &[u64],
     ) {
         if let Some(bm) = ctx.backup_mgr.as_ref() {
-            let mut event = BackupEvent::new();
-            event.set_region_id(self.region_id());
-            event.set_index(ctx.exec_ctx.as_ref().unwrap().index);
-            event.set_dependency(bm.dependency.alloc_number());
-            event.set_event(e);
-            for id in related_region_ids {
-                event.mut_related_region_ids().push(*id);
+            // TODO(backup): A better way to save event when we are backuping
+            //               the region.
+            if bm.is_region_started(self.region_id()) {
+                let mut event = BackupEvent::new();
+                event.set_region_id(self.region_id());
+                event.set_index(ctx.exec_ctx.as_ref().unwrap().index);
+                event.set_dependency(bm.dependency.alloc_number());
+                event.set_event(e);
+                for id in related_region_ids {
+                    event.mut_related_region_ids().push(*id);
+                }
+                self.event_batch.push(event);
             }
-            self.event_batch.push(event);
         }
     }
 }

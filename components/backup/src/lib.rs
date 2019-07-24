@@ -113,10 +113,12 @@ impl Meta {
     }
 
     fn start_region(&mut self, region_id: u64) {
+        info!("start backup region"; "region_id" => region_id);
         self.backup_regions.insert(region_id);
     }
 
     fn stop_region(&mut self, region_id: u64) {
+        info!("stop backup region"; "region_id" => region_id);
         self.backup_regions.remove(&region_id);
     }
 

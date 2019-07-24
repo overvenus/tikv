@@ -26,6 +26,14 @@ fn main() {
                         .required(true)
                         .help("the path of backup location"),
                 )
+                .arg(
+                    Arg::with_name("base")
+                        .short("b")
+                        .long("base")
+                        .takes_value(true)
+                        .required(true)
+                        .help("the base path of backup"),
+                )
                 .subcommand(SubCommand::with_name("check").about("Check backup meta information"))
                 .subcommand(
                     SubCommand::with_name("meta")
@@ -78,7 +86,10 @@ fn main() {
         use std::path::Path;
         let p = matches.value_of("path").unwrap();
         let path = Path::new(p);
+        let b = matches.value_of("base").unwrap();
+        let base = Path::new(b);
         let ls = LocalStorage::new(path).unwrap();
+        // TODO: how to use base in backup manager?
         let bm = BackupManager::new(0, path, Box::new(ls.clone())).unwrap();
         if let Some(matches) = matches.subcommand_matches("meta") {
             let meta = bm.backup_meta();
@@ -126,7 +137,7 @@ fn main() {
                 }
             }
         } else if let Some(matches) = matches.subcommand_matches("graph") {
-            let rm = backup::RestoreManager::new(path.to_owned(), Arc::new(ls)).unwrap();
+            let rm = backup::RestoreManager::new(base.to_owned(), Arc::new(ls)).unwrap();
             if matches.subcommand_matches("total").is_some() {
                 let g = rm.total_order_eval().unwrap();
                 println!("{}", backup::dot(&g.0));

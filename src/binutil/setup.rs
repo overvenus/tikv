@@ -43,6 +43,7 @@ pub fn initial_logger(config: &TiKvConfig) {
         "integrations::".to_owned(),
         "failpoints::".to_owned(),
         "backup".to_owned(),
+        "restore".to_owned(),
         // Collects logs for test components.
         "test_".to_owned(),
     ];
