@@ -5,8 +5,8 @@ use std::collections::*;
 use std::mem;
 use std::ops::Bound::{Included, Unbounded};
 use std::path::*;
-use std::time::*;
 use std::sync::*;
+use std::time::*;
 
 use kvproto::backup::*;
 use protobuf::Message;
@@ -477,8 +477,7 @@ mod tests {
                 end_index: end,
             };
             let mut cache = FilesCache(HashMap::default());
-            let (mut tasks, mut w) =
-                tasks_from_eval_node(&logs_node, current, &ls, &mut cache).unwrap();
+            let mut tasks = tasks_from_eval_node(&logs_node, current, &ls, &mut cache).unwrap();
             assert_eq!(map[&region_id], cache.0[&region_id]);
             assert_eq!(tasks.len(), count);
             let mut s = start;
@@ -495,9 +494,7 @@ mod tests {
                     es,
                 );
                 s = e + 1;
-                tasks[i].done();
             }
-            assert!(w.wait_timeout(Duration::from_millis(1)).unwrap());
         };
         for s in 6..=14 {
             for e in s..=14 {
@@ -520,8 +517,7 @@ mod tests {
             event.set_dependency(dep);
             let snap_node = EvalNode::Event(event);;
             let mut cache = FilesCache(HashMap::default());
-            let (mut tasks, _) =
-                tasks_from_eval_node(&snap_node, current, &ls, &mut cache).unwrap();
+            let mut tasks = tasks_from_eval_node(&snap_node, current, &ls, &mut cache).unwrap();
             assert_eq!(tasks.len(), 1);
             if e == BackupEvent_Event::Snapshot {
                 assert_eq!(

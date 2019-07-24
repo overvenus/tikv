@@ -77,7 +77,7 @@ pub fn build_eval_graph(mut meta: BackupMeta) -> EvalGraph {
                 } => {
                     *end_index = index - 1;
                     assert_eq!(*id, region_id);
-                    assert!(*start_index <= index - 1, "{} {}", start_index, index -1);
+                    assert!(*start_index <= index - 1, "{} {}", start_index, index - 1);
                     g.add_edge(parent, idx, ());
                 }
             }
