@@ -369,7 +369,7 @@ fn run_raft_server(cfg: &TiKvConfig, store_id: u64, path: &str) {
         .unwrap_or_else(|s| fatal!("failed to start restore system: {}", s));
 
     let p = Path::new(path);
-    let runner = restore::Runner::new(router, apply_notify, store_id, &snap_path);
+    let runner = restore::Runner::new(router, apply_notify, store_id, &snap_path, engines.clone());
     let storage = backup::LocalStorage::new(p)
         .unwrap_or_else(|e| fatal!("failed to create local storage: {}", e));
     let manager = backup::RestoreManager::new(p.to_owned(), Arc::new(storage))

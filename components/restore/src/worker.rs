@@ -6,6 +6,8 @@ use std::thread;
 use std::time::*;
 
 use backup::*;
+use engine::rocks::Writable;
+use engine::Iterable;
 use kvproto::metapb::*;
 use kvproto::raft_serverpb::*;
 use protobuf::Message as MessageTrait;
@@ -21,6 +23,8 @@ pub struct Runner {
     pub router: RaftRouter,
     pub apply_notify: mpsc::Receiver<(u64, Region)>,
     cvrt: Converter,
+    engines: engine::Engines,
+    store_id: u64,
 }
 
 impl Runner {
@@ -29,12 +33,15 @@ impl Runner {
         apply_notify: mpsc::Receiver<(u64, Region)>,
         store_id: u64,
         snap_path: &Path,
+        engines: engine::Engines,
     ) -> Runner {
         let cvrt = Converter::new(store_id, snap_path);
         Runner {
             router,
             apply_notify,
             cvrt,
+            engines,
+            store_id,
         }
     }
 
@@ -141,8 +148,8 @@ impl Runner {
     }
 }
 
-impl RestoreRunable for Runner {
-    fn run(&mut self, task: RestoreTask) {
+impl Restorable for Runner {
+    fn restore(&mut self, task: RestoreTask) {
         let region_id = task.region_id;
         let is_snapshot = task.is_snapshot();
         let msgs = self.cvrt.convert(region_id, task.data);
@@ -151,5 +158,71 @@ impl RestoreRunable for Runner {
         } else {
             self.restore_entries(region_id, msgs);
         }
+    }
+
+    fn restore_meta(&mut self) {
+        let start_key = keys::REGION_META_MIN_KEY;
+        let end_key = keys::REGION_META_MAX_KEY;
+        let mut total_count = 0;
+        let mut tombstone_count = 0;
+        let mut merging_count = 0;
+        let t = Instant::now();
+        let wb = engine::WriteBatch::new();
+        let raft_engine = self.engines.raft.clone();
+        raft_engine
+            .scan(start_key, end_key, false, |key, value| {
+                let (region_id, suffix) = keys::decode_region_meta_key(key).unwrap();
+                if suffix != keys::REGION_STATE_SUFFIX {
+                    return Ok(true);
+                }
+
+                total_count += 1;
+
+                let mut local_state =
+                    protobuf::parse_from_bytes::<RegionLocalState>(value).unwrap();
+                let region = local_state.get_region();
+                if local_state.get_state() == PeerState::Tombstone {
+                    tombstone_count += 1;
+                    debug!("region is tombstone"; "region" => ?region, "store_id" => self.store_id);
+                    return Ok(true);
+                }
+
+                // After restore there must be none peer in the Applying state.
+                assert_ne!(local_state.get_state(), PeerState::Applying);
+
+                // TODO: handle merging.
+                if local_state.get_state() == PeerState::Merging {
+                    info!("region is merging"; "region" => ?region, "store_id" => self.store_id);
+                    merging_count += 1;
+                }
+
+                let peers = local_state.mut_region().take_peers();
+                for mut pr in peers.into_vec() {
+                    if pr.get_store_id() == self.store_id {
+                        debug!("preserve region peer";
+                        "region_id" => region_id, "peer" => ?pr);
+                        pr.set_is_learner(false);
+                        local_state.mut_region().mut_peers().push(pr);
+                    } else {
+                        debug!("remove region peer";
+                        "region_id" => region_id, "peer" => ?pr);
+                    }
+                }
+                wb.put(key, &local_state.write_to_bytes().unwrap()).unwrap();
+                Ok(true)
+            })
+            .unwrap();
+        let mut opt = engine::WriteOptions::new();
+        opt.set_sync(true);
+        raft_engine.write_opt(&wb, &opt).unwrap();
+
+        info!(
+            "restore meta";
+            "store_id" => self.store_id,
+            "region_count" => total_count,
+            "tombstone_count" => tombstone_count,
+            "merge_count" => merging_count,
+            "take" => ?t.elapsed(),
+        );
     }
 }

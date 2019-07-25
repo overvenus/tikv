@@ -14,7 +14,7 @@ mod eval;
 mod executor;
 
 pub use eval::{dot, EvalGraph, EvalNode};
-pub use executor::{Data, Executor, Runnable, Task};
+pub use executor::{Data, Executor, Restorable, Task};
 
 pub struct RestoreManager {
     base: PathBuf,

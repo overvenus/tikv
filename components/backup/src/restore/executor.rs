@@ -267,8 +267,9 @@ fn fetch_entries(
     Ok(es)
 }
 
-pub trait Runnable {
-    fn run(&mut self, task: Task);
+pub trait Restorable {
+    fn restore(&mut self, task: Task);
+    fn restore_meta(&mut self);
 }
 
 pub struct Executor {
@@ -308,14 +309,15 @@ impl Executor {
         })
     }
 
-    pub fn execute<R: Runnable>(self, mut runnable: R) {
+    pub fn execute<R: Restorable>(self, mut restorable: R) {
         let start = Instant::now();
         info!("start restore");
         for tasks in self.tasks() {
             for t in tasks {
-                runnable.run(t);
+                restorable.restore(t);
             }
         }
+        restorable.restore_meta();
         info!("finish restore"; "take" => ?start.elapsed());
     }
 }

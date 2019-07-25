@@ -39,7 +39,7 @@ use protobuf::Message;
 use tempdir::TempDir;
 
 pub use errors::{Error, Result};
-pub use restore::{dot, Data, RestoreManager, Runnable as RestoreRunable, Task as RestoreTask};
+pub use restore::{dot, Data, Restorable, RestoreManager, Task as RestoreTask};
 pub use storage::{LocalStorage, Storage};
 pub use util::BackupMetaBuilder;
 

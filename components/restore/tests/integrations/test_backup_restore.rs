@@ -14,6 +14,7 @@ use protobuf::Message;
 use raft::eraftpb::Snapshot;
 use restore::*;
 use test_raftstore::*;
+use tikv::pd::PdClient;
 use tikv::raftstore::store::*;
 use tikv_util::HandyRwLock;
 
@@ -23,6 +24,7 @@ struct BackupCluster {
     cluster: Cluster<ServerCluster>,
     backup_mgr: Arc<BackupManager>,
     learner_store: u64,
+    restore_engines: Option<(Engines, tempdir::TempDir)>,
 }
 
 impl BackupCluster {
@@ -44,6 +46,7 @@ impl BackupCluster {
                 cluster,
                 backup_mgr,
                 learner_store: 2,
+                restore_engines: None,
             },
             frist_region,
         )
@@ -70,7 +73,7 @@ impl BackupCluster {
         );
     }
 
-    fn restore(&mut self, backup_path: &str) -> (Engines, tempdir::TempDir) {
+    fn restore(&mut self, backup_path: &str) {
         // Create a restore manager.
         let storage = self.backup_mgr.storage.clone();
         let restore_mgr = RestoreManager::new(backup_path.into(), storage).unwrap();
@@ -94,10 +97,16 @@ impl BackupCluster {
         system.bootstrap().unwrap();
         let apply_rx = system.start().unwrap();
 
-        let runner = Runner::new(router.clone(), apply_rx, self.learner_store, &snap_path);
+        let runner = Runner::new(
+            router.clone(),
+            apply_rx,
+            self.learner_store,
+            &snap_path,
+            engines.clone(),
+        );
         restore_mgr.executor().unwrap().execute(runner);
         system.stop().unwrap();
-        (engines, dir)
+        self.restore_engines = Some((engines, dir));
     }
 
     fn wait_learner_apply(&self, region_id: u64) {
@@ -128,6 +137,48 @@ impl BackupCluster {
             }
             sleep_ms(100);
         }
+    }
+
+    fn verify_kv(&self, cfs: &[&str], key: &[u8], value: &[u8]) {
+        let (engines, _) = self.restore_engines.as_ref().unwrap();
+        for cf in cfs {
+            let handle = engines.kv.cf_handle(cf).unwrap();
+            let key = keys::data_key(key);
+            assert_eq!(engines.kv.get_cf(handle, &key).unwrap().unwrap(), value);
+        }
+    }
+
+    fn verify_meta(&self, region_id: u64) -> metapb::Region {
+        let (engines, _) = self.restore_engines.as_ref().unwrap();
+        let key = keys::region_state_key(region_id);
+        let region_state: RegionLocalState = engines.raft.get_msg(&key).unwrap().unwrap();
+        let peers = region_state.get_region().get_peers();
+        assert_eq!(peers.len(), 1, "{:?}", peers);
+        assert_eq!(peers[0].get_store_id(), self.learner_store, "{:?}", peers);
+        assert!(!peers[0].get_is_learner(), "{:?}", peers);
+        region_state.get_region().clone()
+    }
+
+    fn verify_restored_cluster(&mut self, region: metapb::Region) {
+        debug!("start verify_restored_cluster");
+        // Start a new cluster based on the restored engine.
+        let mut cluster = new_server_cluster(1, 1);
+        let (engines, dir) = self.restore_engines.take().unwrap();
+        cluster.dbs.push(engines.clone());
+        cluster.paths.push(dir);
+        cluster.engines.insert(self.learner_store, engines);
+        let mut store = metapb::Store::new();
+        store.set_id(2);
+        cluster
+            .pd_client
+            .bootstrap_cluster(store, region)
+            .unwrap();
+        cluster.start().unwrap();
+        let k = b"backup";
+        let v = b"restore";
+        cluster.must_put(k, v);
+        must_get_equal(&cluster.get_engine(self.learner_store), k, v);
+        cluster.shutdown();
     }
 }
 
@@ -176,27 +227,12 @@ fn test_restore_snapshot_and_entries() {
     cluster.shutdown();
 
     let backup_path = format!("{}", dep);
-    let (engines, _dir) = cluster.restore(&backup_path);
+    cluster.restore(&backup_path);
 
-    for cf in &[CF_DEFAULT, CF_LOCK, CF_WRITE] {
-        let handle = engines.kv.cf_handle(cf).unwrap();
-        assert_eq!(
-            engines
-                .kv
-                .get_cf(handle, &keys::data_key(key))
-                .unwrap()
-                .unwrap(),
-            value
-        );
-        assert_eq!(
-            engines
-                .kv
-                .get_cf(handle, &keys::data_key(key2))
-                .unwrap()
-                .unwrap(),
-            value2
-        );
-    }
+    cluster.verify_kv(&[CF_DEFAULT, CF_LOCK, CF_WRITE], key, value);
+    cluster.verify_kv(&[CF_DEFAULT, CF_LOCK, CF_WRITE], key2, value2);
+    let region = cluster.verify_meta(r1);
+    cluster.verify_restored_cluster(region);
 }
 
 #[test]
@@ -222,19 +258,11 @@ fn test_restore_empty_cf() {
     cluster.shutdown();
 
     let backup_path = format!("{}", dep);
-    let (engines, _dir) = cluster.restore(&backup_path);
+    cluster.restore(&backup_path);
 
-    for cf in &[CF_LOCK, CF_WRITE] {
-        let handle = engines.kv.cf_handle(cf).unwrap();
-        assert_eq!(
-            engines
-                .kv
-                .get_cf(handle, &keys::data_key(key))
-                .unwrap()
-                .unwrap(),
-            value
-        );
-    }
+    cluster.verify_kv(&[CF_LOCK, CF_WRITE], key, value);
+    let region = cluster.verify_meta(r1);
+    cluster.verify_restored_cluster(region);
 }
 
 #[test]
@@ -276,27 +304,13 @@ fn test_restore_multi_snapshots() {
     cluster.shutdown();
 
     let backup_path = format!("{}", dep);
-    let (engines, _dir) = cluster.restore(&backup_path);
+    cluster.restore(&backup_path);
 
-    for cf in &[CF_DEFAULT, CF_LOCK, CF_WRITE] {
-        let handle = engines.kv.cf_handle(cf).unwrap();
-        assert_eq!(
-            engines
-                .kv
-                .get_cf(handle, &keys::data_key(key))
-                .unwrap()
-                .unwrap(),
-            value
-        );
-        assert_eq!(
-            engines
-                .kv
-                .get_cf(handle, &keys::data_key(key2))
-                .unwrap()
-                .unwrap(),
-            value2
-        );
-    }
+    cluster.verify_kv(&[CF_DEFAULT, CF_LOCK, CF_WRITE], key, value);
+    cluster.verify_kv(&[CF_DEFAULT, CF_LOCK, CF_WRITE], key2, value2);
+    cluster.verify_meta(region1.get_id());
+    let region = cluster.verify_meta(region2.get_id());
+    cluster.verify_restored_cluster(region);
 }
 
 // TODO test if snapshots are removed(GC) before creating a peer.
