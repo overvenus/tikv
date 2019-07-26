@@ -3,9 +3,11 @@ use kvproto::backup::EntryBatch;
 use libc;
 use protobuf::Message;
 use std::u64;
+use std::sync::Arc;
+use memmap::Mmap;
 
 pub struct BatchEntryIterator {
-    files: Vec<(libc::c_int, usize)>,
+    files: Vec<(Arc<Mmap>, usize)>,
     cursor_file: usize,
     cursor_offset: usize,
     current_record: Option<EntryBatch>,
@@ -13,7 +15,7 @@ pub struct BatchEntryIterator {
 }
 
 impl BatchEntryIterator {
-    pub fn new(files: Vec<(libc::c_int, usize)>) -> BatchEntryIterator {
+    pub fn new(files: Vec<(Arc<Mmap>, usize)>) -> BatchEntryIterator {
         BatchEntryIterator {
             files,
             cursor_file: 0,
@@ -55,6 +57,10 @@ impl BatchEntryIterator {
         self.current_record = self.read_record();
     }
 
+    fn buffer(&self, f: usize, offset: usize, len: usize) -> &[u8] {
+        return &self.files[f].0[offset..(offset+len)];
+    }
+
     fn read_record(&mut self) -> Option<EntryBatch> {
         let mut record_len = 0;
         if self.cursor_file >= self.files.len()
@@ -64,27 +70,12 @@ impl BatchEntryIterator {
         }
         //        println!("read record in file[{}]={}, {}, file size: {}", self.cursor_file, self.files[self.cursor_file].0,
         //                 self.cursor_offset, self.files[self.cursor_file].1);
-        if !pread_int(
-            self.files[self.cursor_file].0,
-            self.cursor_offset as u64,
-            &mut record_len,
-        ) {
-            return None;
-        }
+        let record_len = deserialize(self.buffer(self.cursor_file, self.cursor_offset, 4));
         if record_len as usize + self.cursor_offset > self.files[self.cursor_file].1 {
             return None;
         }
-        let mut buf = Vec::with_capacity(record_len as usize);
-        if !pread(
-            self.files[self.cursor_file].0,
-            &mut buf,
-            self.cursor_offset as u64 + 4,
-            record_len as u64,
-        ) {
-            return None;
-        }
         let mut record = EntryBatch::new();
-        if record.merge_from_bytes(buf.as_ref()).is_err() {
+        if record.merge_from_bytes(self.buffer(self.cursor_file, self.cursor_offset + 4, record_len as usize)).is_err() {
             return None;
         }
         Some(record)
@@ -228,7 +219,12 @@ mod tests {
         let fs = tmp_f.metadata().unwrap().len() as usize;
         assert_eq!(file_size, fs);
         let mut vs = Vec::new();
-        vs.push((fd, fs));
+        let mut f = OpenOptions::new()
+                    .read(true)
+                    .open(file_path)?;
+        let mut data = unsafe { memmap::MmapOptions::new().map(&f)? };
+        vs.push((data, file_size));
+
         let mut iter = BatchEntryIterator::new(vs);
         iter.seek_to_first();
         let mut region_id = 1;

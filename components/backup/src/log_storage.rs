@@ -9,12 +9,14 @@ use std::cmp;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
+use std::fs::{OpenOptions, File};
 use std::io::{Error as IoError, ErrorKind, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Mutex, RwLock, Arc};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use std::u64;
+use memmap::{Mmap, MmapMut, MmapOptions};
 
 #[cfg(target_os = "linux")]
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
@@ -29,6 +31,7 @@ const LOG_SUFFIX: &str = ".raftlog";
 const LOG_SUFFIX_LEN: usize = 8;
 const FILE_NUM_LEN: usize = 16;
 const FILE_NAME_LEN: usize = FILE_NUM_LEN + LOG_SUFFIX_LEN;
+const MAX_META_SIZE: usize = 1024 * 1024 * 10;
 // pub const FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
 // pub const VERSION: &[u8] = b"v1.0.0";
 pub const DEFAULT_FILE_CAPACITY: usize = 512 * 1024 * 1024;
@@ -36,14 +39,16 @@ pub const DEFAULT_FILE_CAPACITY: usize = 512 * 1024 * 1024;
 
 const MAGIC_STR: &[u8] = b"haha";
 
-pub struct FileMetaIndex {
+
+pub struct ActiveLog {
     pub file_name: String,
-    pub fd: libc::c_int,
+    pub data: Option<MmapMut>,
+    pub file: Option<File>,
     pub meta: HashMap<u64, RegionMeta>,
     pub size: usize,
 }
 
-impl FileMetaIndex {
+impl ActiveLog {
     pub fn to_file_meta(&self) -> FileMeta {
         let mut meta = FileMeta::new();
         meta.path = self.file_name.clone();
@@ -55,49 +60,11 @@ impl FileMetaIndex {
         return meta;
     }
 
-    pub fn create(fd: libc::c_int, file_name: String) -> FileMetaIndex {
-        FileMetaIndex {
-            fd,
-            file_name,
-            size: 0,
-            meta: HashMap::new(),
-        }
-    }
-
-    pub fn new(fd: libc::c_int, meta: FileMeta) -> FileMetaIndex {
-        let mut regions = HashMap::default();
-        for region_meta in meta.meta.iter() {
-            regions.insert(region_meta.region_id, region_meta.clone());
-        }
-        FileMetaIndex {
-            file_name: meta.path,
-            fd,
-            meta: regions,
-            size: meta.content_size as usize,
-        }
-    }
-
-    pub fn read_meta(
-        fd: libc::c_int,
-        path: &PathBuf,
-        mode: libc::c_int,
-    ) -> IoResult<FileMetaIndex> {
-        if mode == libc::O_RDONLY {
-            Self::get_meta(fd, path)
-        } else {
-            let meta_correct = Self::check_meta(fd, path);
-            if meta_correct {
-                Self::get_meta(fd, path)
-            } else {
-                Self::rewrite_meta(fd, path)
-            }
-        }
-    }
-
-    fn rewrite_meta(fd: libc::c_int, path: &PathBuf) -> IoResult<FileMetaIndex> {
-        let file_meta = fs::metadata(path)?;
-        let file_size = file_meta.len() as usize;
-        let mut iter = BatchEntryIterator::new(vec![(fd, file_size)]);
+    fn rewrite_meta(mut_file: MmapMut, file: Option<File>, path: &PathBuf) -> IoResult<ActiveLog> {
+        let const_data = mut_file.make_read_only()?;
+        let file_size = const_data.len();
+        let file_ptr = Arc::new(const_data);
+        let mut iter = BatchEntryIterator::new(vec![(file_ptr.clone(), file_size)]);
         let mut meta = FileMeta::new();
         let mut region_meta: HashMap<u64, RegionMeta> = HashMap::new();
         meta.path = path.file_name().unwrap().to_str().unwrap().to_string();
@@ -114,42 +81,74 @@ impl FileMetaIndex {
         for m in region_meta.iter() {
             meta.meta.push(m.1.clone());
         }
-        let file_meta_index = FileMetaIndex {
+        let data = file_ptr.make_mut()?;
+        Ok(ActiveLog {
             meta: region_meta,
             size: meta.content_size as usize,
             file_name: meta.path.clone(),
-            fd: fd,
-        };
-        //seek_to_end(fd);
-        write_file_meta(fd, meta);
-        Ok(file_meta_index)
+            data: Some(data),
+            file,
+        })
     }
 
-    fn get_meta(fd: libc::c_int, path: &PathBuf) -> IoResult<FileMetaIndex> {
-        let file_meta = fs::metadata(path)?;
-        let file_size = file_meta.len();
-        let mut buf: Vec<u8> = Vec::with_capacity(4);
-        if !pread(fd, &mut buf, (file_size - 8) as u64, 4) {
-            return Err(IoError::new(ErrorKind::Other, "get meta size failed"));
+    pub fn new(data: Option<MmapMut>, file: Option<File>, file_name: String) -> ActiveLog {
+        ActiveLog {
+            file,
+            data,
+            file_name,
+            size: 0,
+            meta: HashMap::new(),
         }
-        let meta_size = deserialize(buf.as_slice()) as u64;
+    }
+
+}
+
+pub struct FreezeLog {
+    pub file_name: String,
+    pub data: Arc<Mmap>,
+    pub file: File,
+    pub meta: HashMap<u64, RegionMeta>,
+    pub size: usize,
+}
+
+impl FreezeLog {
+    pub fn to_file_meta(&self) -> FileMeta {
+        let mut meta = FileMeta::new();
+        meta.path = self.file_name.clone();
+        meta.crc32 = 0;
+        meta.content_size = self.size as u64;
+        for (_, m) in self.meta.iter() {
+            meta.meta.push(m.clone());
+        }
+        return meta;
+    }
+
+    pub fn new(file: file, data: Mmap, meta: FileMeta) -> FreezeLog {
+        let mut regions = HashMap::default();
+        for region_meta in meta.meta.iter() {
+            regions.insert(region_meta.region_id, region_meta.clone());
+        }
+        FreezeLog {
+            file,
+            data: Arc::new(data),
+            file_name: meta.path,
+            meta: regions,
+            size: meta.content_size as usize,
+        }
+    }
+
+
+    fn get_meta(data: &Mmap) -> IoResult<FileMeta> {
+        let file_size = data.len();
+        let meta_size = deserialize(&data[file_size - 8..4]) as usize;
         if meta_size + 8 >= file_size {
             return Err(IoError::new(ErrorKind::Other, "get meta size incorrect"));
         }
-        let mut result_buf = Vec::with_capacity(meta_size as usize);
-        if !pread(
-            fd,
-            &mut result_buf,
-            file_size - 8 - meta_size,
-            meta_size as u64,
-        ) {
-            return Err(IoError::new(ErrorKind::Other, "read meta failed"));
-        }
         let mut meta = FileMeta::new();
-        if meta.merge_from_bytes(result_buf.as_slice()).is_err() {
+        if meta.merge_from_bytes(&data[file_size - 8 - meta_size..]).is_err() {
             return Err(IoError::new(ErrorKind::Other, "deserialize meta failed"));
         }
-        return Ok(FileMetaIndex::new(fd, meta));
+        return Ok(meta);
     }
 
     fn check_meta(fd: libc::c_int, path: &PathBuf) -> bool {
@@ -214,8 +213,8 @@ impl FileMetaIndex {
 
 pub struct LogManager {
     pub active_log_capacity: usize,
-    pub active_file: FileMetaIndex,
-    pub all_files: Vec<FileMetaIndex>,
+    pub active_log: ActiveLog,
+    pub all_files: Vec<FreezeLog>,
     pub region_indexes: HashMap<u64, RegionMeta>,
     dir: PathBuf,
     begin_write: std::time::Instant,
@@ -225,19 +224,19 @@ pub struct LogManager {
 
 impl LogManager {
     pub fn new(
-        active_file: FileMetaIndex,
+        active_log: ActiveLog,
         active_log_capacity: usize,
         dir: PathBuf,
-        all_files: Vec<FileMetaIndex>,
+        all_files: Vec<FreezeLog>,
     ) -> LogManager {
         let mut region_indexes = HashMap::new();
         for f in all_files.iter() {
-            FileMetaIndex::merge_region_meta(&mut region_indexes, &f.meta);
+            FreezeLog::merge_region_meta(&mut region_indexes, &f.meta);
         }
         LogManager {
             active_log_capacity,
             all_files,
-            active_file,
+            active_log,
             dir,
             region_indexes,
             write_buffer: Some(Vec::default()),
@@ -246,71 +245,116 @@ impl LogManager {
         }
     }
 
+    fn open_write_file(file_path: PathBuf, capacity: usize) -> IoResult<File> {
+        let mut f = OpenOptions::new().read(true).write(true).create(true).open(file_path)?;
+        f.set_len(capacity as u64);
+        Ok(f)
+    }
+
     pub fn open(
         path: &Path,
         filenames: Vec<(u64, String)>,
-        active_prefix: u64,
         active_log_capacity: usize,
     ) -> IoResult<LogManager> {
         let mut all_files = Vec::new();
         for (file_prefix, file_name) in filenames.iter() {
             let file_path = path.join(file_name);
-            let c_path = CString::new(file_path.to_str().unwrap().as_bytes()).unwrap();
-            let mode = if file_prefix + 1 == active_prefix {
+            if *file_prefix == filenames.last().unwrap().0 {
                 // The last log file maybe have not written meta into disk. So we must build it meta.
-                libc::O_RDWR | libc::O_APPEND
+                let mut f = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(file_path)?;
+                let mut data = unsafe { memmap::MmapOptions::new().map_mut(&f)? };
+                let mut active_log = ActiveLog::rewrite_meta(data, Some(file), &file_path)?;
+                return Ok(LogManager::new(
+                    active_log,
+                    active_log_capacity,
+                    path.to_path_buf(),
+                    all_files,
+                ));
             } else {
-                libc::O_RDONLY
+                let mut f = OpenOptions::new()
+                    .read(true)
+                    .open(file_path)?;
+                let mut data = unsafe { memmap::MmapOptions::new().map(&f)? };
+                let mut meta = FreezeLog::get_meta(&data)?;
+                all_files.push(FreezeLog::new(f, data, meta));
             };
-            let fd = unsafe { libc::open(c_path.as_ptr(), mode) };
-            if fd < 0 {
-                panic!("open file failed, err {}", errno::errno().to_string());
-            }
-            let file_meta = FileMetaIndex::read_meta(fd, &file_path, mode)?;
-            all_files.push(file_meta);
         }
-        let file_name = generate_file_name(active_prefix);
-        let new_fd = new_log_file(path.to_path_buf(), file_name.clone());
-        let active_file = FileMetaIndex::create(new_fd, file_name);
+        let file_name = generate_file_name(0);
+        let file_path = path.join(file_name.clone());
+        let mut f = Self::open_write_file(file_path, active_log_capacity + MAX_META_SIZE)?;
+        let mut data = unsafe { memmap::MmapOptions::new().map_mut(&f)? };
+        let active_log = ActiveLog::new(Some(data), Some(f), file_name);
         Ok(LogManager::new(
-            active_file,
+            active_log,
             active_log_capacity,
             path.to_path_buf(),
             all_files,
         ))
     }
 
-    pub fn dump_meta(&mut self) {
+    fn create_write_file(&self, file_name: String) -> IoResult<File> {
+        let file_path = self.dir.join(file_name.clone());
+        let mut file = OpenOptions::new().read(true).write(true).create(true).open(file_path)?;
+        file.set_len((self.active_log_capacity + MAX_META_SIZE) as u64);
+        Ok(file)
+    }
+
+
+    pub fn dump_meta(&mut self) -> HashMap<u64, RegionMeta> {
         let mut write_buffer = self.write_buffer.as_mut().unwrap();
-        self.active_file.size += write_buffer.len();
+        self.active_log.size += write_buffer.len();
         let write_cost = self.begin_write.elapsed();
-        info!("log file write cost time (second)"; "file" => self.active_file.file_name.clone(), "time" => write_cost.as_millis() as u64);
-        let prefix = extract_file_num(self.active_file.file_name.as_str()).unwrap();
-        let file_name = generate_file_name(prefix + 1);
-        let mut meta = self.active_file.to_file_meta();
-        meta.content_size = self.active_file.size as u64;
+        info!("log file write cost time (second)"; "file" => self.active_log.file_name.clone(), "time" => write_cost.as_millis() as u64);
+        let mut meta = self.active_log.to_file_meta();
+        meta.content_size = self.active_log.size as u64;
         write_buffer.extend_from_slice(MAGIC_STR);
         meta.write_to_vec(&mut write_buffer).unwrap();
         let buf = serialize(meta.compute_size());
         write_buffer.extend_from_slice(buf.as_ref());
         write_buffer.extend_from_slice(MAGIC_STR);
-
-        let write_cost = self.begin_write.elapsed();
-        let new_file = FileMetaIndex::create(-1, file_name);
-        let old_file = std::mem::replace(&mut self.active_file, new_file);
+        let meta = self.active_log.meta.clone();
+        self.active_log.meta.clear();
+        // We do not create one new file, until we finished dumping last file.
         self.begin_write = Instant::now();
-        self.all_files.push(old_file);
+        meta
     }
 
-    fn dump(&mut self) {
-        let fd = self.active_file.fd;
-        self.dump_meta();
+    fn switch_active_log(&mut self, data: Mmap, meta: HashMap<u64, RegionMeta>, size: usize) -> IoResult<()> {
+        let freeze_log = FreezeLog {
+            file_name: self.active_log.file_name.clone(),
+            data: rd_data,
+            file: self.active_log.file.take().unwrap(),
+            meta,
+            size,
+        };
+        let prefix = extract_file_num(self.active_log.file_name.as_str()).unwrap();
+        let file_name = generate_file_name(prefix + 1);
+        let new_file = self.create_write_file(file_name)?;
+        let data = unsafe { memmap::MmapOptions::new().map_mut(&new_file)? };
+        self.active_log.file_name = file_name;
+        self.active_log.file = Some(new_file);
+        self.active_log.data = Some(data);
+        self.all_files.push(freeze_log);
+        Ok(())
+    }
+
+    fn dump(&mut self) -> IoResult<()> {
+        let data = self.active_log.data.as_mut().unwrap();
+        let offset = self.active_log.size;
         let mut write_buffer = self.write_buffer.as_mut().unwrap();
-        write(fd, write_buffer);
-        sync(fd);
+        let meta = self.dump_meta();
+        let size = offset + write_buffer.len();
+
+        (&mut data[offset..]).copy_from_slice(write_buffer.as_ref());
+        data.flush_range(offset, write_buffer.len())?;
+
+        let rd_data = data.make_read_only()?;
+        self.switch_active_log(rd_data, meta, size);
         write_buffer.clear();
-        let new_fd = new_log_file(self.dir.clone(), self.active_file.file_name.clone());
-        self.active_file.fd = new_fd;
+        Ok(())
     }
 
 
@@ -319,7 +363,7 @@ impl LogManager {
             return true;
         }
         let mut write_buffer = self.write_buffer.as_mut().unwrap();
-        if write_buffer.len() > self.active_log_capacity {
+        if self.active_log.size + write_buffer.len() > self.active_log_capacity {
             return false;
         }
         let buf = serialize(batch.compute_size());
@@ -329,13 +373,6 @@ impl LogManager {
     }
 }
 
-impl Drop for LogManager {
-    fn drop(&mut self) {
-        for f in self.all_files.iter() {
-            close(f.fd);
-        }
-    }
-}
 
 pub struct LogStorage {
     log_manager: RwLock<LogManager>,
@@ -393,16 +430,10 @@ impl LogStorage {
                 log_files.push((file_num, file_name.to_string()));
             }
         }
-        let active_prefix = if log_files.is_empty() {
-            0 as u64
-        } else {
-            max_file_num + 1
-        };
         log_files.sort_by_key(|a| a.0);
         let log_manager = LogManager::open(
             path.as_path(),
             log_files,
-            active_prefix,
             active_log_capacity,
         )?;
         Ok(LogStorage::new(log_manager))
@@ -413,9 +444,9 @@ impl LogStorage {
         {
             let log = self.log_manager.read().unwrap();
             for f in &log.all_files {
-                fds.push((f.fd, f.size));
+                fds.push((f.data.clone(), f.size));
             }
-            fds.push((log.active_file.fd, log.active_file.size));
+            // fds.push((log.active_log.fd, log.active_log.size));
         }
         BatchEntryIterator::new(fds)
     }
@@ -426,12 +457,12 @@ impl LogStorage {
             let log = self.log_manager.read().unwrap();
             for f in &log.all_files {
                 if f.meta.contains_key(&region_id) {
-                    fds.push((f.fd, f.size));
+                    fds.push((f.data.clone(), f.size));
                 }
             }
-            if log.active_file.meta.contains_key(&region_id) {
-                fds.push((log.active_file.fd, log.active_file.size));
-            }
+//            if log.active_log.meta.contains_key(&region_id) {
+//                fds.push((log.active_log.fd, log.active_log.size));
+//            }
         }
         BatchEntryIterator::new(fds)
     }
@@ -443,15 +474,15 @@ impl LogStorage {
             let log = self.log_manager.read().unwrap();
             for f in &log.all_files {
                 if f.has_region_entry(region_id, start_index, end_index) {
-                    fds.push((f.fd, f.size));
+                    fds.push((f.data.clone(), f.size));
                 }
             }
-            if log
-                .active_file
-                .has_region_entry(region_id, start_index, end_index)
-            {
-                fds.push((log.active_file.fd, log.active_file.size));
-            }
+//            if log
+//                .active_log
+//                .has_region_entry(region_id, start_index, end_index)
+//            {
+//                fds.push((log.active_log.fd, log.active_log.size));
+//            }
         }
         let mut iter = BatchEntryIterator::new(fds);
         iter.seek_to_first();
@@ -476,12 +507,12 @@ impl LogStorage {
         {
             let mut log_manager = self.log_manager.write().unwrap();
             if !update_raft_meta(&mut log_manager.region_indexes, batch)
-                || !update_raft_meta(&mut log_manager.active_file.meta, batch)
+                || !update_raft_meta(&mut log_manager.active_log.meta, batch)
             {
                 info!("put batch failed"; "batch_region_id" => batch.region_id);
                 return false;
             }
-            if 0 == log_manager.active_file.size {
+            if 0 == log_manager.active_log.size {
                 log_manager.begin_write = Instant::now();
             }
             if log_manager.write_into_buffer(batch) {
@@ -489,7 +520,7 @@ impl LogStorage {
             }
 
         }
-        while self.sync() {
+        while self.sync().is_ok() {
             let mut log_manager = self.log_manager.write().unwrap();
             if log_manager.write_into_buffer(batch) {
                 return true;
@@ -501,44 +532,45 @@ impl LogStorage {
 
     }
 
-    pub fn sync(&self) -> bool {
+    pub fn sync(&self) -> IoResult<()> {
         let _guard = self.lock.lock().unwrap();
-        let mut need_dump = false;
-        let (mut sync_task, mut fd) = {
+        let mut meta = None;
+        let mut offset = 0;
+        let mut size = 0;
+        let (mut sync_task, mut file) = {
             let mut log = self.log_manager.write().unwrap();
             assert!(log.write_buffer.is_some());
-            let fd = log.active_file.fd;
+            let offset = log.active_log.size;
             if let Some(sync_task) = log.write_buffer.as_ref() {
                 if sync_task.is_empty() {
-                    return true;
-                } else if sync_task.len() + log.active_file.size > log.active_log_capacity {
-                    log.dump_meta();
-                    need_dump = true;
+                    return Ok(());
+                } else if sync_task.len() + log.active_log.size > log.active_log_capacity {
+                    size = log.active_log.size + sync_task.len();
+                    meta = Some(log.dump_meta());
                 }
             }
             let task = log.write_buffer.take();
+            let file = log.active_log.data.take();
             log.write_buffer = log.sync_buffer.take();
-            (task, fd)
+            (task, file)
         };
         let begin_dump = Instant::now();
         let write_buffer = sync_task.as_mut().unwrap();
-        if !write(fd, write_buffer) {
-            error!("flush buffer to file failed");
-            return false;
-        }
-        sync(fd);
+        let data = file.unwrap();
+        (&mut data[offset..]).copy_from_slice(write_buffer.as_ref());
+        data.flush_range(offset, write_buffer.len())?;
         let mut log = self.log_manager.write().unwrap();
-        if need_dump {
-            let new_fd = new_log_file(log.dir.clone(), log.active_file.file_name.clone());
-            log.active_file.fd = new_fd;
-            assert_eq!(0, log.active_file.size);
+        if meta.is_some() {
+            let rd_data = data.make_read_only()?;
+            log.switch_active_log(rd_data, meta.unwrap(), size);
+            assert_eq!(0, log.active_log.size);
             info!("log file write sync last buffer cost"; "time" => begin_dump.elapsed().as_millis() as u64);
         } else {
-            log.active_file.size += write_buffer.len();
+            log.active_log.size += write_buffer.len();
         }
         write_buffer.clear();
         log.sync_buffer = sync_task;
-        true
+        Ok(())
     }
 
     fn dump(&self) {
@@ -553,7 +585,7 @@ impl LogStorage {
 
     fn size(&self) -> usize {
         let log = self.log_manager.read().unwrap();
-        return log.active_file.size;
+        return log.active_log.size;
     }
 }
 
@@ -585,7 +617,7 @@ fn generate_file_name(file_num: u64) -> String {
     format!("{:016}{}", file_num, LOG_SUFFIX)
 }
 
-fn write_file_meta(fd: libc::c_int, meta: FileMeta) {
+fn write_file_meta(f: &MmapMut, offset: usize, meta: FileMeta) -> IoResult<()> {
     let meta_len = meta.compute_size();
     let mut meta_buf = Vec::with_capacity(meta_len as usize + 256);
     meta_buf.extend_from_slice(MAGIC_STR);
@@ -593,8 +625,8 @@ fn write_file_meta(fd: libc::c_int, meta: FileMeta) {
     let buf = serialize(meta_len);
     meta_buf.extend_from_slice(buf.as_ref());
     meta_buf.extend_from_slice(MAGIC_STR);
-    write(fd, &mut meta_buf);
-    sync(fd);
+    (&mut f[offset..]).copy_from_slice(meta_buf.as_slice());
+    f.flush()
 }
 
 fn update_raft_meta(meta: &mut HashMap<u64, RegionMeta>, batch: &mut EntryBatch) -> bool {
@@ -658,15 +690,15 @@ mod tests {
         tmp_f.write_all(&content).unwrap();
         tmp_f.sync_all().unwrap();
 
-        let c_path = CString::new(file_path.to_str().unwrap().as_bytes()).unwrap();
-        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY) };
-        if fd < 0 {
-            panic!("open file failed, err {}", errno::errno().to_string());
-        }
-        let file_meta = FileMetaIndex::read_meta(fd, &file_path, libc::O_RDONLY).unwrap();
-        println!("read meta succeed");
-        assert_eq!(meta.content_size, file_meta.size as u64);
-        assert_eq!("log".to_string(), file_meta.file_name);
+//        let c_path = CString::new(file_path.to_str().unwrap().as_bytes()).unwrap();
+//        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY) };
+//        if fd < 0 {
+//            panic!("open file failed, err {}", errno::errno().to_string());
+//        }
+//        let file_meta = FreezeLog::read_meta(fd, &file_path, libc::O_RDONLY).unwrap();
+//        println!("read meta succeed");
+//        assert_eq!(meta.content_size, file_meta.size as u64);
+//        assert_eq!("log".to_string(), file_meta.file_name);
     }
 
     #[test]

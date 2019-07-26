@@ -19,6 +19,9 @@ extern crate slog_global;
 #[macro_use]
 extern crate quick_error;
 
+#[macro_use]
+extern crate memmap;
+
 mod check;
 mod errors;
 mod file_util;
@@ -264,7 +267,7 @@ impl BackupManager {
         self.storage.put(batch)
     }
 
-    pub fn sync(&self) -> bool {
+    pub fn sync(&self) -> IoResult<()> {
         self.storage.sync()
     }
 

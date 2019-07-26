@@ -23,7 +23,7 @@ pub trait Storage: Sync + Send {
     fn save_file(&self, path: &Path, content: &[u8]) -> IoResult<()>;
     fn read_file(&self, path: &Path, buf: &mut Vec<u8>) -> IoResult<()>;
     fn put(&self, batch: &mut EntryBatch) -> bool;
-    fn sync(&self) -> bool;
+    fn sync(&self) -> IoResult<()>;
 }
 
 impl Storage for Box<dyn Storage> {
@@ -48,7 +48,7 @@ impl Storage for Box<dyn Storage> {
     fn put(&self, batch: &mut EntryBatch) -> bool {
         (**self).put(batch)
     }
-    fn sync(&self) -> bool {
+    fn sync(&self) -> IoResult<()> {
         (**self).sync()
     }
 }
@@ -144,7 +144,7 @@ impl Storage for LocalStorage {
     fn put(&self, batch: &mut EntryBatch) -> bool {
         self.log.put(batch)
     }
-    fn sync(&self) -> bool {
+    fn sync(&self) -> IoResult<()> {
         self.log.sync()
     }
 }
