@@ -313,7 +313,6 @@ impl LogManager {
         self.active_file.fd = new_fd;
     }
 
-
     pub fn write_into_buffer(&mut self, batch: &mut EntryBatch) -> bool {
         if batch.entries.is_empty() {
             return true;
@@ -475,19 +474,14 @@ impl LogStorage {
         }
         {
             let mut log_manager = self.log_manager.write().unwrap();
-            if !update_raft_meta(&mut log_manager.region_indexes, batch)
-                || !update_raft_meta(&mut log_manager.active_file.meta, batch)
-            {
-                info!("put batch failed"; "batch_region_id" => batch.region_id);
-                return false;
-            }
+            update_raft_meta(&mut log_manager.region_indexes, batch);
+            update_raft_meta(&mut log_manager.active_file.meta, batch);
             if 0 == log_manager.active_file.size {
                 log_manager.begin_write = Instant::now();
             }
             if log_manager.write_into_buffer(batch) {
                 return true;
             }
-
         }
         while self.sync() {
             let mut log_manager = self.log_manager.write().unwrap();
@@ -498,7 +492,6 @@ impl LogStorage {
         }
         info!("sync failed");
         return false;
-
     }
 
     pub fn sync(&self) -> bool {
@@ -597,20 +590,16 @@ fn write_file_meta(fd: libc::c_int, meta: FileMeta) {
     sync(fd);
 }
 
-fn update_raft_meta(meta: &mut HashMap<u64, RegionMeta>, batch: &mut EntryBatch) -> bool {
+fn update_raft_meta(meta: &mut HashMap<u64, RegionMeta>, batch: &mut EntryBatch) {
     match meta.get_mut(&batch.region_id) {
         Some(region_meta) => {
-            if region_meta.end_index + 1 < batch.entries.first().unwrap().index {
-                batch.mut_entries().clear();
-                return false;
-            }
             while !batch.entries.is_empty()
                 && batch.entries.first().unwrap().index <= region_meta.end_index
             {
                 batch.entries.remove(0);
             }
             if batch.entries.is_empty() {
-                return false;
+                return;
             }
             region_meta.end_index = batch.entries.last().unwrap().index;
         }
@@ -622,7 +611,6 @@ fn update_raft_meta(meta: &mut HashMap<u64, RegionMeta>, batch: &mut EntryBatch)
             meta.insert(region_meta.region_id, region_meta);
         }
     }
-    return true;
 }
 
 #[cfg(test)]
@@ -631,9 +619,9 @@ mod tests {
 
     use super::*;
     use crate::tests::make_snap_dir;
-    use std::sync::Arc;
     use std::fs::File;
     use std::io::Write;
+    use std::sync::Arc;
 
     #[test]
     fn test_file_meta() {
