@@ -51,8 +51,8 @@ use crate::raftstore::store::worker::{
     CleanupSSTTask, ConsistencyCheckTask, RaftlogGcTask, ReadDelegate, RegionTask, SplitCheckTask,
 };
 use crate::raftstore::store::{
-    util, CasualMessage, Config, PeerMsg, PeerTicks, RaftCommand, SignificantMsg, SnapKey,
-    SnapshotDeleter, StoreMsg,
+    util, CasualMessage, Config, PeerMsg, PeerTicks, RaftCommand, RestoreMessage, SignificantMsg,
+    SnapKey, SnapshotDeleter, StoreMsg,
 };
 
 pub struct DestroyPeerJob {
@@ -298,6 +298,7 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
                 }
                 PeerMsg::SignificantMsg(msg) => self.on_significant_msg(msg),
                 PeerMsg::CasualMessage(msg) => self.on_casual_msg(msg),
+                PeerMsg::RestoreMessage(msg) => self.on_restore_msg(msg),
                 PeerMsg::Start => self.start(),
                 PeerMsg::HeartbeatPd => {
                     if self.fsm.peer.is_leader() {
@@ -372,6 +373,31 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
                     .handle_request_snapshot(region_epoch, start_cb, end_cb);
             }
             CasualMessage::Test(cb) => cb(self.fsm),
+        }
+    }
+
+    fn on_restore_msg(&mut self, msg: RestoreMessage) {
+        let RestoreMessage { msg, callback } = msg;
+        let has_snapshot = msg.get_message().has_snapshot()
+            && !raft::is_empty_snap(msg.get_message().get_snapshot());
+        if has_snapshot {
+            // Hook snapshot finish event.
+            let mut snap_data = RaftSnapshotData::new();
+            snap_data
+                .merge_from_bytes(msg.get_message().get_snapshot().get_data())
+                .unwrap();
+            let epoch = snap_data.get_region().get_region_epoch();
+            self.fsm.peer.hook_snasphot_finish(epoch.clone(), callback);
+        } else {
+            // Send callback to apply worker.
+        }
+        if let Err(e) = self.on_raft_message(msg) {
+            crit!(
+                "handle raft message err";
+                "region_id" => self.fsm.region_id(),
+                "peer_id" => self.fsm.peer_id(),
+                "err" => %e,
+            );
         }
     }
 

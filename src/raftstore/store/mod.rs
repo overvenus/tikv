@@ -25,7 +25,7 @@ pub use self::config::Config;
 pub use self::fsm::{new_compaction_listener, DestroyPeerJob, RaftRouter, StoreInfo};
 pub use self::msg::{
     Callback, CasualMessage, PeerMsg, PeerTicks, RaftCommand, ReadCallback, ReadResponse,
-    SignificantMsg, StoreMsg, StoreTick, WriteCallback, WriteResponse,
+    RestoreMessage, SignificantMsg, StoreMsg, StoreTick, WriteCallback, WriteResponse,
 };
 pub use self::peer::{
     Peer, PeerStat, ProposalContext, ReadExecutor, RequestInspector, RequestPolicy,
@@ -43,7 +43,6 @@ pub use self::snap::{
 };
 pub use self::transport::{CasualRouter, ProposalRouter, StoreRouter, Transport};
 pub use self::worker::{KeyEntry, LocalReader, RegionTask};
-pub use backup::{BackupManager, Dependency, LocalStorage};
 
 // Only used in tests
 #[cfg(test)]

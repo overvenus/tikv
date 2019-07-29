@@ -1,5 +1,6 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
+use backup::BackupManager;
 use crossbeam::channel::{TryRecvError, TrySendError};
 use engine::rocks;
 use engine::rocks::CompactionJobInfo;
@@ -49,8 +50,8 @@ use crate::raftstore::store::worker::{
     SplitCheckRunner, SplitCheckTask,
 };
 use crate::raftstore::store::{
-    util, BackupManager, Callback, CasualMessage, PeerMsg, RaftCommand, SignificantMsg,
-    SnapManager, SnapshotDeleter, StoreMsg, StoreTick,
+    util, Callback, CasualMessage, PeerMsg, RaftCommand, SignificantMsg, SnapManager,
+    SnapshotDeleter, StoreMsg, StoreTick,
 };
 use crate::raftstore::Result;
 use crate::storage::kv::{CompactedEvent, CompactionListener};
@@ -500,7 +501,6 @@ impl<T: Transport, C: PdClient> RaftPoller<T, C> {
         if !self.poll_ctx.raft_wb.is_empty() {
             let mut write_opts = WriteOptions::new();
             write_opts.set_sync(self.poll_ctx.cfg.sync_log || self.poll_ctx.sync_log);
-            write_opts.disable_wal(self.poll_ctx.cfg.disable_raft_wal);
             self.poll_ctx
                 .engines
                 .raft

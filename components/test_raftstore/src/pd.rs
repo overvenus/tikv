@@ -372,7 +372,7 @@ impl Cluster {
                 // we are the same, must check epoch here.
                 check_stale_region(&search_region, &region)?;
                 if search_region.get_region_epoch().get_version()
-                    < region.get_region_epoch().get_version()
+                    <= region.get_region_epoch().get_version()
                 {
                     self.remove_region(&search_region);
                     self.add_region(&region);
