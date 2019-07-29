@@ -4,18 +4,18 @@ use super::log_storage::{LogStorage, DEFAULT_FILE_CAPACITY};
 use std::fs::{self, File};
 use std::io::{Read, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rand::Rng;
 
 use super::maybe_create_dir;
 use kvproto::backup::EntryBatch;
-use std::sync::Arc;
 
 const LOCAL_STORAGE_TMP_DIR: &str = "localtmp";
 const LOCAL_STORAGE_TEP_FILE_SUFFIX: &str = "tmp";
 
 // TODO(backup): Simplify the trait.
-pub trait Storage: Sync + Send {
+pub trait Storage: Sync + Send + 'static {
     fn rename_dir(&self, from: &Path, to: &Path) -> IoResult<()>;
     fn make_dir(&self, path: &Path) -> IoResult<()>;
     fn list_dir(&self, path: &Path) -> IoResult<Vec<PathBuf>>;
@@ -26,7 +26,7 @@ pub trait Storage: Sync + Send {
     fn sync(&self) -> bool;
 }
 
-impl Storage for Box<dyn Storage> {
+impl Storage for Arc<dyn Storage> {
     fn rename_dir(&self, from: &Path, to: &Path) -> IoResult<()> {
         (**self).rename_dir(from, to)
     }

@@ -17,11 +17,11 @@ pub static LOG_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 #[macro_export]
 macro_rules! fatal {
-    ($lvl:expr, $($arg:tt)+) => ({
+    ($lvl:expr, $($arg:tt)*) => ({
         if $crate::binutil::setup::LOG_INITIALIZED.load(::std::sync::atomic::Ordering::SeqCst) {
-            crit!($lvl, $($arg)+);
+            crit!($lvl, $($arg)*);
         } else {
-            eprintln!($lvl, $($arg)+);
+            eprintln!($lvl, $($arg)*);
         }
         slog_global::clear_global();
         ::std::process::exit(1)
@@ -43,6 +43,7 @@ pub fn initial_logger(config: &TiKvConfig) {
         "integrations::".to_owned(),
         "failpoints::".to_owned(),
         "backup".to_owned(),
+        "restore".to_owned(),
         // Collects logs for test components.
         "test_".to_owned(),
     ];

@@ -158,6 +158,7 @@ pub struct ApplyOptions {
     pub region: Region,
     pub abort: Arc<AtomicUsize>,
     pub write_batch_size: usize,
+    pub snap_key: SnapKey,
 }
 
 /// `Snapshot` is a trait for snapshot.
@@ -859,7 +860,19 @@ impl Snapshot for Snap {
             let meta_dst = tmp_dir
                 .path()
                 .join(self.meta_file.path.file_name().unwrap());
-            box_try!(fs::copy(&self.meta_file.path, meta_dst));
+            // Save snapshot.
+            let mut snap_data = RaftSnapshotData::new();
+            snap_data.set_version(SNAPSHOT_VERSION);
+            snap_data.set_meta(self.meta_file.meta.clone());
+            snap_data.set_region(options.region.clone());
+            let mut snap = RaftSnapshot::new();
+            snap.mut_metadata().set_index(options.snap_key.idx);
+            snap.mut_metadata().set_term(options.snap_key.term);
+            snap.set_data(snap_data.write_to_bytes().unwrap());
+            box_try!(backup_mgr
+                .storage
+                .save_file(&meta_dst, &snap.write_to_bytes().unwrap()));
+
             // CF files
             for cf_file in &self.cf_files {
                 if cf_file.size == 0 {
@@ -871,12 +884,7 @@ impl Snapshot for Snap {
                 debug!("copy cf file"; "src" => cf_file.path.display(), "dst" => dst.display());
                 box_try!(fs::copy(&cf_file.path, dst));
             }
-            box_try!(backup_mgr.save_snapshot(
-                self.key.region_id,
-                self.key.term,
-                self.key.idx,
-                tmp_dir.path()
-            ));
+            box_try!(backup_mgr.save_snapshot(self.key.region_id, self.key.idx, tmp_dir.path()));
             return Ok(());
         }
 
@@ -1083,6 +1091,10 @@ impl SnapManager {
             }
         }
         Ok(())
+    }
+
+    pub fn base_path(&self) -> PathBuf {
+        self.core.rl().base.clone().into()
     }
 
     // Return all snapshots which is idle not being used.
@@ -1745,6 +1757,7 @@ pub mod tests {
             region: region.clone(),
             abort: Arc::new(AtomicUsize::new(JOB_STATUS_RUNNING)),
             write_batch_size: TEST_WRITE_BATCH_SIZE,
+            snap_key: SnapKey::new(region.get_id(), 1, 1),
         };
         // Verify thte snapshot applying is ok.
         assert!(s4.apply(options).is_ok());
@@ -2044,6 +2057,7 @@ pub mod tests {
             region: region.clone(),
             abort: Arc::new(AtomicUsize::new(JOB_STATUS_RUNNING)),
             write_batch_size: TEST_WRITE_BATCH_SIZE,
+            snap_key: SnapKey::new(region.get_id(), 1, 1),
         };
         assert!(s5.apply(options).is_err());
 

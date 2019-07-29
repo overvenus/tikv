@@ -10,6 +10,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::{cmp, usize};
 
+use backup::BackupManager;
 use crossbeam::channel::{TryRecvError, TrySendError};
 use engine::rocks;
 use engine::rocks::Writable;
@@ -40,7 +41,7 @@ use crate::raftstore::store::msg::{Callback, PeerMsg};
 use crate::raftstore::store::peer::Peer;
 use crate::raftstore::store::peer_storage::{self, write_initial_apply_state, write_peer_state};
 use crate::raftstore::store::util::check_region_epoch;
-use crate::raftstore::store::{cmd_resp, keys, util, BackupManager, Config};
+use crate::raftstore::store::{cmd_resp, keys, util, Config};
 use crate::raftstore::{Error, Result};
 use tikv_util::mpsc::{loose_bounded, LooseBoundedSender, Receiver};
 use tikv_util::time::{duration_to_sec, Instant, SlowTimer};
@@ -236,7 +237,7 @@ impl ExecContext {
 
 struct ApplyCallback {
     region: Region,
-    cbs: Vec<(Option<Callback>, RaftCmdResponse)>,
+    cbs: Vec<(Option<Callback>, RaftCmdResponse, u64)>,
 }
 
 impl ApplyCallback {
@@ -246,16 +247,16 @@ impl ApplyCallback {
     }
 
     fn invoke_all(self, host: &CoprocessorHost) {
-        for (cb, mut resp) in self.cbs {
-            host.post_apply(&self.region, &mut resp);
+        for (cb, mut resp, index) in self.cbs {
+            host.post_apply(&self.region, &mut resp, index);
             if let Some(cb) = cb {
                 cb.invoke_with_response(resp)
             };
         }
     }
 
-    fn push(&mut self, cb: Option<Callback>, resp: RaftCmdResponse) {
-        self.cbs.push((cb, resp));
+    fn push(&mut self, cb: Option<Callback>, resp: RaftCmdResponse, index: u64) {
+        self.cbs.push((cb, resp, index));
     }
 }
 
@@ -906,11 +907,11 @@ impl ApplyDelegate {
         //    it will also propose an empty entry. But that entry will not contain
         //    any associated callback. So no need to clear callback.
         while let Some(mut cmd) = self.pending_cmds.pop_normal(std::u64::MAX, term - 1) {
-            apply_ctx
-                .cbs
-                .last_mut()
-                .unwrap()
-                .push(cmd.cb.take(), cmd_resp::err_resp(Error::StaleCommand, term));
+            apply_ctx.cbs.last_mut().unwrap().push(
+                cmd.cb.take(),
+                cmd_resp::err_resp(Error::StaleCommand, term),
+                index,
+            );
         }
         ApplyResult::None
     }
@@ -1011,7 +1012,7 @@ impl ApplyDelegate {
         // store will call it after handing exec result.
         cmd_resp::bind_term(&mut resp, self.term);
         let cmd_cb = self.find_cb(index, term, is_conf_change);
-        apply_ctx.cbs.last_mut().unwrap().push(cmd_cb, resp);
+        apply_ctx.cbs.last_mut().unwrap().push(cmd_cb, resp, index);
 
         exec_result
     }
@@ -1139,15 +1140,19 @@ impl ApplyDelegate {
         related_region_ids: &[u64],
     ) {
         if let Some(bm) = ctx.backup_mgr.as_ref() {
-            let mut event = BackupEvent::new();
-            event.set_region_id(self.region_id());
-            event.set_index(ctx.exec_ctx.as_ref().unwrap().index);
-            event.set_dependency(bm.dependency.alloc_number());
-            event.set_event(e);
-            for id in related_region_ids {
-                event.mut_related_region_ids().push(*id);
+            // TODO(backup): A better way to save event when we are backuping
+            //               the region.
+            if bm.is_region_started(self.region_id()) {
+                let mut event = BackupEvent::new();
+                event.set_region_id(self.region_id());
+                event.set_index(ctx.exec_ctx.as_ref().unwrap().index);
+                event.set_dependency(bm.dependency.alloc_number());
+                event.set_event(e);
+                for id in related_region_ids {
+                    event.mut_related_region_ids().push(*id);
+                }
+                self.event_batch.push(event);
             }
-            self.event_batch.push(event);
         }
     }
 }
@@ -3571,6 +3576,7 @@ mod tests {
         pre_query_count: Arc<AtomicUsize>,
         post_admin_count: Arc<AtomicUsize>,
         post_query_count: Arc<AtomicUsize>,
+        post_apply_index: Arc<AtomicU64>,
     }
 
     impl Coprocessor for ApplyObserver {}
@@ -3580,8 +3586,14 @@ mod tests {
             self.pre_query_count.fetch_add(1, Ordering::SeqCst);
         }
 
-        fn post_apply_query(&self, _: &mut ObserverContext<'_>, _: &mut RepeatedField<Response>) {
+        fn post_apply_query(
+            &self,
+            _: &mut ObserverContext<'_>,
+            _: &mut RepeatedField<Response>,
+            index: u64,
+        ) {
             self.post_query_count.fetch_add(1, Ordering::SeqCst);
+            self.post_apply_index.store(index, Ordering::SeqCst);
         }
     }
 
@@ -3818,6 +3830,10 @@ mod tests {
         assert_eq!(apply_res.apply_state.get_applied_index(), index as u64);
         assert_eq!(obs.pre_query_count.load(Ordering::SeqCst), index);
         assert_eq!(obs.post_query_count.load(Ordering::SeqCst), index);
+        assert_eq!(
+            obs.post_apply_index.load(Ordering::SeqCst),
+            apply_res.apply_state.get_applied_index()
+        );
 
         system.shutdown();
     }

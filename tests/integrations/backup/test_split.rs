@@ -7,8 +7,6 @@ use test_raftstore::*;
 use tikv::raftstore::store::*;
 use tikv_util::HandyRwLock;
 
-use super::configure_for_backup;
-
 #[test]
 fn test_server_split_backup_region() {
     let mut cluster = new_server_cluster(0, 2);

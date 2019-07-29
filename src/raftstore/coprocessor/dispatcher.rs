@@ -189,14 +189,15 @@ impl CoprocessorHost {
         }
     }
 
-    pub fn post_apply(&self, region: &Region, resp: &mut RaftCmdResponse) {
+    pub fn post_apply(&self, region: &Region, resp: &mut RaftCmdResponse, index: u64) {
         if !resp.has_admin_response() {
             let query = resp.mut_responses();
             loop_ob!(
                 region,
                 &self.registry.query_observers,
                 post_apply_query,
-                query
+                query,
+                index
             );
         } else {
             let admin = resp.mut_admin_response();
@@ -204,7 +205,8 @@ impl CoprocessorHost {
                 region,
                 &self.registry.admin_observers,
                 post_apply_admin,
-                admin
+                admin,
+                index
             );
         }
     }
@@ -272,6 +274,7 @@ mod tests {
         bypass: Arc<AtomicBool>,
         called: Arc<AtomicUsize>,
         return_err: Arc<AtomicBool>,
+        index: Arc<AtomicU64>,
     }
 
     impl Coprocessor for TestCoprocessor {}
@@ -295,9 +298,15 @@ mod tests {
             ctx.bypass = self.bypass.load(Ordering::SeqCst);
         }
 
-        fn post_apply_admin(&self, ctx: &mut ObserverContext<'_>, _: &mut AdminResponse) {
+        fn post_apply_admin(
+            &self,
+            ctx: &mut ObserverContext<'_>,
+            _: &mut AdminResponse,
+            index: u64,
+        ) {
             self.called.fetch_add(3, Ordering::SeqCst);
             ctx.bypass = self.bypass.load(Ordering::SeqCst);
+            self.index.store(index, Ordering::SeqCst);
         }
     }
 
@@ -320,9 +329,15 @@ mod tests {
             ctx.bypass = self.bypass.load(Ordering::SeqCst);
         }
 
-        fn post_apply_query(&self, ctx: &mut ObserverContext<'_>, _: &mut RepeatedField<Response>) {
+        fn post_apply_query(
+            &self,
+            ctx: &mut ObserverContext<'_>,
+            _: &mut RepeatedField<Response>,
+            index: u64,
+        ) {
             self.called.fetch_add(6, Ordering::SeqCst);
             ctx.bypass = self.bypass.load(Ordering::SeqCst);
+            self.index.store(index, Ordering::SeqCst);
         }
     }
 
@@ -382,8 +397,9 @@ mod tests {
         assert_all!(&[&ob.called], &[3]);
         let mut admin_resp = RaftCmdResponse::new();
         admin_resp.set_admin_response(AdminResponse::new());
-        host.post_apply(&region, &mut admin_resp);
+        host.post_apply(&region, &mut admin_resp, 7);
         assert_all!(&[&ob.called], &[6]);
+        assert_all!(&[&ob.index], &[7]);
 
         let mut query_req = RaftCmdRequest::new();
         query_req.set_requests(RepeatedField::from_vec(vec![Request::new()]));
@@ -391,8 +407,9 @@ mod tests {
         assert_all!(&[&ob.called], &[10]);
         host.pre_apply(&region, &query_req);
         assert_all!(&[&ob.called], &[15]);
-        host.post_apply(&region, &mut RaftCmdResponse::new());
+        host.post_apply(&region, &mut RaftCmdResponse::new(), 8);
         assert_all!(&[&ob.called], &[21]);
+        assert_all!(&[&ob.index], &[8]);
 
         host.on_role_change(&region, StateRole::Leader);
         assert_all!(&[&ob.called], &[28]);
@@ -439,8 +456,9 @@ mod tests {
             host.pre_apply(&region, &req);
             assert_all!(&[&ob1.called, &ob2.called], &[0, base_score * 2 + 3]);
 
-            host.post_apply(&region, &mut resp);
+            host.post_apply(&region, &mut resp, 9);
             assert_all!(&[&ob1.called, &ob2.called], &[0, base_score * 3 + 6]);
+            assert_all!(&[&ob1.index, &ob2.index], &[0, 9]);
 
             set_all!(&[&ob2.bypass], false);
             set_all!(&[&ob2.called], 0);

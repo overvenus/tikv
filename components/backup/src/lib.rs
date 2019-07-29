@@ -5,6 +5,7 @@
 #[macro_use(
     kv,
     slog_kv,
+    slog_trace,
     slog_debug,
     slog_info,
     slog_error,
@@ -25,6 +26,7 @@ mod file_util;
 mod log_storage;
 mod restore;
 mod storage;
+mod util;
 
 use std::collections::hash_map::HashMap;
 use std::collections::HashSet;
@@ -32,15 +34,16 @@ use std::fs;
 use std::io::{Error as IoError, ErrorKind, Result as IoResult};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::*;
 
 use kvproto::backup::{BackupEvent, BackupEvent_Event, BackupMeta, BackupState, EntryBatch};
 use protobuf::Message;
 use tempdir::TempDir;
 
 pub use errors::{Error, Result};
-pub use restore::{dot, RestoreManager};
+pub use restore::{dot, Data, Restorable, RestoreManager, Task as RestoreTask};
 pub use storage::{LocalStorage, Storage};
+pub use util::BackupMetaBuilder;
 
 pub trait Dependency: Sync + Send {
     fn get(&self) -> u64;
@@ -111,22 +114,58 @@ impl Meta {
         Ok(())
     }
 
-    fn start(&mut self, region_id: u64) {
+    fn start_region(&mut self, region_id: u64) {
+        info!("start backup region"; "region_id" => region_id);
         self.backup_regions.insert(region_id);
     }
 
-    fn stop(&mut self, region_id: u64) {
+    fn stop_region(&mut self, region_id: u64) {
+        info!("stop backup region"; "region_id" => region_id);
         self.backup_regions.remove(&region_id);
     }
 
-    fn is_started(&self, region_id: u64) -> bool {
+    fn is_region_started(&self, region_id: u64) -> bool {
         self.backup_regions.contains(&region_id)
+    }
+
+    fn start(&mut self, dep: u64) {
+        info!("start full backup"; "start_dependency" => dep);
+        self.backup_meta.set_start_dependency(dep);
+    }
+
+    fn complete(&mut self, dep: u64) {
+        info!("complete full backup"; "complete_dependency" => dep);
+        self.backup_meta.set_complete_dependency(dep);
+    }
+
+    fn incremental(&mut self, dep: u64) {
+        self.backup_meta.mut_incremental_dependencies().push(dep);
+        info!("complete incremental backup");
+    }
+
+    fn stop(&mut self) {
+        info!("stop backup";
+            "regions" => self.backup_regions.len(),
+            "start_dependency" =>self.backup_meta.get_start_dependency(),
+            "complete_dependency" => self.backup_meta.get_complete_dependency(),
+            "incremental" => self.backup_meta.get_incremental_dependencies().len(),
+            "events" => self.backup_meta.get_events().len(),
+            "files" => self.backup_meta.get_files().len());
+
+        self.backup_meta.set_start_dependency(0);
+        self.backup_meta.set_complete_dependency(0);
+        self.backup_meta.mut_incremental_dependencies().clear();
+        self.backup_meta.mut_events().clear();
+        self.backup_meta.mut_files().clear();
+
+        self.backup_regions.clear();
+        self.buf.clear();
     }
 }
 
 pub struct BackupManager {
     pub dependency: Box<dyn Dependency>,
-    pub storage: Box<dyn Storage>,
+    pub storage: Arc<dyn Storage>,
     current: PathBuf,
     meta: RwLock<Meta>,
     backuping: AtomicBool,
@@ -180,7 +219,7 @@ impl BackupManager {
         let backuping = AtomicBool::new(BackupState::Stop != meta.state());
         Ok(BackupManager {
             dependency,
-            storage,
+            storage: storage.into(),
             auxiliary,
             current,
             backuping,
@@ -221,7 +260,7 @@ impl BackupManager {
     }
 
     pub fn is_region_started(&self, region_id: u64) -> bool {
-        self.meta.read().unwrap().is_started(region_id)
+        self.meta.read().unwrap().is_region_started(region_id)
     }
 
     pub fn start_backup_region(&self, region_id: u64) -> Result<()> {
@@ -236,7 +275,7 @@ impl BackupManager {
                 return Err(Error::Io(e));
             }
         }
-        self.meta.write().unwrap().start(region_id);
+        self.meta.write().unwrap().start_region(region_id);
         Ok(())
     }
 
@@ -244,7 +283,7 @@ impl BackupManager {
         if !self.backuping.load(Ordering::Acquire) {
             return Ok(());
         }
-        self.meta.write().unwrap().stop(region_id);
+        self.meta.write().unwrap().stop_region(region_id);
         Ok(())
     }
 
@@ -257,7 +296,7 @@ impl BackupManager {
             info!("backup not start");
             return false;
         }
-        if !self.meta.read().unwrap().is_started(batch.region_id) {
+        if !self.is_region_started(batch.region_id) {
             info!("region not start"; "region_id" => batch.region_id);
             return false;
         }
@@ -272,7 +311,7 @@ impl BackupManager {
         if !self.backuping.load(Ordering::Acquire) {
             return Ok(());
         }
-        if !self.meta.read().unwrap().is_started(region_id) {
+        if !self.meta.read().unwrap().is_region_started(region_id) {
             return Ok(());
         }
         let dst = self.log_path(region_id, first, last);
@@ -280,19 +319,19 @@ impl BackupManager {
         Ok(())
     }
 
-    pub fn snapshot_dir(&self, region_id: u64, term: u64, index: u64, dependency: u64) -> PathBuf {
-        snapshot_dir(&self.current, region_id, term, index, dependency)
+    pub fn snapshot_dir(&self, region_id: u64, index: u64, dependency: u64) -> PathBuf {
+        snapshot_dir(&self.current, region_id, index, dependency)
     }
 
-    pub fn save_snapshot(&self, region_id: u64, term: u64, index: u64, src: &Path) -> Result<()> {
+    pub fn save_snapshot(&self, region_id: u64, index: u64, src: &Path) -> Result<()> {
         if !self.backuping.load(Ordering::Acquire) {
             return Ok(());
         }
-        if !self.meta.read().unwrap().is_started(region_id) {
+        if !self.meta.read().unwrap().is_region_started(region_id) {
             return Ok(());
         }
         let dep = self.dependency.alloc_number();
-        let dst = self.snapshot_dir(region_id, term, index, dep);
+        let dst = self.snapshot_dir(region_id, index, dep);
         self.storage.save_dir(&dst, src).unwrap();
         let mut event = BackupEvent::new();
         event.set_region_id(region_id);
@@ -328,34 +367,30 @@ impl BackupManager {
         match state {
             BackupState::Stop => {
                 self.backuping.store(false, Ordering::Release);
-                meta.backup_regions.clear();
                 if meta.backup_meta.get_start_dependency() != 0 {
                     meta.save_to(&meta_path, &self.storage).unwrap();
                     // Rotate the current dir.
                     self.rotate_current_dir(dep);
                 }
-                info!("stop backup");
+                meta.stop();
                 return Ok(dep);
             }
             BackupState::Start => {
-                info!("start full backup");
                 if let Err(e) = self.storage.make_dir(self.current_dir()) {
                     if e.kind() != ErrorKind::AlreadyExists {
                         return Err(Error::Io(e));
                     }
                 }
-                meta.backup_meta.set_start_dependency(dep);
+                meta.start(dep);
                 self.backuping.store(true, Ordering::Release);
             }
             BackupState::Complete => {
-                meta.backup_meta.set_complete_dependency(dep);
                 assert!(self.backuping.load(Ordering::Acquire));
-                info!("complete full backup");
+                meta.complete(dep);
             }
             BackupState::Incremental => {
-                meta.backup_meta.mut_incremental_dependencies().push(dep);
                 assert!(self.backuping.load(Ordering::Acquire));
-                info!("complete incremental backup");
+                meta.incremental(dep);
             }
             BackupState::Unknown => panic!("unexpected state unknown"),
         }
@@ -383,8 +418,8 @@ fn region_path(base: &Path, region_id: u64) -> PathBuf {
     base.join(format!("{}", region_id))
 }
 
-fn snapshot_dir(base: &Path, region_id: u64, term: u64, index: u64, dependency: u64) -> PathBuf {
-    base.join(format!("{}/{}@{}_{}", region_id, index, term, dependency))
+fn snapshot_dir(base: &Path, region_id: u64, index: u64, dependency: u64) -> PathBuf {
+    base.join(format!("{}/{}@{}", region_id, index, dependency))
 }
 
 fn log_path(base: &Path, region_id: u64, first: u64, last: u64) -> PathBuf {
@@ -493,6 +528,19 @@ mod tests {
         bm.step(BackupState::Start).unwrap();
         check_file_count(len + 1 /* current */);
         assert!(bm.backuping.load(Ordering::Acquire));
+
+        // New backup must exclude previous meta data.
+        let meta = bm.meta.read().unwrap();
+        assert!(
+            meta.backup_meta.get_events().is_empty()
+                && meta.backup_meta.get_files().is_empty()
+                && meta.backup_meta.get_incremental_dependencies().is_empty()
+                && meta.backup_regions.is_empty()
+                && meta.backup_regions.is_empty(),
+            "{:?} {:?}",
+            meta.backup_meta,
+            meta.backup_regions
+        )
     }
 
     #[test]
@@ -518,7 +566,7 @@ mod tests {
 
         let magic_contents = b"a";
         make_snap_dir(&src, magic_contents);
-        bm.save_snapshot(1, 2, 3, &src).unwrap();
+        bm.save_snapshot(1, 3, &src).unwrap();
 
         fn check_meta(bm: &BackupManager, dependency: u64, contents: &[u8]) {
             let mut buf = vec![];
@@ -534,7 +582,7 @@ mod tests {
             assert_eq!(events[0].get_index(), 3);
             assert_eq!(events[0].get_dependency(), dependency);
 
-            let snap_dir = bm.snapshot_dir(1, 2, 3, dependency);
+            let snap_dir = bm.snapshot_dir(1, 3, dependency);
             let mut buf = vec![];
             bm.storage
                 .read_file(&snap_dir.join("a.sst"), &mut buf)
