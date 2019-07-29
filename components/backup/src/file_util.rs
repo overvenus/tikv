@@ -4,18 +4,33 @@ use libc;
 use protobuf::Message;
 use std::u64;
 use std::sync::Arc;
-use memmap::Mmap;
+use std::fs::{OpenOptions, File};
+use memmap::{Mmap, MmapMut};
+
+
+pub struct FileWrapper {
+    pub data: Arc<Mmap>,
+    pub size: usize,
+}
+
+impl FileWrapper {
+    pub fn new(data: Arc<Mmap>, size: usize) -> FileWrapper {
+        FileWrapper {
+            data,
+            size
+        }
+    }
+}
 
 pub struct BatchEntryIterator {
-    files: Vec<(Arc<Mmap>, usize)>,
+    files: Vec<FileWrapper>,
     cursor_file: usize,
     cursor_offset: usize,
     current_record: Option<EntryBatch>,
-    // read_buffer: Vec<u8>,
 }
 
 impl BatchEntryIterator {
-    pub fn new(files: Vec<(Arc<Mmap>, usize)>) -> BatchEntryIterator {
+    pub fn new(files: Vec<FileWrapper>) -> BatchEntryIterator {
         BatchEntryIterator {
             files,
             cursor_file: 0,
@@ -31,7 +46,7 @@ impl BatchEntryIterator {
     pub fn next(&mut self) {
         // move 4 bytes for size storage
         self.cursor_offset += self.current_record.as_ref().unwrap().compute_size() as usize + 4;
-        if self.cursor_offset >= self.files[self.cursor_file].1
+        if self.cursor_offset >= self.files[self.cursor_file].size
             && self.cursor_file + 1 < self.files.len()
         {
             self.cursor_file += 1;
@@ -58,20 +73,18 @@ impl BatchEntryIterator {
     }
 
     fn buffer(&self, f: usize, offset: usize, len: usize) -> &[u8] {
-        return &self.files[f].0[offset..(offset+len)];
+        return &self.files[f].data[offset..(offset+len)];
     }
 
     fn read_record(&mut self) -> Option<EntryBatch> {
         let mut record_len = 0;
         if self.cursor_file >= self.files.len()
-            || self.cursor_offset + 4 > self.files[self.cursor_file].1
+            || self.cursor_offset + 4 > self.files[self.cursor_file].size
         {
             return None;
         }
-        //        println!("read record in file[{}]={}, {}, file size: {}", self.cursor_file, self.files[self.cursor_file].0,
-        //                 self.cursor_offset, self.files[self.cursor_file].1);
         let record_len = deserialize(self.buffer(self.cursor_file, self.cursor_offset, 4));
-        if record_len as usize + self.cursor_offset > self.files[self.cursor_file].1 {
+        if record_len as usize + self.cursor_offset > self.files[self.cursor_file].size {
             return None;
         }
         let mut record = EntryBatch::new();
@@ -79,42 +92,6 @@ impl BatchEntryIterator {
             return None;
         }
         Some(record)
-    }
-}
-
-pub fn pread(fd: libc::c_int, result: &mut Vec<u8>, offset: u64, len: u64) -> bool {
-    let buf = result.as_mut_ptr();
-    unsafe {
-        loop {
-            let ret_size = libc::pread(
-                fd,
-                buf as *mut libc::c_void,
-                len as libc::size_t,
-                offset as libc::off_t,
-            );
-            if ret_size < 0 {
-                let err = errno::errno();
-                if err.0 == libc::EAGAIN {
-                    continue;
-                }
-                panic!(
-                    "pread in {}, len: {}, failed, err {}",
-                    offset,
-                    len,
-                    err.to_string()
-                );
-            }
-            if ret_size as u64 != len {
-                error!(
-                    "Pread failed, expected return size {}, actual return size {}",
-                    len, ret_size
-                );
-                return false;
-            }
-            result.set_len(len as usize);
-            break;
-        }
-        return true;
     }
 }
 
@@ -132,37 +109,6 @@ pub fn deserialize(buf: &[u8]) -> u32 {
         x = (x << 8) | buf[i] as u32;
     }
     return x;
-}
-
-pub fn write(fd: libc::c_int, content: &mut Vec<u8>) -> bool {
-    unsafe {
-        let ret = libc::write(fd, content.as_ptr() as *const libc::c_void, content.len());
-        return ret == content.len() as libc::ssize_t;
-    }
-}
-
-pub fn sync(fd: libc::c_int) {
-    unsafe {
-        if libc::fsync(fd) != 0 {
-            panic!("fsync failed, err {}", errno::errno().to_string());
-        }
-    }
-}
-
-pub fn close(fd: libc::c_int) {
-    unsafe {
-        libc::close(fd);
-    }
-}
-
-pub fn pread_int(fd: libc::c_int, offset: u64, result: &mut u32) -> bool {
-    // let x = std::mem::size_of::<T>();
-    let mut buf = Vec::with_capacity(4);
-    if !pread(fd, &mut buf, offset, 4) {
-        return false;
-    }
-    *result = deserialize(buf.as_slice());
-    true
 }
 
 #[cfg(test)]
@@ -221,9 +167,9 @@ mod tests {
         let mut vs = Vec::new();
         let mut f = OpenOptions::new()
                     .read(true)
-                    .open(file_path)?;
-        let mut data = unsafe { memmap::MmapOptions::new().map(&f)? };
-        vs.push((data, file_size));
+                    .open(file_path).unwrap();
+        let data = unsafe { memmap::MmapOptions::new().map(&f).unwrap() };
+        vs.push(FileWrapper::new(Arc::new(data), file_size));
 
         let mut iter = BatchEntryIterator::new(vs);
         iter.seek_to_first();
