@@ -500,8 +500,8 @@ mod tests {
             assert_eq!(count, files.len(), "{:?}", files);
             files.len()
         };
-        // The current dir will not be created until starting full backup.
-        let len = check_file_count(1 /* auxiliary */ + 1 /* localtmp */);
+        // The current dir will be created for log_storage.
+        let len = check_file_count(3);
 
         bm.step(BackupState::Stop).unwrap();
         let len = check_file_count(len);
@@ -509,7 +509,7 @@ mod tests {
 
         // Do not rotate if it is the first backup.
         bm.step(BackupState::Start).unwrap();
-        let len = check_file_count(len + 1 /* current */);
+        let len = check_file_count(len);
         assert!(bm.backuping.load(Ordering::Acquire));
 
         bm.step(BackupState::Complete).unwrap();
