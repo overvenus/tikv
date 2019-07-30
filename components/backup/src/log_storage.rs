@@ -321,9 +321,9 @@ impl LogManager {
         let size = offset + write_buffer.len();
         if size > offset {
             (&mut data[offset..size]).copy_from_slice(write_buffer.as_ref());
-            data.flush_range(offset, write_buffer.len())?;
         }
-        write_file_meta(&mut data, &meta)?;
+        write_file_meta(&mut data, &meta);
+        data.flush()?;
 
         let rd_data = data.make_read_only()?;
         self.switch_active_log(rd_data, meta, size)?;
@@ -538,9 +538,11 @@ impl LogStorage {
         let mut data = file.unwrap();
         (&mut data[offset..(offset+write_buffer.len())]).copy_from_slice(write_buffer.as_ref());
         if let Some(active_meta) = &meta {
-            write_file_meta(&mut data, active_meta)?;
+            write_file_meta(&mut data, active_meta);
+            data.flush()?;
+        } else {
+            data.flush_range(offset, write_buffer.len())?;
         }
-        data.flush_range(offset, write_buffer.len())?;
         let mut log = self.log_manager.write().unwrap();
         if meta.is_some() {
             let rd_data = data.make_read_only()?;
@@ -586,7 +588,7 @@ fn generate_file_name(file_num: u64) -> String {
     format!("{:016}{}", file_num, LOG_SUFFIX)
 }
 
-fn write_file_meta(f: &mut MmapMut, meta: &FileMeta) -> IoResult<()> {
+fn write_file_meta(f: &mut MmapMut, meta: &FileMeta) {
     let meta_len = meta.compute_size();
     let mut meta_buf = Vec::with_capacity(meta_len as usize + 256);
     meta_buf.extend_from_slice(MAGIC_STR);
@@ -596,7 +598,6 @@ fn write_file_meta(f: &mut MmapMut, meta: &FileMeta) -> IoResult<()> {
     meta_buf.extend_from_slice(MAGIC_STR);
     let offset = f.len() - meta_buf.len();
     (&mut f[offset..]).copy_from_slice(meta_buf.as_slice());
-    f.flush_range(offset, meta_buf.len())
 }
 
 fn update_raft_meta(meta: &mut HashMap<u64, RegionMeta>, batch: &mut EntryBatch) {
