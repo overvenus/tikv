@@ -25,7 +25,7 @@ extern crate memmap;
 
 mod check;
 mod errors;
-mod file_util;
+mod iterator;
 mod log_storage;
 mod restore;
 mod storage;

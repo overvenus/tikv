@@ -7,6 +7,16 @@ use std::sync::Arc;
 use std::fs::{OpenOptions, File};
 use memmap::{Mmap, MmapMut};
 
+pub trait Iterator<'a> {
+    fn valid(&self) -> bool;
+
+    fn next(&mut self);
+
+    fn get_ref(&self) -> Option<&EntryBatch>;
+
+    fn seek_to_first(&mut self);
+}
+
 
 pub struct FileWrapper {
     pub data: Arc<Mmap>,
@@ -22,54 +32,21 @@ impl FileWrapper {
     }
 }
 
-pub struct BatchEntryIterator {
+pub struct FreezeMmapIterator {
     files: Vec<FileWrapper>,
     cursor_file: usize,
     cursor_offset: usize,
     current_record: Option<EntryBatch>,
 }
 
-impl BatchEntryIterator {
-    pub fn new(files: Vec<FileWrapper>) -> BatchEntryIterator {
-        BatchEntryIterator {
+impl FreezeMmapIterator {
+    pub fn new(files: Vec<FileWrapper>) -> FreezeMmapIterator {
+        FreezeMmapIterator {
             files,
             cursor_file: 0,
             cursor_offset: 0,
             current_record: None,
         }
-    }
-
-    pub fn valid(&self) -> bool {
-        // self.cursor_file + 1 < self.files.len() || (self.cursor_file < self.files.len() && self.cursor_offset < self.files[self.cursor_file].1)
-        self.current_record.is_some()
-    }
-    pub fn next(&mut self) {
-        // move 4 bytes for size storage
-        self.cursor_offset += self.current_record.as_ref().unwrap().compute_size() as usize + 4;
-        if self.cursor_offset >= self.files[self.cursor_file].size
-            && self.cursor_file + 1 < self.files.len()
-        {
-            self.cursor_file += 1;
-            self.cursor_offset = 0;
-        }
-        self.current_record = self.read_record();
-    }
-    pub fn get(&self) -> Option<EntryBatch> {
-        self.current_record.clone()
-    }
-
-    pub fn get_ref(&self) -> Option<&EntryBatch> {
-        self.current_record.as_ref()
-    }
-
-    pub fn get_offset(&self) -> usize {
-        self.cursor_offset
-    }
-
-    pub fn seek_to_first(&mut self) {
-        self.cursor_file = 0;
-        self.cursor_offset = 0;
-        self.current_record = self.read_record();
     }
 
     fn buffer(&self, f: usize, offset: usize, len: usize) -> &[u8] {
@@ -94,6 +71,93 @@ impl BatchEntryIterator {
         Some(record)
     }
 }
+
+impl<'a> Iterator<'a> for FreezeMmapIterator {
+    fn valid(&self) -> bool {
+        // self.cursor_file + 1 < self.files.len() || (self.cursor_file < self.files.len() && self.cursor_offset < self.files[self.cursor_file].1)
+        self.current_record.is_some()
+    }
+    fn next(&mut self) {
+        // move 4 bytes for size storage
+        self.cursor_offset += self.current_record.as_ref().unwrap().compute_size() as usize + 4;
+        if self.cursor_offset >= self.files[self.cursor_file].size
+            && self.cursor_file + 1 < self.files.len()
+        {
+            self.cursor_file += 1;
+            self.cursor_offset = 0;
+        }
+        self.current_record = self.read_record();
+    }
+
+    fn get_ref(&self) -> Option<&EntryBatch> {
+        self.current_record.as_ref()
+    }
+
+    fn seek_to_first(&mut self) {
+        self.cursor_file = 0;
+        self.cursor_offset = 0;
+        self.current_record = self.read_record();
+    }
+}
+
+pub struct ActiveMmapIterator<'a> {
+    data: &'a MmapMut,
+    size: usize,
+    offset: usize,
+    current_record: Option<EntryBatch>,
+}
+
+impl<'a> ActiveMmapIterator<'a> {
+    pub fn new(data: &'a MmapMut, size: usize) -> ActiveMmapIterator {
+        ActiveMmapIterator {
+            data,
+            size,
+            offset: 0,
+            current_record: None,
+        }
+    }
+
+    fn buffer(&self, offset: usize, len: usize) -> &[u8] {
+        return &self.data[offset..(offset+len)];
+    }
+
+    fn read_record(&mut self) -> Option<EntryBatch> {
+        let mut record_len = 0;
+        if self.offset + 4 > self.size {
+            return None;
+        }
+        let record_len = deserialize(self.buffer(self.offset, 4));
+        if record_len as usize + self.offset > self.size {
+            return None;
+        }
+        let mut record = EntryBatch::new();
+        if record.merge_from_bytes(self.buffer(self.offset + 4, record_len as usize)).is_err() {
+            return None;
+        }
+        Some(record)
+    }
+}
+
+impl<'a> Iterator<'a> for ActiveMmapIterator<'a> {
+    fn valid(&self) -> bool {
+        self.current_record.is_some()
+    }
+    fn next(&mut self) {
+        // move 4 bytes for size store
+        self.offset += self.current_record.as_ref().unwrap().compute_size() as usize + 4;
+        self.current_record = self.read_record();
+    }
+
+    fn get_ref(&self) -> Option<&EntryBatch> {
+        self.current_record.as_ref()
+    }
+
+    fn seek_to_first(&mut self) {
+        self.offset = 0;
+        self.current_record = self.read_record();
+    }
+}
+
 
 pub fn serialize(x: u32) -> [u8; 4] {
     let b1: u8 = ((x >> 24) & 0xff) as u8;
@@ -171,7 +235,7 @@ mod tests {
         let data = unsafe { memmap::MmapOptions::new().map(&f).unwrap() };
         vs.push(FileWrapper::new(Arc::new(data), file_size));
 
-        let mut iter = BatchEntryIterator::new(vs);
+        let mut iter = FreezeMmapIterator::new(vs);
         iter.seek_to_first();
         let mut region_id = 1;
         while iter.valid() {

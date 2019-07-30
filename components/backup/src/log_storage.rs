@@ -1,4 +1,4 @@
-use super::file_util::{deserialize, serialize, BatchEntryIterator, FileWrapper};
+use super::iterator::{deserialize, serialize, FreezeMmapIterator, FileWrapper, Iterator, ActiveMmapIterator};
 use super::CURRENT_DIR;
 use errno;
 use kvproto::backup::{EntryBatch, FileMeta, RegionMeta};
@@ -351,14 +351,14 @@ impl LogManager {
 pub struct LogStorage {
     log_manager: RwLock<LogManager>,
     // dir: String,
-    lock: Mutex<()>,
+    lock: RwLock<()>,
 }
 
 impl LogStorage {
     pub fn new(log_manager: LogManager) -> LogStorage {
         LogStorage {
             log_manager: RwLock::new(log_manager),
-            lock: Mutex::new(())
+            lock: RwLock::new(())
             // dir: dir.to_string(),
         }
     }
@@ -410,13 +410,11 @@ impl LogStorage {
             log_files,
             active_log_capacity,
         )?;
-        if log_manager.active_log.size > 0 {
-            log_manager.dump()?;
-        }
         Ok(LogStorage::new(log_manager))
     }
 
-    pub fn iter(&self) -> BatchEntryIterator {
+    // can only read data in freeze_log.
+    pub fn iter(&self) -> FreezeMmapIterator {
         let mut fds = Vec::new();
         {
             let log = self.log_manager.read().unwrap();
@@ -425,10 +423,11 @@ impl LogStorage {
             }
             // fds.push((log.active_log.fd, log.active_log.size));
         }
-        BatchEntryIterator::new(fds)
+        FreezeMmapIterator::new(fds)
     }
 
-    pub fn iterator_with_region(&self, region_id: u64) -> BatchEntryIterator {
+    // can only read data in freeze_log.
+    pub fn iterator_with_region(&self, region_id: u64) -> FreezeMmapIterator {
         let mut fds = Vec::new();
         {
             let log = self.log_manager.read().unwrap();
@@ -438,9 +437,10 @@ impl LogStorage {
                 }
             }
         }
-        BatchEntryIterator::new(fds)
+        FreezeMmapIterator::new(fds)
     }
 
+    // could read data in active_log and freeze_log.
     pub fn read(&self, region_id: u64, start_index: u64, end_index: u64) -> Vec<RaftEntry> {
         let mut fds = Vec::new();
         let mut result = Vec::new();
@@ -452,7 +452,23 @@ impl LogStorage {
                 }
             }
         }
-        let mut iter = BatchEntryIterator::new(fds);
+        let mut iter = FreezeMmapIterator::new(fds);
+        iter.seek_to_first();
+        while iter.valid() {
+            let record = iter.get_ref().unwrap();
+            if record.region_id == region_id {
+                for e in record.entries.iter() {
+                    if e.index >= start_index && e.index <= end_index {
+                        result.push(e.clone());
+                    }
+                }
+            }
+            iter.next();
+        }
+        let _guard = self.lock.read().unwrap();
+        let log = self.log_manager.read().unwrap();
+        let data = log.active_log.data.as_ref().unwrap();
+        let mut iter = ActiveMmapIterator::new(data,data.len());
         iter.seek_to_first();
         while iter.valid() {
             let record = iter.get_ref().unwrap();
@@ -476,8 +492,8 @@ impl LogStorage {
             let mut log_manager = self.log_manager.write().unwrap();
 
             update_raft_meta(&mut log_manager.region_indexes, batch);
-            update_raft_meta(&mut log_manager.active_file.meta, batch);
-            if 0 == log_manager.active_file.size {
+            update_raft_meta(&mut log_manager.active_log.meta, batch);
+            if 0 == log_manager.active_log.size {
                 log_manager.begin_write = Instant::now();
             }
             if log_manager.write_into_buffer(batch) {
@@ -496,7 +512,7 @@ impl LogStorage {
     }
 
     pub fn sync(&self) -> IoResult<()> {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = self.lock.write().unwrap();
         let mut meta = None;
         let mut offset = 0;
         let mut size = 0;
@@ -622,32 +638,33 @@ mod tests {
         let temp_dir = TempDir::new("test_file_meta").unwrap();
         let path = temp_dir.path();
         let file_path = path.join("log");
-        let mut tmp_f = File::create(file_path.clone()).unwrap();
-        // TODO: handle errors.
-        let mut content = Vec::new();
-        content.extend_from_slice("abcd".as_bytes());
         let mut meta = FileMeta::new();
-        meta.content_size = 4;
-        meta.path = "log".to_string();
-        let meta_len = meta.compute_size();
-        let buf = serialize(meta_len);
-        content.extend_from_slice(MAGIC_STR);
-        meta.write_to_vec(&mut content).unwrap();
-        content.extend_from_slice(buf.as_ref());
-        content.extend_from_slice(MAGIC_STR);
+        {
+            let mut tmp_f = File::create(file_path.clone()).unwrap();
+            // TODO: handle errors.
+            let mut content = Vec::new();
+            content.extend_from_slice("abcd".as_bytes());
+            meta.content_size = 4;
+            meta.path = "log".to_string();
+            let meta_len = meta.compute_size();
+            let buf = serialize(meta_len);
+            content.extend_from_slice(MAGIC_STR);
+            meta.write_to_vec(&mut content).unwrap();
+            content.extend_from_slice(buf.as_ref());
+            content.extend_from_slice(MAGIC_STR);
 
-        tmp_f.write_all(&content).unwrap();
-        tmp_f.sync_all().unwrap();
+            tmp_f.write_all(&content).unwrap();
+            tmp_f.sync_all().unwrap();
+        }
+        let mut f = OpenOptions::new()
+            .read(true)
+            .open(file_path).unwrap();
 
-//        let c_path = CString::new(file_path.to_str().unwrap().as_bytes()).unwrap();
-//        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY) };
-//        if fd < 0 {
-//            panic!("open file failed, err {}", errno::errno().to_string());
-//        }
-//        let file_meta = FreezeLog::read_meta(fd, &file_path, libc::O_RDONLY).unwrap();
-//        println!("read meta succeed");
-//        assert_eq!(meta.content_size, file_meta.size as u64);
-//        assert_eq!("log".to_string(), file_meta.file_name);
+        let mut data = unsafe { memmap::MmapOptions::new().map(&f).unwrap() };
+        println!("read meta succeed");
+        let file_meta = FreezeLog::get_meta(&data).unwrap();
+        assert_eq!(meta.content_size, file_meta.content_size as u64);
+        assert_eq!(meta.path, file_meta.path);
     }
 
     #[test]
@@ -666,13 +683,10 @@ mod tests {
                 batch.entries.push(entry);
                 assert!(pipe_log.put(&mut batch));
                 if index % 2 == 0 {
-                    println!(".....sync");
                     pipe_log.sync().unwrap();
-                    println!(".....dump ");
                     pipe_log.dump();
                 }
             }
-            println!(".....step2");
             let mut batch = EntryBatch::new();
             batch.region_id = 2;
             let mut entry = RaftEntry::new();
@@ -682,10 +696,8 @@ mod tests {
             pipe_log.put(&mut batch);
             pipe_log.sync();
         }
-        println!(".....step5");
         let pipe_log = LogStorage::open(path.to_str().unwrap(), 1024).unwrap();
-        println!(".....step6");
-        assert_eq!(3, pipe_log.file_num());
+        assert_eq!(2, pipe_log.file_num());
         let result = pipe_log.read(1, 2, u64::MAX);
         assert_eq!(4, result.len());
         for i in 0..result.len() {
