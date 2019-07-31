@@ -4,7 +4,6 @@ use libc;
 use protobuf::Message;
 use std::u64;
 use std::sync::Arc;
-use std::fs::{OpenOptions, File};
 use memmap::{Mmap, MmapMut};
 
 pub trait Iterator<'a> {
@@ -180,10 +179,9 @@ mod tests {
     use tempdir::TempDir;
 
     use super::*;
-    use crate::tests::make_snap_dir;
     use raft::eraftpb::Entry as RaftEntry;
     use std::ffi::CString;
-    use std::fs::File;
+    use std::fs::{OpenOptions, File};
     use std::io::Write;
 
     #[test]

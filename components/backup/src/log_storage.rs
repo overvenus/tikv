@@ -288,14 +288,13 @@ impl LogManager {
 
 
     pub fn dump_meta(&mut self) -> FileMeta {
-        let mut write_buffer = self.write_buffer.as_mut().unwrap();
-        self.active_log.size += write_buffer.len();
         let write_cost = self.begin_write.elapsed();
         info!("log file write cost time (second)"; "file" => self.active_log.file_name.clone(), "time" => write_cost.as_millis() as u64);
         let meta = self.active_log.to_file_meta();
         self.active_log.meta.clear();
         // We do not create one new file, until we finished dumping last file.
         self.begin_write = Instant::now();
+        self.active_log.size = 0;
         meta
     }
 
@@ -316,8 +315,9 @@ impl LogManager {
     fn dump(&mut self) -> IoResult<()> {
         let mut data = self.active_log.data.take().unwrap();
         let offset = self.active_log.size;
-        let meta = self.dump_meta();
         let mut write_buffer = self.write_buffer.take().unwrap();
+        self.active_log.size += write_buffer.len();
+        let meta = self.dump_meta();
         let size = offset + write_buffer.len();
         if size > offset {
             (&mut data[offset..size]).copy_from_slice(write_buffer.as_ref());
@@ -337,10 +337,11 @@ impl LogManager {
             return true;
         }
         let mut write_buffer = self.write_buffer.as_mut().unwrap();
-        if self.active_log.size + write_buffer.len() > self.active_log_capacity {
+        let batch_size= batch.compute_size();
+        if self.active_log.size + write_buffer.len() + batch_size as usize > self.active_log_capacity {
             return false;
         }
-        let buf = serialize(batch.compute_size());
+        let buf= serialize(batch_size);
         write_buffer.write_all(buf.as_ref()).unwrap();
         batch.write_to_vec(&mut write_buffer).unwrap();
         return true;
@@ -492,17 +493,19 @@ impl LogStorage {
             let mut log_manager = self.log_manager.write().unwrap();
 
             update_raft_meta(&mut log_manager.region_indexes, batch);
-            update_raft_meta(&mut log_manager.active_log.meta, batch);
             if 0 == log_manager.active_log.size {
                 log_manager.begin_write = Instant::now();
             }
+            let offset = log_manager.write_buffer.as_ref().unwrap().len();
             if log_manager.write_into_buffer(batch) {
+                update_raft_meta(&mut log_manager.active_log.meta, batch);
                 return true;
             }
         }
-        while self.sync().is_ok() {
+        while self.dump().is_ok() {
             let mut log_manager = self.log_manager.write().unwrap();
             if log_manager.write_into_buffer(batch) {
+                update_raft_meta(&mut log_manager.active_log.meta, batch);
                 return true;
             }
             info!("write into buffer failed, try sync");
@@ -524,7 +527,8 @@ impl LogStorage {
                 if sync_task.is_empty() {
                     return Ok(());
                 } else if log.should_dump() {
-                    size = log.active_log.size + sync_task.len();
+                    log.active_log.size += sync_task.len();
+                    size = log.active_log.size;
                     meta = Some(log.dump_meta());
                 }
             }
@@ -559,11 +563,45 @@ impl LogStorage {
         Ok(())
     }
 
-    fn dump(&self) {
+    fn dump(&self) -> IoResult<()> {
+        let _guard = self.lock.write().unwrap();
+        let mut size = 0;
+        let (file, meta) = {
+            let mut log = self.log_manager.write().unwrap();
+            assert!(log.write_buffer.is_some());
+            let offset = log.active_log.size;
+            let mut file = log.active_log.data.take();
+            let mut data = file.as_mut().unwrap();
+            if let Some(mut write_buffer) = log.write_buffer.take() {
+                size = offset + write_buffer.len();
+                if !write_buffer.is_empty() {
+                    (&mut data[offset..size]).copy_from_slice(write_buffer.as_ref());
+                    write_buffer.clear();
+                    log.active_log.size = size;
+                }
+                if log.active_log.size < log.active_log_capacity / 4 {
+                    if size - offset > 0 {
+                        data.flush_range(offset, size - offset)?;
+                    }
+                    log.write_buffer = Some(write_buffer);
+                    log.active_log.data = file;
+                    return Ok(());
+                }
+                log.write_buffer = Some(write_buffer);
+            }
+            let meta = log.dump_meta();
+            (file, meta)
+        };
+        let begin_dump = Instant::now();
+        let mut data = file.unwrap();
+        write_file_meta(&mut data, &meta);
+        data.flush()?;
         let mut log = self.log_manager.write().unwrap();
-        if log.active_log.size > 0 {
-            log.dump().unwrap();
-        }
+        let rd_data = data.make_read_only()?;
+        log.switch_active_log(rd_data, meta, size);
+        assert_eq!(0, log.active_log.size);
+        info!("log file write sync last buffer cost"; "time" => begin_dump.elapsed().as_millis() as u64);
+        Ok(())
     }
 
     fn file_num(&self) -> usize {
@@ -672,7 +710,6 @@ mod tests {
     fn test_log_open_with_two_log_file() {
         let temp_dir = TempDir::new("test_two_log_file").unwrap();
         let path = temp_dir.path();
-        println!(".....step1");
         {
             let pipe_log = LogStorage::open(path.to_str().unwrap(), 1024).unwrap();
             for index in 1..6 {
@@ -755,44 +792,46 @@ mod tests {
         assert_eq!(1, pipe_log.file_num());
     }
 
-    fn inner_test_write_multi_thread(path: &Path, thread_num: u64) {
-        let log = LogStorage::open(path.to_str().unwrap(), 1024).unwrap();
+    fn inner_test_write_multi_thread(path: &Path, thread_num: u64, entry_num: u64) {
+        let log = LogStorage::open(path.to_str().unwrap(), 4096).unwrap();
         let storage = Arc::new(log);
         let mut handlers = Vec::new();
         for i in 0..thread_num {
             let storage2 = storage.clone();
             let handler = std::thread::spawn(move || {
-                for index in 1..1025 {
-                    let mut batch = EntryBatch::new();
-                    batch.region_id = i + 1;
+                let mut batch = EntryBatch::new();
+                batch.region_id = i + 1;
+                for index in 1..(entry_num + 1) {
                     let mut e = RaftEntry::new();
                     e.index = index;
                     e.term = 2;
                     batch.entries.push(e);
-                    assert!(storage2.put(&mut batch));
-                    if index % 2 == 0 {
-                        storage2.sync();
+                    if index % 10 == 0 {
+                        assert!(storage2.put(&mut batch));
+                        batch.mut_entries().clear();
                     }
                 }
-                storage2.dump();
+                assert!(storage2.put(&mut batch));
+                storage2.dump().unwrap();
             });
             handlers.push(handler);
         }
         while !handlers.is_empty() {
             let h = handlers.pop().unwrap();
-            h.join();
+            h.join().unwrap();
         }
 
         let mut file_num = storage.file_num();
-        assert!(file_num > 1);
+        //assert!(file_num > 1);
         file_num = storage.file_num();
         println!("total write log number: {}", file_num);
         for i in 0..thread_num {
             let result = storage.read(i + 1, 1, u64::MAX);
-            assert_eq!(1024, result.len());
+            println!("region: {}", i);
             for i in 0..result.len() {
                 assert_eq!(1 + i, result[i].index as usize);
             }
+            assert_eq!(entry_num as usize, result.len());
         }
     }
 
@@ -801,14 +840,15 @@ mod tests {
         println!("pipe write test begin");
         let temp_dir = TempDir::new("dump_over_capacity").unwrap();
         let path = temp_dir.path();
-        inner_test_write_multi_thread(path, 6);
-        let log = LogStorage::open(path.to_str().unwrap(), 1024).unwrap();
+        const entry_num: u64 = 512;
+        inner_test_write_multi_thread(path, 2, entry_num);
+        let log = LogStorage::open(path.to_str().unwrap(), 4096).unwrap();
         let guard = log.log_manager.read().unwrap();
         let meta = &guard.region_indexes;
-        assert_eq!(6, meta.len());
+        assert_eq!(2, meta.len());
         for (_, region_meta) in meta.iter() {
             assert_eq!(1, region_meta.start_index);
-            assert_eq!(1024, region_meta.end_index);
+            assert_eq!(entry_num, region_meta.end_index);
         }
     }
 }
