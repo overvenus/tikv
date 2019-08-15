@@ -3,7 +3,7 @@
 use engine::rocks::DB;
 use kvproto::metapb::Region;
 use kvproto::pdpb::CheckPolicy;
-use kvproto::raft_cmdpb::{AdminRequest, AdminResponse, Request, Response};
+use kvproto::raft_cmdpb::{AdminRequest, AdminResponse, RaftResponseHeader, Request, Response};
 use raft::StateRole;
 
 pub mod config;
@@ -61,10 +61,17 @@ pub trait AdminObserver: Coprocessor {
     }
 
     /// Hook to call before applying admin request.
-    fn pre_apply_admin(&self, _: &mut ObserverContext<'_>, _: &AdminRequest) {}
+    fn pre_apply_admin(&self, _: &mut ObserverContext<'_>, _: u64, _: &AdminRequest) {}
 
     /// Hook to call after applying admin request.
-    fn post_apply_admin(&self, _: &mut ObserverContext<'_>, _: &mut AdminResponse) {}
+    fn post_apply_admin(
+        &self,
+        _: &mut ObserverContext<'_>,
+        _: u64,
+        _: &RaftResponseHeader,
+        _: &mut AdminResponse,
+    ) {
+    }
 }
 
 pub trait QueryObserver: Coprocessor {
@@ -76,10 +83,17 @@ pub trait QueryObserver: Coprocessor {
     }
 
     /// Hook to call before applying write request.
-    fn pre_apply_query(&self, _: &mut ObserverContext<'_>, _: &[Request]) {}
+    fn pre_apply_query(&self, _: &mut ObserverContext<'_>, _: u64, _: &[Request]) {}
 
     /// Hook to call after applying write request.
-    fn post_apply_query(&self, _: &mut ObserverContext<'_>, _: &mut Vec<Response>) {}
+    fn post_apply_query(
+        &self,
+        _: &mut ObserverContext<'_>,
+        _: u64,
+        _: &RaftResponseHeader,
+        _: &mut Vec<Response>,
+    ) {
+    }
 }
 
 /// SplitChecker is invoked during a split check scan, and decides to use

@@ -8,6 +8,7 @@ use engine::rocks::util::metrics_flusher::{MetricsFlusher, DEFAULT_FLUSHER_INTER
 use engine::rocks::util::security::encrypted_env_from_cipher_file;
 use engine::Engines;
 use fs2::FileExt;
+use kvproto::cdcpb_grpc::create_change_data;
 use kvproto::deadlock_grpc::create_deadlock;
 use kvproto::debugpb_grpc::create_debug;
 use kvproto::import_sstpb_grpc::create_import_sst;
@@ -283,6 +284,26 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     // Create CoprocessorHost.
     let mut coprocessor_host = CoprocessorHost::new(cfg.coprocessor.clone(), router);
 
+    // Create register and start cdc.
+    let mut cdc_worker = tikv_util::worker::Worker::new("cdc");
+    let cdc_scheduler = cdc_worker.scheduler();
+    let cdc_ob = cdc::CdcObserver::new(cdc_scheduler.clone());
+    let cdc_endpoint = cdc::Endpoint::new();
+    let cdc_service = cdc::Service::new(cdc_scheduler);
+
+    server.register_service(create_change_data(cdc_service))
+        .map(|_| fatal!("failed to register {}", "cdc"));
+    coprocessor_host
+        .registry
+        .register_admin_observer(100, Box::new(cdc_ob.clone()) as _);
+    coprocessor_host
+        .registry
+        .register_query_observer(100, Box::new(cdc_ob.clone()) as _);
+
+    cdc_worker
+        .start(cdc_endpoint)
+        .unwrap_or_else(|e| fatal!("failed to start cdc: {}", e));
+
     // Create region collection.
     let region_info_accessor = RegionInfoAccessor::new(&mut coprocessor_host);
     region_info_accessor.start();
@@ -388,6 +409,9 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     metrics_flusher.stop();
 
     node.stop();
+
+    // Stop cdc.
+    cdc_worker.stop().unwrap();
 
     region_info_accessor.stop();
 

@@ -173,13 +173,14 @@ impl CoprocessorHost {
     }
 
     /// Call all pre apply hook until bypass is set to true.
-    pub fn pre_apply(&self, region: &Region, req: &RaftCmdRequest) {
+    pub fn pre_apply(&self, region: &Region, index: u64, req: &RaftCmdRequest) {
         if !req.has_admin_request() {
             let query = req.get_requests();
             loop_ob!(
                 region,
                 &self.registry.query_observers,
                 pre_apply_query,
+                index,
                 query,
             );
         } else {
@@ -188,28 +189,33 @@ impl CoprocessorHost {
                 region,
                 &self.registry.admin_observers,
                 pre_apply_admin,
-                admin
+                index,
+                admin,
             );
         }
     }
 
-    pub fn post_apply(&self, region: &Region, resp: &mut RaftCmdResponse) {
+    pub fn post_apply(&self, region: &Region, index: u64, resp: &mut RaftCmdResponse) {
+        let header = resp.header.get_ref();
         if !resp.has_admin_response() {
-            let query = resp.mut_responses();
-            let mut vec_query = mem::take(query).into();
+            let mut vec_query = mem::take(&mut resp.responses).into();
             loop_ob!(
                 region,
                 &self.registry.query_observers,
                 post_apply_query,
+                index,
+                header,
                 &mut vec_query,
             );
-            *query = vec_query.into();
+            resp.responses = vec_query.into();
         } else {
-            let admin = resp.mut_admin_response();
+            let admin = resp.admin_response.get_mut_ref();
             loop_ob!(
                 region,
                 &self.registry.admin_observers,
                 post_apply_admin,
+                index,
+                header,
                 admin
             );
         }
@@ -295,12 +301,18 @@ mod tests {
             Ok(())
         }
 
-        fn pre_apply_admin(&self, ctx: &mut ObserverContext<'_>, _: &AdminRequest) {
+        fn pre_apply_admin(&self, ctx: &mut ObserverContext<'_>, _: u64, _: &AdminRequest) {
             self.called.fetch_add(2, Ordering::SeqCst);
             ctx.bypass = self.bypass.load(Ordering::SeqCst);
         }
 
-        fn post_apply_admin(&self, ctx: &mut ObserverContext<'_>, _: &mut AdminResponse) {
+        fn post_apply_admin(
+            &self,
+            ctx: &mut ObserverContext<'_>,
+            _: u64,
+            _: &RaftResponseHeader,
+            _: &mut AdminResponse,
+        ) {
             self.called.fetch_add(3, Ordering::SeqCst);
             ctx.bypass = self.bypass.load(Ordering::SeqCst);
         }
@@ -320,12 +332,18 @@ mod tests {
             Ok(())
         }
 
-        fn pre_apply_query(&self, ctx: &mut ObserverContext<'_>, _: &[Request]) {
+        fn pre_apply_query(&self, ctx: &mut ObserverContext<'_>, _: u64, _: &[Request]) {
             self.called.fetch_add(5, Ordering::SeqCst);
             ctx.bypass = self.bypass.load(Ordering::SeqCst);
         }
 
-        fn post_apply_query(&self, ctx: &mut ObserverContext<'_>, _: &mut Vec<Response>) {
+        fn post_apply_query(
+            &self,
+            ctx: &mut ObserverContext<'_>,
+            _: u64,
+            _: &RaftResponseHeader,
+            _: &mut Vec<Response>,
+        ) {
             self.called.fetch_add(6, Ordering::SeqCst);
             ctx.bypass = self.bypass.load(Ordering::SeqCst);
         }
@@ -383,20 +401,20 @@ mod tests {
         admin_req.set_admin_request(AdminRequest::default());
         host.pre_propose(&region, &mut admin_req).unwrap();
         assert_all!(&[&ob.called], &[1]);
-        host.pre_apply(&region, &admin_req);
+        host.pre_apply(&region, 0, &admin_req);
         assert_all!(&[&ob.called], &[3]);
         let mut admin_resp = RaftCmdResponse::default();
         admin_resp.set_admin_response(AdminResponse::default());
-        host.post_apply(&region, &mut admin_resp);
+        host.post_apply(&region, 0, &mut admin_resp);
         assert_all!(&[&ob.called], &[6]);
 
         let mut query_req = RaftCmdRequest::default();
         query_req.set_requests(vec![Request::default()].into());
         host.pre_propose(&region, &mut query_req).unwrap();
         assert_all!(&[&ob.called], &[10]);
-        host.pre_apply(&region, &query_req);
+        host.pre_apply(&region, 0, &query_req);
         assert_all!(&[&ob.called], &[15]);
-        host.post_apply(&region, &mut RaftCmdResponse::default());
+        host.post_apply(&region, 0, &mut RaftCmdResponse::default());
         assert_all!(&[&ob.called], &[21]);
 
         host.on_role_change(&region, StateRole::Leader);
@@ -441,10 +459,10 @@ mod tests {
             // less means more.
             assert_all!(&[&ob1.called, &ob2.called], &[0, base_score + 1]);
 
-            host.pre_apply(&region, &req);
+            host.pre_apply(&region, 0, &req);
             assert_all!(&[&ob1.called, &ob2.called], &[0, base_score * 2 + 3]);
 
-            host.post_apply(&region, &mut resp);
+            host.post_apply(&region, 0, &mut resp);
             assert_all!(&[&ob1.called, &ob2.called], &[0, base_score * 3 + 6]);
 
             set_all!(&[&ob2.bypass], false);

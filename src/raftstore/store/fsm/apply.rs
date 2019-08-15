@@ -236,7 +236,7 @@ impl ExecContext {
 
 struct ApplyCallback {
     region: Region,
-    cbs: Vec<(Option<Callback>, RaftCmdResponse)>,
+    cbs: Vec<(Option<Callback>, u64, RaftCmdResponse)>,
 }
 
 impl ApplyCallback {
@@ -246,16 +246,16 @@ impl ApplyCallback {
     }
 
     fn invoke_all(self, host: &CoprocessorHost) {
-        for (cb, mut resp) in self.cbs {
-            host.post_apply(&self.region, &mut resp);
+        for (cb, index, mut resp) in self.cbs {
+            host.post_apply(&self.region, index, &mut resp);
             if let Some(cb) = cb {
                 cb.invoke_with_response(resp)
             };
         }
     }
 
-    fn push(&mut self, cb: Option<Callback>, resp: RaftCmdResponse) {
-        self.cbs.push((cb, resp));
+    fn push(&mut self, cb: Option<Callback>, index: u64, resp: RaftCmdResponse) {
+        self.cbs.push((cb, index, resp));
     }
 }
 
@@ -799,11 +799,11 @@ impl ApplyDelegate {
         //    it will also propose an empty entry. But that entry will not contain
         //    any associated callback. So no need to clear callback.
         while let Some(mut cmd) = self.pending_cmds.pop_normal(std::u64::MAX, term - 1) {
-            apply_ctx
-                .cbs
-                .last_mut()
-                .unwrap()
-                .push(cmd.cb.take(), cmd_resp::err_resp(Error::StaleCommand, term));
+            apply_ctx.cbs.last_mut().unwrap().push(
+                cmd.cb.take(),
+                cmd.index,
+                cmd_resp::err_resp(Error::StaleCommand, term),
+            );
         }
         ApplyResult::None
     }
@@ -887,7 +887,7 @@ impl ApplyDelegate {
         }
 
         let is_conf_change = get_change_peer_cmd(&cmd).is_some();
-        apply_ctx.host.pre_apply(&self.region, &cmd);
+        apply_ctx.host.pre_apply(&self.region, index, &cmd);
         let (mut resp, exec_result) = self.apply_raft_cmd(apply_ctx, index, term, cmd);
         if let ApplyResult::WaitMergeSource(_) = exec_result {
             return exec_result;
@@ -904,7 +904,7 @@ impl ApplyDelegate {
         // store will call it after handing exec result.
         cmd_resp::bind_term(&mut resp, self.term);
         let cmd_cb = self.find_cb(index, term, is_conf_change);
-        apply_ctx.cbs.last_mut().unwrap().push(cmd_cb, resp);
+        apply_ctx.cbs.last_mut().unwrap().push(cmd_cb, index, resp);
 
         exec_result
     }
@@ -3389,11 +3389,11 @@ mod tests {
     impl Coprocessor for ApplyObserver {}
 
     impl QueryObserver for ApplyObserver {
-        fn pre_apply_query(&self, _: &mut ObserverContext<'_>, _: &[Request]) {
+        fn pre_apply_query(&self, _: &mut ObserverContext<'_>, _: u64, _: &[Request]) {
             self.pre_query_count.fetch_add(1, Ordering::SeqCst);
         }
 
-        fn post_apply_query(&self, _: &mut ObserverContext<'_>, _: &mut Vec<Response>) {
+        fn post_apply_query(&self, _: &mut ObserverContext<'_>, _: u64, _: &mut Vec<Response>) {
             self.post_query_count.fetch_add(1, Ordering::SeqCst);
         }
     }
