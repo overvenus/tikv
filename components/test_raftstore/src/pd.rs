@@ -58,7 +58,7 @@ impl Default for Store {
 enum SchedulePolicy {
     /// Repeat an Operator.
     Repeat(isize),
-    /// Repeat till succcess.
+    /// Repeat till success.
     TillSuccess,
     /// Stop immediately.
     Stop,
@@ -228,7 +228,7 @@ struct Cluster {
     leaders: HashMap<u64, metapb::Peer>,
     down_peers: HashMap<u64, pdpb::PeerStats>,
     pending_peers: HashMap<u64, metapb::Peer>,
-    is_bootstraped: bool,
+    is_bootstrapped: bool,
 }
 
 impl Cluster {
@@ -252,7 +252,7 @@ impl Cluster {
             leaders: HashMap::default(),
             down_peers: HashMap::default(),
             pending_peers: HashMap::default(),
-            is_bootstraped: false,
+            is_bootstrapped: false,
         }
     }
 
@@ -271,11 +271,11 @@ impl Cluster {
         self.stores.insert(store_id, s);
 
         self.add_region(&region);
-        self.is_bootstraped = true;
+        self.is_bootstrapped = true;
     }
 
-    fn set_bootstrap(&mut self, is_bootstraped: bool) {
-        self.is_bootstraped = is_bootstraped
+    fn set_bootstrap(&mut self, is_bootstrapped: bool) {
+        self.is_bootstrapped = is_bootstrapped
     }
 
     // We don't care cluster id here, so any value like 0 in tests is ok.
@@ -627,7 +627,7 @@ fn setdiff_peers(left: &metapb::Region, right: &metapb::Region) -> Vec<metapb::P
     peers
 }
 
-// For test when a node is already bootstraped the cluster with the first region
+// For test when a node is already bootstrapped the cluster with the first region
 pub fn bootstrap_with_first_region(pd_client: Arc<TestPdClient>) -> Result<()> {
     let mut region = metapb::Region::new();
     region.set_id(1);
@@ -805,7 +805,7 @@ impl TestPdClient {
         self.must_none_peer(region_id, peer);
     }
 
-    pub fn must_merge(&self, from: u64, target: u64) {
+    pub fn merge_region(&self, from: u64, target: u64) {
         let op = Operator::MergeRegion {
             source_region_id: from,
             target_region_id: target,
@@ -813,6 +813,10 @@ impl TestPdClient {
         };
         self.schedule_operator(from, op.clone());
         self.schedule_operator(target, op);
+    }
+
+    pub fn must_merge(&self, from: u64, target: u64) {
+        self.merge_region(from, target);
 
         for _ in 1..500 {
             sleep_ms(10);
@@ -885,8 +889,8 @@ impl TestPdClient {
         self.cluster.rl().pending_peers.clone()
     }
 
-    pub fn set_bootstrap(&self, is_bootstraped: bool) {
-        self.cluster.wl().set_bootstrap(is_bootstraped);
+    pub fn set_bootstrap(&self, is_bootstrapped: bool) {
+        self.cluster.wl().set_bootstrap(is_bootstrapped);
     }
 
     pub fn get_region_approximate_size(&self, region_id: u64) -> Option<u64> {
@@ -915,7 +919,7 @@ impl PdClient for TestPdClient {
     }
 
     fn is_cluster_bootstrapped(&self) -> Result<bool> {
-        Ok(self.cluster.rl().is_bootstraped)
+        Ok(self.cluster.rl().is_bootstrapped)
     }
 
     fn alloc_id(&self) -> Result<u64> {

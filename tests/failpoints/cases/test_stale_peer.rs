@@ -82,7 +82,7 @@ fn test_node_update_localreader_after_removed() {
     // Isolate peer 2 from rest of the cluster.
     cluster.add_send_filter(IsolationFilterFactory::new(2));
 
-    // Remove peer 2, so it will receive a gc msssage
+    // Remove peer 2, so it will receive a gc message
     // after max_leader_missing_duration timeout.
     pd_client.must_remove_peer(r1, new_peer(2, 2));
     thread::sleep(cluster.cfg.raft_store.max_leader_missing_duration.0 * 2);

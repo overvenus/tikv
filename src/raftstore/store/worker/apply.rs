@@ -254,7 +254,7 @@ struct ApplyContextCore<'a> {
     // `enable_sync_log` indicates that wal can be synchronized when data
     // is written to kv engine.
     enable_sync_log: bool,
-    // `sync_log_hint` indicates whether synchronize wal is prefered.
+    // `sync_log_hint` indicates whether synchronize wal is preferred.
     sync_log_hint: bool,
     exec_ctx: Option<ExecContext>,
     use_delete_range: bool,
@@ -287,8 +287,8 @@ impl<'a> ApplyContextCore<'a> {
         }
     }
 
-    pub fn enable_sync_log(mut self, eanbled: bool) -> ApplyContextCore<'a> {
-        self.enable_sync_log = eanbled;
+    pub fn enable_sync_log(mut self, enabled: bool) -> ApplyContextCore<'a> {
+        self.enable_sync_log = enabled;
         self
     }
 
@@ -607,7 +607,7 @@ pub struct ApplyDelegate {
     metrics: ApplyMetrics,
     last_merge_version: u64,
 
-    // Set it to Some, we first pause the deletgate and corresponding peer in
+    // Set it to Some, we first pause the delegate and corresponding peer in
     // the raftstore, then send a `sync-log` request to engine and waits a
     // response.
     // After received a response, we continue the delegate and the peer.
@@ -763,7 +763,7 @@ impl ApplyDelegate {
         // self.applied_index_term = term;
         assert!(term > 0);
         while let Some(mut cmd) = self.pending_cmds.pop_normal(term - 1) {
-            // apprently, all the callbacks whose term is less than entry's term are stale.
+            // apparently, all the callbacks whose term is less than entry's term are stale.
             apply_ctx
                 .cbs
                 .last_mut()
@@ -881,9 +881,9 @@ impl ApplyDelegate {
     }
 
     // apply operation can fail as following situation:
-    //   1. encouter an error that will occur on all store, it can continue
+    //   1. encounter an error that will occur on all store, it can continue
     // applying next entry safely, like stale epoch for example;
-    //   2. encouter an error that may not occur on all store, in this case
+    //   2. encounter an error that may not occur on all store, in this case
     // we should try to apply the entry again or panic. Considering that this
     // usually due to disk operation fail, which is rare, so just panic is ok.
     fn apply_raft_cmd(
@@ -1372,7 +1372,7 @@ impl ApplyDelegate {
         let new_version = derived.get_region_epoch().get_version() + new_region_cnt as u64;
         derived.mut_region_epoch().set_version(new_version);
         // Note that the split requests only contain ids for new regions, so we need
-        // to handle new regions and old region seperately.
+        // to handle new regions and old region separately.
         if right_derive {
             // So the range of new regions is [old_start_key, split_key1, ..., last_split_key].
             keys.push_front(derived.get_start_key().to_vec());
@@ -2412,7 +2412,7 @@ impl Runner {
             }
         }
         // Write to engine
-        // raftsotre.sync-log = true means we need prevent data loss when power failure.
+        // raftstore.sync-log = true means we need prevent data loss when power failure.
         // take raft log gc for example, we write kv WAL first, then write raft WAL,
         // if power failure happen, raft WAL may synced to disk, but kv WAL may not.
         // so we use sync-log flag here.
@@ -2515,7 +2515,7 @@ impl Runner {
                     "{} advance apply state from {:?} to {:?}",
                     delegate.tag, delegate.apply_state, apply_state
                 );
-                write_apply_state(&self.engines, &mut wb, region_id, &apply_state);
+                write_apply_state(&self.engines, &wb, region_id, &apply_state);
                 delegate.apply_state = apply_state.clone();
                 delegate.applied_index_term = applied_index_term;
             }

@@ -575,85 +575,6 @@ impl<T: RaftStoreRouter + 'static, E: Engine> tikvpb_grpc::Tikv for Service<T, E
         ctx.spawn(future);
     }
 
-    fn raw_scan(
-        &mut self,
-        ctx: RpcContext,
-        mut req: RawScanRequest,
-        sink: UnarySink<RawScanResponse>,
-    ) {
-        let timer = GRPC_MSG_HISTOGRAM_VEC.raw_scan.start_coarse_timer();
-
-        let end_key = if req.get_end_key().is_empty() {
-            None
-        } else {
-            Some(req.take_end_key())
-        };
-
-        let future = self
-            .storage
-            .async_raw_scan(
-                req.take_context(),
-                req.take_cf(),
-                req.take_start_key(),
-                end_key,
-                req.get_limit() as usize,
-                req.get_key_only(),
-                req.get_reverse(),
-            )
-            .then(|v| {
-                let mut resp = RawScanResponse::new();
-                if let Some(err) = extract_region_error(&v) {
-                    resp.set_region_error(err);
-                } else {
-                    resp.set_kvs(RepeatedField::from_vec(extract_kv_pairs(v)));
-                }
-                sink.success(resp).map_err(Error::from)
-            })
-            .map(|_| timer.observe_duration())
-            .map_err(move |e| {
-                debug!("{} failed: {:?}", "raw_scan", e);
-                GRPC_MSG_FAIL_COUNTER.raw_scan.inc();
-            });
-
-        ctx.spawn(future);
-    }
-
-    fn raw_batch_scan(
-        &mut self,
-        ctx: RpcContext,
-        mut req: RawBatchScanRequest,
-        sink: UnarySink<RawBatchScanResponse>,
-    ) {
-        let timer = GRPC_MSG_HISTOGRAM_VEC.raw_batch_scan.start_coarse_timer();
-
-        let future = self
-            .storage
-            .async_raw_batch_scan(
-                req.take_context(),
-                req.take_cf(),
-                req.take_ranges().into_vec(),
-                req.get_each_limit() as usize,
-                req.get_key_only(),
-                req.get_reverse(),
-            )
-            .then(|v| {
-                let mut resp = RawBatchScanResponse::new();
-                if let Some(err) = extract_region_error(&v) {
-                    resp.set_region_error(err);
-                } else {
-                    resp.set_kvs(RepeatedField::from_vec(extract_kv_pairs(v)));
-                }
-                sink.success(resp).map_err(Error::from)
-            })
-            .map(|_| timer.observe_duration())
-            .map_err(move |e| {
-                debug!("{} failed: {:?}", "raw_batch_scan", e);
-                GRPC_MSG_FAIL_COUNTER.raw_batch_scan.inc();
-            });
-
-        ctx.spawn(future);
-    }
-
     fn raw_put(
         &mut self,
         ctx: RpcContext,
@@ -792,6 +713,49 @@ impl<T: RaftStoreRouter + 'static, E: Engine> tikvpb_grpc::Tikv for Service<T, E
         ctx.spawn(future);
     }
 
+    fn raw_scan(
+        &mut self,
+        ctx: RpcContext,
+        mut req: RawScanRequest,
+        sink: UnarySink<RawScanResponse>,
+    ) {
+        let timer = GRPC_MSG_HISTOGRAM_VEC.raw_scan.start_coarse_timer();
+
+        let end_key = if req.get_end_key().is_empty() {
+            None
+        } else {
+            Some(req.take_end_key())
+        };
+
+        let future = self
+            .storage
+            .async_raw_scan(
+                req.take_context(),
+                req.take_cf(),
+                req.take_start_key(),
+                end_key,
+                req.get_limit() as usize,
+                req.get_key_only(),
+                req.get_reverse(),
+            )
+            .then(|v| {
+                let mut resp = RawScanResponse::new();
+                if let Some(err) = extract_region_error(&v) {
+                    resp.set_region_error(err);
+                } else {
+                    resp.set_kvs(RepeatedField::from_vec(extract_kv_pairs(v)));
+                }
+                sink.success(resp).map_err(Error::from)
+            })
+            .map(|_| timer.observe_duration())
+            .map_err(move |e| {
+                debug!("{} failed: {:?}", "raw_scan", e);
+                GRPC_MSG_FAIL_COUNTER.raw_scan.inc();
+            });
+
+        ctx.spawn(future);
+    }
+
     fn raw_delete_range(
         &mut self,
         ctx: RpcContext,
@@ -823,6 +787,42 @@ impl<T: RaftStoreRouter + 'static, E: Engine> tikvpb_grpc::Tikv for Service<T, E
             .map_err(move |e| {
                 debug!("{} failed: {:?}", "raw_delete_range", e);
                 GRPC_MSG_FAIL_COUNTER.raw_delete_range.inc();
+            });
+
+        ctx.spawn(future);
+    }
+
+    fn raw_batch_scan(
+        &mut self,
+        ctx: RpcContext,
+        mut req: RawBatchScanRequest,
+        sink: UnarySink<RawBatchScanResponse>,
+    ) {
+        let timer = GRPC_MSG_HISTOGRAM_VEC.raw_batch_scan.start_coarse_timer();
+
+        let future = self
+            .storage
+            .async_raw_batch_scan(
+                req.take_context(),
+                req.take_cf(),
+                req.take_ranges().into_vec(),
+                req.get_each_limit() as usize,
+                req.get_key_only(),
+                req.get_reverse(),
+            )
+            .then(|v| {
+                let mut resp = RawBatchScanResponse::new();
+                if let Some(err) = extract_region_error(&v) {
+                    resp.set_region_error(err);
+                } else {
+                    resp.set_kvs(RepeatedField::from_vec(extract_kv_pairs(v)));
+                }
+                sink.success(resp).map_err(Error::from)
+            })
+            .map(|_| timer.observe_duration())
+            .map_err(move |e| {
+                debug!("{} failed: {:?}", "raw_batch_scan", e);
+                GRPC_MSG_FAIL_COUNTER.raw_batch_scan.inc();
             });
 
         ctx.spawn(future);
@@ -965,86 +965,6 @@ impl<T: RaftStoreRouter + 'static, E: Engine> tikvpb_grpc::Tikv for Service<T, E
         }
     }
 
-    fn mvcc_get_by_key(
-        &mut self,
-        ctx: RpcContext,
-        mut req: MvccGetByKeyRequest,
-        sink: UnarySink<MvccGetByKeyResponse>,
-    ) {
-        let timer = GRPC_MSG_HISTOGRAM_VEC.mvcc_get_by_key.start_coarse_timer();
-
-        let key = Key::from_raw(req.get_key());
-        let (cb, f) = paired_future_callback();
-        let res = self
-            .storage
-            .async_mvcc_by_key(req.take_context(), key.clone(), cb);
-
-        let future = AndThenWith::new(res, f.map_err(Error::from))
-            .and_then(|v| {
-                let mut resp = MvccGetByKeyResponse::new();
-                if let Some(err) = extract_region_error(&v) {
-                    resp.set_region_error(err);
-                } else {
-                    match v {
-                        Ok(mvcc) => {
-                            resp.set_info(extract_mvcc_info(mvcc));
-                        }
-                        Err(e) => resp.set_error(format!("{}", e)),
-                    };
-                }
-                sink.success(resp).map_err(Error::from)
-            })
-            .map(|_| timer.observe_duration())
-            .map_err(move |e| {
-                debug!("{} failed: {:?}", "mvcc_get_by_key", e);
-                GRPC_MSG_FAIL_COUNTER.mvcc_get_by_key.inc();
-            });
-
-        ctx.spawn(future);
-    }
-
-    fn mvcc_get_by_start_ts(
-        &mut self,
-        ctx: RpcContext,
-        mut req: MvccGetByStartTsRequest,
-        sink: UnarySink<MvccGetByStartTsResponse>,
-    ) {
-        let timer = GRPC_MSG_HISTOGRAM_VEC
-            .mvcc_get_by_start_ts
-            .start_coarse_timer();
-
-        let (cb, f) = paired_future_callback();
-        let res = self
-            .storage
-            .async_mvcc_by_start_ts(req.take_context(), req.get_start_ts(), cb);
-
-        let future = AndThenWith::new(res, f.map_err(Error::from))
-            .and_then(|v| {
-                let mut resp = MvccGetByStartTsResponse::new();
-                if let Some(err) = extract_region_error(&v) {
-                    resp.set_region_error(err);
-                } else {
-                    match v {
-                        Ok(Some((k, vv))) => {
-                            resp.set_key(k.into_raw().unwrap());
-                            resp.set_info(extract_mvcc_info(vv));
-                        }
-                        Ok(None) => {
-                            resp.set_info(Default::default());
-                        }
-                        Err(e) => resp.set_error(format!("{}", e)),
-                    }
-                }
-                sink.success(resp).map_err(Error::from)
-            })
-            .map(|_| timer.observe_duration())
-            .map_err(move |e| {
-                debug!("{} failed: {:?}", "mvcc_get_by_start_ts", e);
-                GRPC_MSG_FAIL_COUNTER.mvcc_get_by_start_ts.inc();
-            });
-        ctx.spawn(future);
-    }
-
     fn split_region(
         &mut self,
         ctx: RpcContext,
@@ -1162,6 +1082,86 @@ impl<T: RaftStoreRouter + 'static, E: Engine> tikvpb_grpc::Tikv for Service<T, E
                 GRPC_MSG_FAIL_COUNTER.split_region.inc();
             });
 
+        ctx.spawn(future);
+    }
+
+    fn mvcc_get_by_key(
+        &mut self,
+        ctx: RpcContext,
+        mut req: MvccGetByKeyRequest,
+        sink: UnarySink<MvccGetByKeyResponse>,
+    ) {
+        let timer = GRPC_MSG_HISTOGRAM_VEC.mvcc_get_by_key.start_coarse_timer();
+
+        let key = Key::from_raw(req.get_key());
+        let (cb, f) = paired_future_callback();
+        let res = self
+            .storage
+            .async_mvcc_by_key(req.take_context(), key.clone(), cb);
+
+        let future = AndThenWith::new(res, f.map_err(Error::from))
+            .and_then(|v| {
+                let mut resp = MvccGetByKeyResponse::new();
+                if let Some(err) = extract_region_error(&v) {
+                    resp.set_region_error(err);
+                } else {
+                    match v {
+                        Ok(mvcc) => {
+                            resp.set_info(extract_mvcc_info(mvcc));
+                        }
+                        Err(e) => resp.set_error(format!("{}", e)),
+                    };
+                }
+                sink.success(resp).map_err(Error::from)
+            })
+            .map(|_| timer.observe_duration())
+            .map_err(move |e| {
+                debug!("{} failed: {:?}", "mvcc_get_by_key", e);
+                GRPC_MSG_FAIL_COUNTER.mvcc_get_by_key.inc();
+            });
+
+        ctx.spawn(future);
+    }
+
+    fn mvcc_get_by_start_ts(
+        &mut self,
+        ctx: RpcContext,
+        mut req: MvccGetByStartTsRequest,
+        sink: UnarySink<MvccGetByStartTsResponse>,
+    ) {
+        let timer = GRPC_MSG_HISTOGRAM_VEC
+            .mvcc_get_by_start_ts
+            .start_coarse_timer();
+
+        let (cb, f) = paired_future_callback();
+        let res = self
+            .storage
+            .async_mvcc_by_start_ts(req.take_context(), req.get_start_ts(), cb);
+
+        let future = AndThenWith::new(res, f.map_err(Error::from))
+            .and_then(|v| {
+                let mut resp = MvccGetByStartTsResponse::new();
+                if let Some(err) = extract_region_error(&v) {
+                    resp.set_region_error(err);
+                } else {
+                    match v {
+                        Ok(Some((k, vv))) => {
+                            resp.set_key(k.into_raw().unwrap());
+                            resp.set_info(extract_mvcc_info(vv));
+                        }
+                        Ok(None) => {
+                            resp.set_info(Default::default());
+                        }
+                        Err(e) => resp.set_error(format!("{}", e)),
+                    }
+                }
+                sink.success(resp).map_err(Error::from)
+            })
+            .map(|_| timer.observe_duration())
+            .map_err(move |e| {
+                debug!("{} failed: {:?}", "mvcc_get_by_start_ts", e);
+                GRPC_MSG_FAIL_COUNTER.mvcc_get_by_start_ts.inc();
+            });
         ctx.spawn(future);
     }
 }

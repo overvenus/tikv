@@ -19,7 +19,7 @@ use test_raftstore::*;
 use tikv::pd::PdClient;
 
 #[test]
-fn test_destory_local_reader() {
+fn test_destroy_local_reader() {
     let _guard = ::setup();
 
     // 3 nodes cluster.
