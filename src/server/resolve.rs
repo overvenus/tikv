@@ -87,7 +87,11 @@ impl<T: PdClient> Runner<T> {
                 .inc();
             return Err(box_err!("store {} has been removed", store_id));
         }
-        let addr = s.get_address().to_owned();
+        let addr = if s.get_peer_address().is_empty() {
+            s.get_address().to_owned()
+        } else {
+            s.get_peer_address().to_owned()
+        };
         // In some tests, we use empty address for store first,
         // so we should ignore here.
         // TODO: we may remove this check after we refactor the test.
@@ -184,7 +188,11 @@ mod tests {
         fn get_store(&self, _: u64) -> Result<metapb::Store> {
             // The store address will be changed every millisecond.
             let mut store = self.store.clone();
-            let mut sock = SocketAddr::from_str(store.get_address()).unwrap();
+            let mut sock = if store.get_peer_address().is_empty() {
+                SocketAddr::from_str(store.get_address()).unwrap()
+            } else {
+                SocketAddr::from_str(store.get_peer_address()).unwrap()
+            };
             sock.set_port(util::time::duration_to_ms(self.start.elapsed()) as u16);
             store.set_address(format!("{}:{}", sock.ip(), sock.port()));
             Ok(store)

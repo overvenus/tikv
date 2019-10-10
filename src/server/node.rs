@@ -104,13 +104,16 @@ where
     {
         let mut store = metapb::Store::new();
         store.set_id(INVALID_ID);
-        if cfg.advertise_addr.is_empty() {
-            store.set_address(cfg.addr.clone());
+        if !cfg.engine_addr.is_empty() {
+            store.set_address(cfg.engine_addr.clone());
         } else {
-            store.set_address(cfg.advertise_addr.clone())
-        }
+            error!("engine address for learner is not defined!");
+            process::exit(1);
+        };
         store.set_version(env!("CARGO_PKG_VERSION").to_string());
-
+        if !cfg.advertise_addr.is_empty() {
+            store.set_peer_address(cfg.advertise_addr.clone())
+        };
         let mut labels = Vec::new();
         for (k, v) in &cfg.labels {
             let mut label = metapb::StoreLabel::new();

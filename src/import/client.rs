@@ -31,6 +31,7 @@ use util::security::SecurityManager;
 
 use super::common::*;
 use super::{Error, Result};
+use std::borrow::ToOwned;
 
 pub trait ImportClient: Send + Sync + Clone + 'static {
     fn get_region(&self, _: &[u8]) -> Result<RegionInfo> {
@@ -92,7 +93,12 @@ impl Client {
             HashMapEntry::Vacant(e) => {
                 let store = self.pd.get_store(store_id)?;
                 let builder = ChannelBuilder::new(Arc::clone(&self.env));
-                let channel = builder.connect(store.get_address());
+                let addr = if store.get_peer_address().is_empty() {
+                    store.get_address().to_owned()
+                } else {
+                    store.get_peer_address().to_owned()
+                };
+                let channel = builder.connect(&addr);
                 Ok(e.insert(channel).clone())
             }
         }

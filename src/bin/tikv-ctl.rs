@@ -1920,7 +1920,12 @@ fn split_region(pd: &str, region_id: u64, key: Vec<u8>, mgr: Arc<SecurityManager
 
     let tikv_client = {
         let cb = ChannelBuilder::new(Arc::new(Environment::new(1)));
-        let channel = mgr.connect(cb, store.get_address());
+        let addr = if store.get_peer_address().is_empty() {
+            store.get_address().to_owned()
+        } else {
+            store.get_peer_address().to_owned()
+        };
+        let channel = mgr.connect(cb, &addr);
         TikvClient::new(channel)
     };
 
