@@ -43,9 +43,9 @@ use crate::raftstore::store::peer_storage::{self, HandleRaftReadyContext, Invoke
 use crate::raftstore::store::transport::Transport;
 use crate::raftstore::store::util::is_initial_msg;
 use crate::raftstore::store::worker::{
-    CleanupSSTRunner, CleanupSSTTask, CompactRunner, CompactTask, ConsistencyCheckRunner,
-    ConsistencyCheckTask, PdRunner, RaftlogGcRunner, RaftlogGcTask, ReadDelegate, RegionRunner,
-    RegionTask, SplitCheckRunner, SplitCheckTask,
+    CleanupRunner, CleanupSSTRunner, CleanupSSTTask, CleanupTask, CompactRunner, CompactTask,
+    ConsistencyCheckRunner, ConsistencyCheckTask, PdRunner, RaftlogGcRunner, RaftlogGcTask,
+    ReadDelegate, RegionRunner, RegionTask, SplitCheckRunner, SplitCheckTask,
 };
 use crate::raftstore::store::PdTask;
 use crate::raftstore::store::{
@@ -191,14 +191,14 @@ pub struct PollContext<T, C: 'static> {
     pub cfg: Arc<Config>,
     pub store: metapb::Store,
     pub pd_scheduler: FutureScheduler<PdTask>,
-    pub raftlog_gc_scheduler: Scheduler<RaftlogGcTask>,
     pub consistency_check_scheduler: Scheduler<ConsistencyCheckTask>,
     pub split_check_scheduler: Scheduler<SplitCheckTask>,
-    pub cleanup_sst_scheduler: Scheduler<CleanupSSTTask>,
+    // handle Compact, CleanupSST task
+    pub cleanup_scheduler: Scheduler<CleanupTask>,
+    pub raftlog_gc_scheduler: Scheduler<RaftlogGcTask>,
     pub region_scheduler: Scheduler<RegionTask>,
     pub apply_router: ApplyRouter,
     pub router: RaftRouter,
-    pub compact_scheduler: Scheduler<CompactTask>,
     pub importer: Arc<SSTImporter>,
     pub store_meta: Arc<Mutex<StoreMeta>>,
     pub future_poller: ThreadPoolSender,
@@ -220,7 +220,7 @@ pub struct PollContext<T, C: 'static> {
     pub ready_res: Vec<(Ready, InvokeContext)>,
     pub need_flush_trans: bool,
     pub queued_snapshot: HashSet<u64>,
-    pub lease_time: Option<Timespec>,
+    pub current_time: Option<Timespec>,
 }
 
 impl<T, C> HandleRaftReadyContext for PollContext<T, C> {
@@ -653,10 +653,10 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm, StoreFsm> for RaftPoller<T,
     }
 
     fn end(&mut self, peers: &mut [Box<PeerFsm>]) {
-        self.poll_ctx.lease_time = None;
         if self.poll_ctx.has_ready {
             self.handle_raft_ready(peers);
         }
+        self.poll_ctx.current_time = None;
         if self.poll_ctx.need_flush_trans {
             self.poll_ctx.trans.flush();
             self.poll_ctx.need_flush_trans = false;
@@ -680,14 +680,13 @@ pub struct RaftPollerBuilder<T, C> {
     pub cfg: Arc<Config>,
     pub store: metapb::Store,
     pd_scheduler: FutureScheduler<PdTask>,
-    raftlog_gc_scheduler: Scheduler<RaftlogGcTask>,
     consistency_check_scheduler: Scheduler<ConsistencyCheckTask>,
     split_check_scheduler: Scheduler<SplitCheckTask>,
-    cleanup_sst_scheduler: Scheduler<CleanupSSTTask>,
+    cleanup_scheduler: Scheduler<CleanupTask>,
+    raftlog_gc_scheduler: Scheduler<RaftlogGcTask>,
     pub region_scheduler: Scheduler<RegionTask>,
     apply_router: ApplyRouter,
     pub router: RaftRouter,
-    compact_scheduler: Scheduler<CompactTask>,
     pub importer: Arc<SSTImporter>,
     store_meta: Arc<Mutex<StoreMeta>>,
     future_poller: ThreadPoolSender,
@@ -876,14 +875,13 @@ where
             cfg: self.cfg.clone(),
             store: self.store.clone(),
             pd_scheduler: self.pd_scheduler.clone(),
-            raftlog_gc_scheduler: self.raftlog_gc_scheduler.clone(),
             consistency_check_scheduler: self.consistency_check_scheduler.clone(),
             split_check_scheduler: self.split_check_scheduler.clone(),
-            cleanup_sst_scheduler: self.cleanup_sst_scheduler.clone(),
             region_scheduler: self.region_scheduler.clone(),
             apply_router: self.apply_router.clone(),
             router: self.router.clone(),
-            compact_scheduler: self.compact_scheduler.clone(),
+            cleanup_scheduler: self.cleanup_scheduler.clone(),
+            raftlog_gc_scheduler: self.raftlog_gc_scheduler.clone(),
             importer: self.importer.clone(),
             store_meta: self.store_meta.clone(),
             future_poller: self.future_poller.clone(),
@@ -905,7 +903,7 @@ where
             ready_res: Vec::new(),
             need_flush_trans: false,
             queued_snapshot: HashSet::default(),
-            lease_time: None,
+            current_time: None,
         };
         RaftPoller {
             tag: format!("[store {}]", ctx.store.get_id()),
@@ -922,12 +920,12 @@ where
 
 struct Workers {
     pd_worker: FutureWorker<PdTask>,
-    raftlog_gc_worker: Worker<RaftlogGcTask>,
     consistency_check_worker: Worker<ConsistencyCheckTask>,
     split_check_worker: Worker<SplitCheckTask>,
-    cleanup_sst_worker: Worker<CleanupSSTTask>,
+    // handle Compact, CleanupSST task
+    cleanup_worker: Worker<CleanupTask>,
+    raftlog_gc_worker: Worker<RaftlogGcTask>,
     region_worker: Worker<RegionTask>,
-    compact_worker: Worker<CompactTask>,
     coprocessor_host: Arc<CoprocessorHost>,
     future_poller: ThreadPool,
 }
@@ -970,11 +968,10 @@ impl RaftBatchSystem {
         let workers = Workers {
             split_check_worker: Worker::new("split-check"),
             region_worker: Worker::new("snapshot-worker"),
-            raftlog_gc_worker: Worker::new("raft-gc-worker"),
-            compact_worker: Worker::new("compact-worker"),
             pd_worker,
             consistency_check_worker: Worker::new("consistency-check"),
-            cleanup_sst_worker: Worker::new("cleanup-sst"),
+            cleanup_worker: Worker::new("cleanup-worker"),
+            raftlog_gc_worker: Worker::new("raft-gc-worker"),
             coprocessor_host: Arc::new(coprocessor_host),
             future_poller: tokio_threadpool::Builder::new()
                 .name_prefix("future-poller")
@@ -988,11 +985,10 @@ impl RaftBatchSystem {
             router: self.router.clone(),
             split_check_scheduler: workers.split_check_worker.scheduler(),
             region_scheduler: workers.region_worker.scheduler(),
-            raftlog_gc_scheduler: workers.raftlog_gc_worker.scheduler(),
-            compact_scheduler: workers.compact_worker.scheduler(),
             pd_scheduler: workers.pd_worker.scheduler(),
             consistency_check_scheduler: workers.consistency_check_worker.scheduler(),
-            cleanup_sst_scheduler: workers.cleanup_sst_worker.scheduler(),
+            cleanup_scheduler: workers.cleanup_worker.scheduler(),
+            raftlog_gc_scheduler: workers.raftlog_gc_worker.scheduler(),
             apply_router: self.apply_router.clone(),
             trans,
             pd_client,
@@ -1093,7 +1089,14 @@ impl RaftBatchSystem {
         box_try!(workers.raftlog_gc_worker.start(raftlog_gc_runner));
 
         let compact_runner = CompactRunner::new(Arc::clone(&engines.kv));
-        box_try!(workers.compact_worker.start(compact_runner));
+        let cleanup_sst_runner = CleanupSSTRunner::new(
+            store.get_id(),
+            self.router.clone(),
+            Arc::clone(&importer),
+            Arc::clone(&pd_client),
+        );
+        let cleanup_runner = CleanupRunner::new(compact_runner, cleanup_sst_runner);
+        box_try!(workers.cleanup_worker.start(cleanup_runner));
 
         let pd_runner = PdRunner::new(
             store.get_id(),
@@ -1101,7 +1104,7 @@ impl RaftBatchSystem {
             self.router.clone(),
             Arc::clone(&engines.kv),
             workers.pd_worker.scheduler(),
-            cfg.pd_heartbeat_tick_interval.as_secs(),
+            cfg.pd_store_heartbeat_tick_interval.as_secs(),
         );
         box_try!(workers.pd_worker.start(pd_runner));
 
@@ -1109,14 +1112,6 @@ impl RaftBatchSystem {
         box_try!(workers
             .consistency_check_worker
             .start(consistency_check_runner));
-
-        let cleanup_sst_runner = CleanupSSTRunner::new(
-            store.get_id(),
-            self.router.clone(),
-            Arc::clone(&importer),
-            Arc::clone(&pd_client),
-        );
-        box_try!(workers.cleanup_sst_worker.start(cleanup_sst_runner));
 
         if let Err(e) = sys_util::thread::set_priority(sys_util::HIGH_PRI) {
             warn!("set thread priority for raftstore failed"; "error" => ?e);
@@ -1134,11 +1129,10 @@ impl RaftBatchSystem {
         let mut handles: Vec<Option<thread::JoinHandle<()>>> = vec![];
         handles.push(workers.split_check_worker.stop());
         handles.push(workers.region_worker.stop());
-        handles.push(workers.raftlog_gc_worker.stop());
-        handles.push(workers.compact_worker.stop());
         handles.push(workers.pd_worker.stop());
         handles.push(workers.consistency_check_worker.stop());
-        handles.push(workers.cleanup_sst_worker.stop());
+        handles.push(workers.cleanup_worker.stop());
+        handles.push(workers.raftlog_gc_worker.stop());
         self.apply_system.shutdown();
         self.system.shutdown();
         for h in handles {
@@ -1481,7 +1475,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
 
     fn on_compact_check_tick(&mut self) {
         self.register_compact_check_tick();
-        if self.ctx.compact_scheduler.is_busy() {
+        if self.ctx.cleanup_scheduler.is_busy() {
             debug!(
                 "compact worker is busy, check space redundancy next time";
                 "store_id" => self.fsm.store.id,
@@ -1541,16 +1535,14 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
 
         // Schedule the task.
         let cf_names = vec![CF_DEFAULT.to_owned(), CF_WRITE.to_owned()];
-        if let Err(e) = self
-            .ctx
-            .compact_scheduler
-            .schedule(CompactTask::CheckAndCompact {
+        if let Err(e) = self.ctx.cleanup_scheduler.schedule(CleanupTask::Compact(
+            CompactTask::CheckAndCompact {
                 cf_names,
                 ranges: ranges_need_check,
                 tombstones_num_threshold: self.ctx.cfg.region_compact_min_tombstones,
                 tombstones_percent_threshold: self.ctx.cfg.region_compact_tombstones_percent,
-            })
-        {
+            },
+        )) {
             error!(
                 "schedule space check task failed";
                 "store_id" => self.fsm.store.id,
@@ -1724,7 +1716,11 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
                 start_key: None,
                 end_key: None,
             };
-            if let Err(e) = self.ctx.compact_scheduler.schedule(task) {
+            if let Err(e) = self
+                .ctx
+                .cleanup_scheduler
+                .schedule(CleanupTask::Compact(task))
+            {
                 error!(
                     "schedule compact lock cf task failed";
                     "store_id" => self.fsm.store.id,
@@ -1777,7 +1773,11 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
         }
 
         let task = CleanupSSTTask::DeleteSST { ssts: delete_ssts };
-        if let Err(e) = self.ctx.cleanup_sst_scheduler.schedule(task) {
+        if let Err(e) = self
+            .ctx
+            .cleanup_scheduler
+            .schedule(CleanupTask::CleanupSST(task))
+        {
             error!(
                 "schedule to delete ssts failed";
                 "store_id" => self.fsm.store.id,
@@ -1812,7 +1812,11 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
 
         if !delete_ssts.is_empty() {
             let task = CleanupSSTTask::DeleteSST { ssts: delete_ssts };
-            if let Err(e) = self.ctx.cleanup_sst_scheduler.schedule(task) {
+            if let Err(e) = self
+                .ctx
+                .cleanup_scheduler
+                .schedule(CleanupTask::CleanupSST(task))
+            {
                 error!(
                     "schedule to delete ssts failed";
                     "store_id" => self.fsm.store.id,
@@ -1825,7 +1829,11 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
             let task = CleanupSSTTask::ValidateSST {
                 ssts: validate_ssts,
             };
-            if let Err(e) = self.ctx.cleanup_sst_scheduler.schedule(task) {
+            if let Err(e) = self
+                .ctx
+                .cleanup_scheduler
+                .schedule(CleanupTask::CleanupSST(task))
+            {
                 error!(
                    "schedule to validate ssts failed";
                    "store_id" => self.fsm.store.id,

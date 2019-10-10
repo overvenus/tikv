@@ -311,7 +311,7 @@ mod tests {
                     let row = &entries.entries[0];
                     assert_eq!(*row, event_row);
                 }
-                other => panic!("{:?}", other),
+                other => panic!("unknown event"),
             }
         };
         let mut row = EventRow::new();

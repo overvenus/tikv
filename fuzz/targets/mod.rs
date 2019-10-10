@@ -158,21 +158,20 @@ impl<T: ReadLiteralExt> ReadAsTimeType for T {}
 
 fn fuzz_time(t: tidb_query::codec::mysql::Time, mut cursor: Cursor<&[u8]>) -> Result<(), Error> {
     use tidb_query::codec::convert::ConvertTo;
-    use tidb_query::codec::data_type::Decimal;
+    use tidb_query::codec::data_type::{Decimal, Duration};
     use tidb_query::codec::mysql::TimeEncoder;
     use tidb_query::expr::EvalContext;
 
     let _ = t.clone().set_time_type(cursor.read_as_time_type()?);
     let _ = t.is_zero();
     let _ = t.invalid_zero();
-    let _ = t.to_duration();
     let _ = t.to_packed_u64();
     let _ = t.clone().round_frac(cursor.read_as_i8()?);
     let _ = t.is_leap_year();
     let _ = t.last_day_of_month();
     let _ = t.to_string();
     let mut v = Vec::new();
-    let _ = v.encode_time(&t);
+    let _ = v.write_time(&t);
 
     let mut ctx = EvalContext::default();
     let _: i64 = t.convert(&mut ctx)?;
@@ -180,6 +179,7 @@ fn fuzz_time(t: tidb_query::codec::mysql::Time, mut cursor: Cursor<&[u8]>) -> Re
     let _: f64 = t.convert(&mut ctx)?;
     let _: Vec<u8> = t.convert(&mut ctx)?;
     let _: Decimal = t.convert(&mut ctx)?;
+    let _: Duration = t.convert(&mut ctx)?;
     Ok(())
 }
 
@@ -229,7 +229,7 @@ fn fuzz_duration(
     let u = t;
     u.round_frac(cursor.read_as_i8()?)?;
     let mut v = Vec::new();
-    let _ = v.encode_duration(t);
+    let _ = v.write_duration(t);
 
     let mut ctx = EvalContext::default();
     let _: Decimal = t.convert(&mut ctx)?;
