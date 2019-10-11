@@ -5,9 +5,9 @@ use futures::sync::mpsc::UnboundedSender;
 use kvproto::cdcpb::*;
 use tikv_util::collections::HashMap;
 use tikv_util::worker::Runnable;
-use tokio_threadpool::ThreadPool;
 
 use crate::delegate::Delegate;
+use crate::CdcObserver;
 use crate::RawEvent;
 
 pub enum Task {
@@ -39,18 +39,20 @@ impl fmt::Debug for Task {
 
 pub struct Endpoint {
     capture_regions: HashMap<u64, Delegate>,
+    observer: CdcObserver,
 }
 
 impl Endpoint {
-    pub fn new() -> Endpoint {
+    pub fn new(observer: CdcObserver) -> Endpoint {
         Endpoint {
-            // TODO: config threadpool.
             capture_regions: HashMap::default(),
+            observer,
         }
     }
 
     fn on_deregister(&mut self, region_id: u64) {
         info!("cdc deregister region"; "region_id" => region_id);
+        self.observer.deregister_region(region_id);
         self.capture_regions.remove(&region_id);
     }
 
@@ -70,6 +72,7 @@ impl Endpoint {
             // TODO: should we close the sink?
             warn!("replace region change data sink"; "region_id"=> region_id);
         }
+        self.observer.register_region(region_id);
     }
 
     pub fn on_raw_event(&mut self, event: RawEvent) {

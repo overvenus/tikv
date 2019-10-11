@@ -55,13 +55,16 @@ impl Delegate {
     ) {
     }
 
-    pub fn sink_noop(&self, _index: u64) {
-        self.sink.unbounded_send(ChangeDataEvent::new()).unwrap();
+    pub fn sink_noop(&self, index: u64) {
+        if self.sink.unbounded_send(ChangeDataEvent::new()).is_err() {
+            info!("send event failed";
+                "index" => index);
+        }
     }
     pub fn sink_data(&self, index: u64, requests: Vec<Request>) {
         let mut kv: HashMap<Vec<u8>, EventRow> = HashMap::default();
         for mut req in requests {
-            if let CmdType::Put = req.cmd_type {
+            if req.cmd_type == CmdType::Put {
                 let mut put = req.take_put();
                 match put.cf.as_str() {
                     "write" => {
@@ -124,13 +127,12 @@ impl Delegate {
                         panic!("invalid cf {}", other);
                     }
                 }
-            } else {
-                warn!(
-                    "skip non-put command";
+            } else if req.cmd_type != CmdType::Delete {
+                info!(
+                    "skip other command";
                     "region_id" => self.region_id,
-                    "command" => ?req.cmd_type,
+                    "command" => ?req,
                 );
-                continue;
             }
         }
         let mut entires = Vec::with_capacity(kv.len());
@@ -142,7 +144,10 @@ impl Delegate {
         self.warp_sink(index, Event_oneof_event::Entries(event_entries));
     }
     pub fn sink_admin(&self, index: u64, request: AdminRequest, response: AdminResponse) {
-        self.sink.unbounded_send(ChangeDataEvent::new()).unwrap();
+        if self.sink.unbounded_send(ChangeDataEvent::new()).is_err() {
+            info!("send event failed";
+                "index" => index);
+        }
     }
 
     fn warp_sink(&self, index: u64, event: Event_oneof_event) {
@@ -152,7 +157,10 @@ impl Delegate {
         change_data_event.event = Some(event);
         let mut change_data = ChangeDataEvent::new();
         change_data.mut_events().push(change_data_event);
-        self.sink.unbounded_send(change_data).unwrap();
+        if self.sink.unbounded_send(change_data).is_err() {
+            info!("send event failed";
+                "index" => index);
+        }
     }
 }
 
@@ -311,7 +319,7 @@ mod tests {
                     let row = &entries.entries[0];
                     assert_eq!(*row, event_row);
                 }
-                other => panic!("unknown event"),
+                _ => panic!("unknown event"),
             }
         };
         let mut row = EventRow::new();

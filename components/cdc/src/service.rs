@@ -2,7 +2,6 @@ use futures::sync::mpsc;
 use futures::{Future, Sink, Stream};
 use grpcio::*;
 use kvproto::cdcpb::*;
-use kvproto::cdcpb_grpc::*;
 use tikv_util::worker::*;
 
 use crate::endpoint::Task;

@@ -280,26 +280,23 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     // Create CoprocessorHost.
     let mut coprocessor_host = CoprocessorHost::new(cfg.coprocessor.clone(), router);
 
-    // Create register and start cdc.
+    // Create and register cdc.
     let mut cdc_worker = tikv_util::worker::Worker::new("cdc");
     let cdc_scheduler = cdc_worker.scheduler();
-    let cdc_ob = cdc::CdcObserver::new(cdc_scheduler.clone());
-    let cdc_endpoint = cdc::Endpoint::new();
-    let cdc_service = cdc::Service::new(cdc_scheduler);
-
-    server
+    let cdc_service = cdc::Service::new(cdc_scheduler.clone());
+    if server
         .register_service(create_change_data(cdc_service))
-        .map(|_| fatal!("failed to register {}", "cdc"));
+        .is_some()
+    {
+        fatal!("failed to register cdc service");
+    }
+    let cdc_ob = cdc::CdcObserver::new(cdc_scheduler);
     coprocessor_host
         .registry
         .register_admin_observer(100, Box::new(cdc_ob.clone()) as _);
     coprocessor_host
         .registry
         .register_query_observer(100, Box::new(cdc_ob.clone()) as _);
-
-    cdc_worker
-        .start(cdc_endpoint)
-        .unwrap_or_else(|e| fatal!("failed to start cdc: {}", e));
 
     // Create region collection.
     let region_info_accessor = RegionInfoAccessor::new(&mut coprocessor_host);
@@ -343,6 +340,12 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     if let Err(e) = storage.start_auto_gc(auto_gc_cfg) {
         fatal!("failed to start auto_gc on storage, error: {}", e);
     }
+
+    // Start CDC.
+    let cdc_endpoint = cdc::Endpoint::new(cdc_ob);
+    cdc_worker
+        .start(cdc_endpoint)
+        .unwrap_or_else(|e| fatal!("failed to start cdc: {}", e));
 
     let mut metrics_flusher = MetricsFlusher::new(
         engines.clone(),
@@ -417,7 +420,10 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     node.stop();
 
     // Stop cdc.
-    cdc_worker.stop().unwrap();
+    if let Some(j) = cdc_worker.stop() {
+        j.join()
+            .unwrap_or_else(|e| fatal!("failed to stop cdc: {:?}", e))
+    }
 
     region_info_accessor.stop();
 
