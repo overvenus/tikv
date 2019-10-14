@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::fmt;
 
 use futures::sync::mpsc::UnboundedSender;
@@ -19,6 +18,7 @@ pub enum Task {
         region_id: u64,
     },
     RawEvent(RawEvent),
+    MinTS(u64),
 }
 
 impl fmt::Display for Task {
@@ -33,6 +33,7 @@ impl fmt::Debug for Task {
             Task::Register { ref request, .. } => de.field("request", request).finish(),
             Task::Deregister { ref region_id, .. } => de.field("region_id", region_id).finish(),
             Task::RawEvent(_) => de.field("raw_event", &"...").finish(),
+            Task::MinTS(min_ts) => de.field("min_ts", &min_ts).finish(),
         }
     }
 }
@@ -63,11 +64,7 @@ impl Endpoint {
     ) {
         let region_id = request.region_id;
         info!("cdc register region"; "region_id" => region_id);
-        let delegate = Delegate {
-            region_id,
-            pending: VecDeque::new(),
-            sink,
-        };
+        let delegate = Delegate::new(region_id, sink);
         if self.capture_regions.insert(region_id, delegate).is_some() {
             // TODO: should we close the sink?
             warn!("replace region change data sink"; "region_id"=> region_id);
@@ -116,6 +113,12 @@ impl Endpoint {
             }
         }
     }
+
+    fn on_min_ts(&mut self, min_ts: u64) {
+        for delegate in self.capture_regions.values_mut() {
+            delegate.on_min_ts(min_ts);
+        }
+    }
 }
 
 impl Runnable<Task> for Endpoint {
@@ -125,6 +128,7 @@ impl Runnable<Task> for Endpoint {
             Task::Register { request, sink } => self.on_register(request, sink),
             Task::Deregister { region_id } => self.on_deregister(region_id),
             Task::RawEvent(event) => self.on_raw_event(event),
+            Task::MinTS(min_ts) => self.on_min_ts(min_ts),
         }
     }
 }

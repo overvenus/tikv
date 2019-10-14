@@ -23,6 +23,7 @@ raft = "0.6.0-alpha"
 tokio-threadpool = "0.1.13"
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }
 tikv_util = { path = "../tikv_util" }
+resolved_ts = { path = "../resolved_ts" }
 
 [dependencies.prometheus]
 version = "0.4.2"

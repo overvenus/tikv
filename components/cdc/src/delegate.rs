@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use futures::sync::mpsc::*;
 use kvproto::cdcpb::*;
 use kvproto::raft_cmdpb::{AdminRequest, AdminResponse, CmdType, RaftResponseHeader, Request};
+use resolved_ts::Resolver;
 use tikv::storage::mvcc::{Lock, LockType, Write, WriteType};
 use tikv::storage::Key;
 use tikv_util::collections::HashMap;
@@ -12,10 +13,34 @@ pub struct Delegate {
     pub region_id: u64,
     pub pending: VecDeque<(u64, Either<Vec<Request>, AdminRequest>)>,
     pub sink: UnboundedSender<ChangeDataEvent>,
+    pub resolver: Resolver,
     // pub buffer: HashMap<Vec<u8>, >
 }
 
 impl Delegate {
+    pub fn new(region_id: u64, sink: UnboundedSender<ChangeDataEvent>) -> Delegate {
+        Delegate {
+            region_id,
+            pending: VecDeque::new(),
+            sink,
+            resolver: Resolver::new(),
+        }
+    }
+
+    pub fn on_min_ts(&mut self, min_ts: u64) {
+        let resolved_ts = self.resolver.resolve(min_ts);
+        let mut change_data_event = Event::new();
+        change_data_event.region_id = self.region_id;
+        change_data_event.event = Some(Event_oneof_event::ResolvedTs(resolved_ts));
+        let mut change_data = ChangeDataEvent::new();
+        change_data.mut_events().push(change_data_event);
+        if self.sink.unbounded_send(change_data).is_err() {
+            info!("send event failed";
+                "resolved_ts" =>
+                resolved_ts);
+        }
+    }
+
     pub fn on_data_requsts(&mut self, index: u64, reqs: Vec<Request>) {
         self.pending.push_back((index, Either::Left(reqs)))
     }
@@ -61,7 +86,7 @@ impl Delegate {
                 "index" => index);
         }
     }
-    pub fn sink_data(&self, index: u64, requests: Vec<Request>) {
+    pub fn sink_data(&mut self, index: u64, requests: Vec<Request>) {
         let mut kv: HashMap<Vec<u8>, EventRow> = HashMap::default();
         for mut req in requests {
             if req.cmd_type == CmdType::Put {
@@ -83,13 +108,18 @@ impl Delegate {
                         };
                         let key = Key::from_encoded(put.take_key());
                         let commit_ts = key.decode_ts().unwrap();
+                        let start_ts = write.start_ts;
 
                         let mut row = kv.entry(key.to_raw().unwrap()).or_default();
-                        row.start_ts = write.start_ts;
+                        row.start_ts = start_ts;
                         row.commit_ts = commit_ts;
                         row.key = key.to_raw().unwrap();
                         row.op_type = op_type;
                         row.r_type = r_type;
+
+                        // In order to advance resolved ts,
+                        // we must untrack inflight txns if they are committed.
+                        self.resolver.untrack_lock(start_ts, Some(commit_ts), key);
                     }
                     "lock" => {
                         let lock = Lock::parse(put.get_value()).unwrap();
@@ -113,6 +143,10 @@ impl Delegate {
                         if let Some(value) = lock.short_value {
                             row.value = value;
                         }
+
+                        // In order to compute resolved ts,
+                        // we must track inflight txns.
+                        self.resolver.track_lock(start_ts, key);
                     }
                     "" | "default" => {
                         let key = Key::from_encoded(put.take_key());
@@ -264,11 +298,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let region_id = 1;
         let (sink, events) = unbounded();
-        let mut delegate = Delegate {
-            region_id,
-            pending: VecDeque::new(),
-            sink,
-        };
+        let mut delegate = Delegate::new(region_id, sink);
 
         let mut region = Region::new();
         region.set_id(region_id);
