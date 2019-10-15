@@ -10,7 +10,7 @@ test_storage = { path = "../test_storage" }
 futures = "0.1"
 
 [dependencies.kvproto]
-git = "https://github.com/birdstorm/kvproto.git"
+git = "https://github.com/pingcap/kvproto.git"
 branch = "ov/engine"
 
 [dependencies.tipb]

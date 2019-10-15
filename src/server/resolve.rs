@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use kvproto::metapb;
 
-use pd::PdClient;
+use pd::{take_peer_address, PdClient};
 use util::collections::HashMap;
 use util::worker::{Runnable, Scheduler, Worker};
 
@@ -80,18 +80,14 @@ impl<T: PdClient> Runner<T> {
 
     fn get_address(&mut self, store_id: u64) -> Result<String> {
         let pd_client = Arc::clone(&self.pd_client);
-        let s = box_try!(pd_client.get_store(store_id));
+        let mut s = box_try!(pd_client.get_store(store_id));
         if s.get_state() == metapb::StoreState::Tombstone {
             RESOLVE_STORE_COUNTER
                 .with_label_values(&["tombstone"])
                 .inc();
             return Err(box_err!("store {} has been removed", store_id));
         }
-        let addr = if s.get_peer_address().is_empty() {
-            s.get_address().to_owned()
-        } else {
-            s.get_peer_address().to_owned()
-        };
+        let addr = take_peer_address(&mut s);
         // In some tests, we use empty address for store first,
         // so we should ignore here.
         // TODO: we may remove this check after we refactor the test.
@@ -188,11 +184,7 @@ mod tests {
         fn get_store(&self, _: u64) -> Result<metapb::Store> {
             // The store address will be changed every millisecond.
             let mut store = self.store.clone();
-            let mut sock = if store.get_peer_address().is_empty() {
-                SocketAddr::from_str(store.get_address()).unwrap()
-            } else {
-                SocketAddr::from_str(store.get_peer_address()).unwrap()
-            };
+            let mut sock = take_peer_address(&mut store);
             sock.set_port(util::time::duration_to_ms(self.start.elapsed()) as u16);
             store.set_address(format!("{}:{}", sock.ip(), sock.port()));
             Ok(store)

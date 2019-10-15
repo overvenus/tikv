@@ -18,7 +18,7 @@ git = "https://github.com/nolouch/raft-rs.git"
 branch = "fix-read-index"
 
 [dependencies.kvproto]
-git = "https://github.com/birdstorm/kvproto.git"
+git = "https://github.com/pingcap/kvproto.git"
 branch = "ov/engine"
 
 [dependencies.rocksdb]
