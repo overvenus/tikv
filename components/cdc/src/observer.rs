@@ -40,7 +40,7 @@ impl CdcObserver {
         self.observe_region.write().unwrap().remove(&region_id);
     }
 
-    pub fn maybe_registered(&self, region: &Region) -> bool {
+    fn maybe_registered(&self, region: &Region) -> bool {
         let region_id = region.get_id();
         if let Some(initial) = self.observe_region.read().unwrap().get(&region_id) {
             let initial = initial.swap(true, Ordering::Relaxed);
@@ -49,6 +49,7 @@ impl CdcObserver {
                 let region_snapshot =
                     RegionSnapshot::from_raw(self.engines.kv.clone(), region.clone());
                 let load_locks = Task::LoadLocks { region_snapshot };
+                info!("schedule load locks"; "region_id" => region_id);
                 self.sink.schedule(load_locks).unwrap();
             }
             true

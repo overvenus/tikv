@@ -161,7 +161,9 @@ impl Endpoint {
     }
 
     fn on_region_load_locks(&mut self, region_snapshot: RegionSnapshot) {
-        // spawn to thread pool.
+        info!("load locks for resolver";
+            "region_id" => region_snapshot.get_region().get_id());
+        // spawn the task to a thread pool.
         let sched = self.scheduler.clone();
         let region_id = region_snapshot.get_region().get_id();
         self.lock_workers.spawn(
@@ -171,6 +173,8 @@ impl Endpoint {
             })
             .then(move |res| match res {
                 Ok(resolver) => {
+                    info!("schedule resolver ready";
+                        "region_id" => region_id);
                     if let Err(e) = sched.schedule(Task::ResolverReady {
                         region_id,
                         resolver,
