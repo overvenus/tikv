@@ -31,7 +31,7 @@ pub use engine::SyncSnapshot as RocksSnapshot;
 const TEMP_DIR: &str = "";
 
 enum Task {
-    Write(Vec<Modify>, Callback<()>),
+    Write(Vec<Modify>, Callback<()>, bool),
     Snapshot(Callback<RocksSnapshot>),
     Pause(Duration),
 }
@@ -51,7 +51,10 @@ struct Runner(Engines);
 impl Runnable<Task> for Runner {
     fn run(&mut self, t: Task) {
         match t {
-            Task::Write(modifies, cb) => cb((CbContext::new(), write_modifies(&self.0, modifies))),
+            Task::Write(modifies, cb, use_data_key) => cb((
+                CbContext::new(),
+                write_modifies(&self.0, modifies, use_data_key),
+            )),
             Task::Snapshot(cb) => cb((
                 CbContext::new(),
                 Ok(RocksSnapshot::new(Arc::clone(&self.0.kv))),
@@ -86,6 +89,7 @@ pub struct RocksEngine {
     sched: Scheduler<Task>,
     engines: Engines,
     not_leader: Arc<AtomicBool>,
+    use_data_key: bool,
 }
 
 impl RocksEngine {
@@ -114,6 +118,7 @@ impl RocksEngine {
             core: Arc::new(Mutex::new(RocksEngineCore { temp_dir, worker })),
             not_leader: Arc::new(AtomicBool::new(false)),
             engines,
+            use_data_key: false,
         })
     }
 
@@ -134,6 +139,10 @@ impl RocksEngine {
         if let Some(h) = core.worker.stop() {
             h.join().unwrap();
         }
+    }
+
+    pub fn use_data_key(&mut self, use_data_key: bool) {
+        self.use_data_key = use_data_key;
     }
 }
 
@@ -209,11 +218,14 @@ impl TestEngineBuilder {
     }
 }
 
-fn write_modifies(engine: &Engines, modifies: Vec<Modify>) -> Result<()> {
+fn write_modifies(engine: &Engines, modifies: Vec<Modify>, use_data_key: bool) -> Result<()> {
     let wb = WriteBatch::default();
     for rev in modifies {
         let res = match rev {
-            Modify::Delete(cf, k) => {
+            Modify::Delete(cf, mut k) => {
+                if use_data_key {
+                    k = Key::from_encoded(keys::data_key(&k.as_encoded()));
+                }
                 if cf == CF_DEFAULT {
                     trace!("RocksEngine: delete"; "key" => %k);
                     wb.delete(k.as_encoded())
@@ -223,7 +235,10 @@ fn write_modifies(engine: &Engines, modifies: Vec<Modify>) -> Result<()> {
                     wb.delete_cf(handle, k.as_encoded())
                 }
             }
-            Modify::Put(cf, k, v) => {
+            Modify::Put(cf, mut k, v) => {
+                if use_data_key {
+                    k = Key::from_encoded(keys::data_key(&k.as_encoded()));
+                }
                 if cf == CF_DEFAULT {
                     trace!("RocksEngine: put"; "key" => %k, "value" => escape(&v));
                     wb.put(k.as_encoded(), &v)
@@ -233,7 +248,11 @@ fn write_modifies(engine: &Engines, modifies: Vec<Modify>) -> Result<()> {
                     wb.put_cf(handle, k.as_encoded(), &v)
                 }
             }
-            Modify::DeleteRange(cf, start_key, end_key, notify_only) => {
+            Modify::DeleteRange(cf, mut start_key, mut end_key, notify_only) => {
+                if use_data_key {
+                    start_key = Key::from_encoded(keys::data_key(&start_key.as_encoded()));
+                    end_key = Key::from_encoded(keys::data_key(&end_key.as_encoded()));
+                }
                 trace!(
                     "RocksEngine: delete_range_cf";
                     "cf" => cf,
@@ -265,7 +284,9 @@ impl Engine for RocksEngine {
         if modifies.is_empty() {
             return Err(Error::EmptyRequest);
         }
-        box_try!(self.sched.schedule(Task::Write(modifies, cb)));
+        box_try!(self
+            .sched
+            .schedule(Task::Write(modifies, cb, self.use_data_key)));
         Ok(())
     }
 

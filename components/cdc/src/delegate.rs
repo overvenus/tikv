@@ -13,8 +13,18 @@ pub struct Delegate {
     pub region_id: u64,
     pub pending: VecDeque<(u64, Either<Vec<Request>, AdminRequest>)>,
     pub sink: UnboundedSender<ChangeDataEvent>,
-    pub resolver: Resolver,
-    // pub buffer: HashMap<Vec<u8>, >
+    pub resolver: Option<Resolver>,
+    initial_buffer: Option<
+        Vec<
+            Either<
+                (u64, Either<Vec<Request>, AdminRequest>),
+                (
+                    u64,
+                    Either<RaftResponseHeader, (RaftResponseHeader, AdminResponse)>,
+                ),
+            >,
+        >,
+    >,
 }
 
 impl Delegate {
@@ -23,12 +33,51 @@ impl Delegate {
             region_id,
             pending: VecDeque::new(),
             sink,
-            resolver: Resolver::new(),
+            resolver: None,
+            initial_buffer: Some(Vec::new()),
+        }
+    }
+
+    pub fn on_region_ready(&mut self, resolver: Resolver) {
+        assert!(
+            self.resolver.is_none(),
+            "region resolver should not be ready"
+        );
+        self.resolver = Some(resolver);
+        for buffer in self.initial_buffer.take() {
+            for e in buffer {
+                match e {
+                    Either::Left((index, Either::Left(reqs))) => {
+                        self.on_data_requsts(index, reqs);
+                    }
+                    Either::Left((index, Either::Right(req))) => {
+                        self.on_admin_requst(index, req);
+                    }
+                    Either::Right((index, Either::Left(header))) => {
+                        self.on_data_responses(index, header);
+                    }
+                    Either::Right((index, Either::Right((header, resp)))) => {
+                        self.on_admin_response(index, header, resp);
+                    }
+                }
+            }
         }
     }
 
     pub fn on_min_ts(&mut self, min_ts: u64) {
-        let resolved_ts = self.resolver.resolve(min_ts);
+        if self.resolver.is_none() {
+            info!("region resolver not ready";
+                "region_id" => self.region_id, "min_ts" => min_ts);
+            return;
+        }
+        info!("try to advance ts"; "region_id" => self.region_id);
+        let resolver = self.resolver.as_mut().unwrap();
+        let resolved_ts = match resolver.resolve(min_ts) {
+            Some(rts) => rts,
+            None => return,
+        };
+        info!("resolved ts updated";
+            "region_id" => self.region_id, "resolved_ts" => resolved_ts);
         let mut change_data_event = Event::new();
         change_data_event.region_id = self.region_id;
         change_data_event.event = Some(Event_oneof_event::ResolvedTs(resolved_ts));
@@ -42,9 +91,17 @@ impl Delegate {
     }
 
     pub fn on_data_requsts(&mut self, index: u64, reqs: Vec<Request>) {
+        if let Some(buf) = self.initial_buffer.as_mut() {
+            buf.push(Either::Left((index, Either::Left(reqs))));
+            return;
+        }
         self.pending.push_back((index, Either::Left(reqs)))
     }
     pub fn on_data_responses(&mut self, index: u64, header: RaftResponseHeader) {
+        if let Some(buf) = self.initial_buffer.as_mut() {
+            buf.push(Either::Right((index, Either::Left(header))));
+            return;
+        }
         while let Some((idx, req)) = self.pending.pop_front() {
             if idx < index {
                 warn!("requests gap";
@@ -70,14 +127,22 @@ impl Delegate {
     }
 
     pub fn on_admin_requst(&mut self, index: u64, req: AdminRequest) {
+        if let Some(buf) = self.initial_buffer.as_mut() {
+            buf.push(Either::Left((index, Either::Right(req))));
+            return;
+        }
         self.pending.push_back((index, Either::Right(req)))
     }
     pub fn on_admin_response(
         &mut self,
-        _index: u64,
-        _header: RaftResponseHeader,
-        _resp: AdminResponse,
+        index: u64,
+        header: RaftResponseHeader,
+        resp: AdminResponse,
     ) {
+        if let Some(buf) = self.initial_buffer.as_mut() {
+            buf.push(Either::Right((index, Either::Right((header, resp)))));
+            return;
+        }
     }
 
     pub fn sink_noop(&self, index: u64) {
@@ -119,7 +184,9 @@ impl Delegate {
 
                         // In order to advance resolved ts,
                         // we must untrack inflight txns if they are committed.
-                        self.resolver.untrack_lock(start_ts, Some(commit_ts), key);
+                        assert!(self.resolver.is_some(), "region resolver should be ready");
+                        let resolver = self.resolver.as_mut().unwrap();
+                        resolver.untrack_lock(start_ts, Some(commit_ts), key);
                     }
                     "lock" => {
                         let lock = Lock::parse(put.get_value()).unwrap();
@@ -146,7 +213,9 @@ impl Delegate {
 
                         // In order to compute resolved ts,
                         // we must track inflight txns.
-                        self.resolver.track_lock(start_ts, key);
+                        assert!(self.resolver.is_some(), "region resolver should be ready");
+                        let resolver = self.resolver.as_mut().unwrap();
+                        resolver.track_lock(start_ts, key);
                     }
                     "" | "default" => {
                         let key = Key::from_encoded(put.take_key());
@@ -299,6 +368,9 @@ mod tests {
         let region_id = 1;
         let (sink, events) = unbounded();
         let mut delegate = Delegate::new(region_id, sink);
+        let mut resolver = Resolver::new();
+        resolver.init();
+        delegate.on_region_ready(resolver);
 
         let mut region = Region::new();
         region.set_id(region_id);
@@ -312,18 +384,6 @@ mod tests {
             engine,
             sender,
         });
-
-        let mut ts = 0;
-        let mut alloc_ts = || {
-            ts += 1;
-            ts
-        };
-        let (key, value) = (b"keya", b"valuea");
-        let start_ts = alloc_ts();
-        let commit_ts = alloc_ts();
-
-        // Test prewrite.
-        must_prewrite_put(&engine, key, value, key, start_ts);
 
         let events_wrap = Cell::new(Some(events));
         let mut check_event = |event_row: EventRow| {
@@ -352,6 +412,18 @@ mod tests {
                 _ => panic!("unknown event"),
             }
         };
+
+        let mut ts = 0;
+        let mut alloc_ts = || {
+            ts += 1;
+            ts
+        };
+        let (key, value) = (b"keya", b"valuea");
+        let start_ts = alloc_ts();
+        let commit_ts = alloc_ts();
+
+        // Test prewrite.
+        must_prewrite_put(&engine, key, value, key, start_ts);
         let mut row = EventRow::new();
         row.start_ts = start_ts;
         row.commit_ts = 0;

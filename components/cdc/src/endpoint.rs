@@ -1,11 +1,20 @@
 use std::fmt;
+use std::sync::Arc;
+use std::time::Duration;
 
+use futures::future::{lazy, Future};
 use futures::sync::mpsc::UnboundedSender;
 use kvproto::cdcpb::*;
+use pd_client::PdClient;
+use resolved_ts::Resolver;
+use tikv::raftstore::store::RegionSnapshot;
 use tikv_util::collections::HashMap;
-use tikv_util::worker::Runnable;
+use tikv_util::timer::SteadyTimer;
+use tikv_util::worker::{Runnable, Scheduler};
+use tokio_threadpool::{Builder, ThreadPool};
 
 use crate::delegate::Delegate;
+use crate::lock_scanner::LockScanner;
 use crate::CdcObserver;
 use crate::RawEvent;
 
@@ -16,9 +25,19 @@ pub enum Task {
     },
     Deregister {
         region_id: u64,
+        // error: Option<Error>,
     },
     RawEvent(RawEvent),
-    MinTS(u64),
+    MinTS {
+        min_ts: u64,
+    },
+    ResolverReady {
+        region_id: u64,
+        resolver: Resolver,
+    },
+    LoadLocks {
+        region_snapshot: RegionSnapshot,
+    },
 }
 
 impl fmt::Display for Task {
@@ -31,9 +50,20 @@ impl fmt::Debug for Task {
         let mut de = f.debug_struct("CdcTask");
         match self {
             Task::Register { ref request, .. } => de.field("request", request).finish(),
-            Task::Deregister { ref region_id, .. } => de.field("region_id", region_id).finish(),
+            Task::Deregister { ref region_id, .. } => {
+                de.field("deregister region_id", region_id).finish()
+            }
             Task::RawEvent(_) => de.field("raw_event", &"...").finish(),
-            Task::MinTS(min_ts) => de.field("min_ts", &min_ts).finish(),
+            Task::MinTS { ref min_ts } => de.field("min_ts", min_ts).finish(),
+            Task::ResolverReady { ref region_id, .. } => de.field("region_id", region_id).finish(),
+            Task::LoadLocks {
+                ref region_snapshot,
+            } => de
+                .field(
+                    "loadlocks region_id",
+                    &region_snapshot.get_region().get_id(),
+                )
+                .finish(),
         }
     }
 }
@@ -41,14 +71,30 @@ impl fmt::Debug for Task {
 pub struct Endpoint {
     capture_regions: HashMap<u64, Delegate>,
     observer: CdcObserver,
+    scheduler: Scheduler<Task>,
+    pd_client: Arc<dyn PdClient>,
+    timer: SteadyTimer,
+
+    lock_workers: ThreadPool,
 }
 
 impl Endpoint {
-    pub fn new(observer: CdcObserver) -> Endpoint {
-        Endpoint {
+    pub fn new(
+        observer: CdcObserver,
+        pd_client: Arc<dyn PdClient>,
+        scheduler: Scheduler<Task>,
+    ) -> Endpoint {
+        let lock_workers = Builder::new().name_prefix("cdcwkr").pool_size(4).build();
+        let ep = Endpoint {
             capture_regions: HashMap::default(),
             observer,
-        }
+            scheduler,
+            pd_client,
+            timer: SteadyTimer::default(),
+            lock_workers,
+        };
+        ep.register_min_ts_event(Duration::from_secs(10));
+        ep
     }
 
     fn on_deregister(&mut self, region_id: u64) {
@@ -114,10 +160,68 @@ impl Endpoint {
         }
     }
 
+    fn on_region_load_locks(&mut self, region_snapshot: RegionSnapshot) {
+        // spawn to thread pool.
+        let sched = self.scheduler.clone();
+        let region_id = region_snapshot.get_region().get_id();
+        self.lock_workers.spawn(
+            lazy(move || {
+                let mut lock_scanner = LockScanner::new(region_snapshot)?;
+                lock_scanner.build_resolver()
+            })
+            .then(move |res| match res {
+                Ok(resolver) => {
+                    if let Err(e) = sched.schedule(Task::ResolverReady {
+                        region_id,
+                        resolver,
+                    }) {
+                        error!("schedule task failed"; "error" => ?e);
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    error!("builder resolver failed"; "error" => ?e);
+                    // TODO: record in metrics.
+                    // TODO: attach error the the task.
+                    if let Err(e) = sched.schedule(Task::Deregister { region_id }) {
+                        error!("schedule task failed"; "error" => ?e);
+                    }
+                    Ok(())
+                }
+            }),
+        );
+    }
+
+    fn on_region_ready(&mut self, region_id: u64, resolver: Resolver) {
+        let delegate = self.capture_regions.get_mut(&region_id).unwrap();
+        delegate.on_region_ready(resolver);
+    }
+
     fn on_min_ts(&mut self, min_ts: u64) {
         for delegate in self.capture_regions.values_mut() {
             delegate.on_min_ts(min_ts);
         }
+        self.register_min_ts_event(Duration::from_secs(10));
+    }
+
+    fn register_min_ts_event(&self, dur: Duration) {
+        let timeout = self.timer.delay(dur);
+        let tso = self.pd_client.get_tso();
+        let scheduler = self.scheduler.clone();
+        let fut = tso
+            .join(timeout.map_err(|_| unreachable!()))
+            .map(move |(min_ts, ())| {
+                if let Err(e) = scheduler.schedule(Task::MinTS { min_ts }) {
+                    error!("failed to schedule min_ts event";
+                        "error" => ?e,
+                        "min_ts" => min_ts);
+                }
+            })
+            .map_err(|e| {
+                error!("get tso failed"; "error" => ?e);
+                e
+            });
+        self.pd_client.spawn(Box::new(fut) as _);
     }
 }
 
@@ -125,10 +229,15 @@ impl Runnable<Task> for Endpoint {
     fn run(&mut self, task: Task) {
         debug!("run cdc task"; "task" => %task);
         match task {
-            Task::Register { request, sink } => self.on_register(request, sink),
-            Task::Deregister { region_id } => self.on_deregister(region_id),
             Task::RawEvent(event) => self.on_raw_event(event),
-            Task::MinTS(min_ts) => self.on_min_ts(min_ts),
+            Task::MinTS { min_ts } => self.on_min_ts(min_ts),
+            Task::Register { request, sink } => self.on_register(request, sink),
+            Task::LoadLocks { region_snapshot } => self.on_region_load_locks(region_snapshot),
+            Task::ResolverReady {
+                region_id,
+                resolver,
+            } => self.on_region_ready(region_id, resolver),
+            Task::Deregister { region_id } => self.on_deregister(region_id),
         }
     }
 }

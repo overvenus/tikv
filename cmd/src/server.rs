@@ -290,7 +290,7 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     {
         fatal!("failed to register cdc service");
     }
-    let cdc_ob = cdc::CdcObserver::new(cdc_scheduler);
+    let cdc_ob = cdc::CdcObserver::new(cdc_scheduler, engines.clone());
     coprocessor_host
         .registry
         .register_admin_observer(100, Box::new(cdc_ob.clone()) as _);
@@ -342,7 +342,7 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     }
 
     // Start CDC.
-    let cdc_endpoint = cdc::Endpoint::new(cdc_ob);
+    let cdc_endpoint = cdc::Endpoint::new(cdc_ob, pd_client.clone(), cdc_worker.scheduler());
     cdc_worker
         .start(cdc_endpoint)
         .unwrap_or_else(|e| fatal!("failed to start cdc: {}", e));

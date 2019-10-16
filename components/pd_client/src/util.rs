@@ -82,7 +82,7 @@ impl Stream for HeartbeatReceiver {
 /// A leader client doing requests asynchronous.
 pub struct LeaderClient {
     timer: Handle,
-    inner: Arc<RwLock<Inner>>,
+    pub inner: Arc<RwLock<Inner>>,
 }
 
 impl LeaderClient {
@@ -476,4 +476,10 @@ pub fn check_resp_header(header: &ResponseHeader) -> Result<()> {
         ErrorType::Unknown => Err(box_err!(err.get_message())),
         ErrorType::Ok => Ok(()),
     }
+}
+
+/// Creates a ts from physical and logical parts.
+pub fn compose_ts(physical: u64, logical: u64) -> u64 {
+    let physical_shift_bits = 18;
+    return (physical << physical_shift_bits) + logical;
 }

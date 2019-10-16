@@ -1,14 +1,19 @@
 #[macro_use]
 extern crate slog_global;
+#[macro_use]
+extern crate failure;
 
-use kvproto::raft_cmdpb::{AdminRequest, AdminResponse, RaftResponseHeader, Request, Response};
+use kvproto::raft_cmdpb::{AdminRequest, AdminResponse, RaftResponseHeader, Request};
 
 mod delegate;
 mod endpoint;
+mod errors;
+mod lock_scanner;
 mod observer;
 mod service;
 
 pub use endpoint::Endpoint;
+pub use errors::{Error, Result};
 pub use observer::CdcObserver;
 pub use service::Service;
 

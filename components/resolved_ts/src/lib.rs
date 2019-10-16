@@ -27,6 +27,10 @@ impl Resolver {
         self.resolved_ts
     }
 
+    pub fn locks(&self) -> &BTreeMap<u64, HashSet<Key>> {
+        &self.locks
+    }
+
     pub fn track_lock(&mut self, start_ts: u64, key: Key) {
         self.locks.entry(start_ts).or_default().insert(key);
     }

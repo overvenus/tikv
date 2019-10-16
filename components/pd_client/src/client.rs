@@ -6,13 +6,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use futures::sync::mpsc;
+use futures::sync::oneshot;
 use futures::{future, Future, Sink, Stream};
 use grpcio::{CallOption, EnvBuilder, WriteFlags};
 use kvproto::metapb;
 use kvproto::pdpb::{self, Member};
 
 use super::metrics::*;
-use super::util::{check_resp_header, sync_request, validate_endpoints, Inner, LeaderClient};
+use super::util::{
+    check_resp_header, compose_ts, sync_request, validate_endpoints, Inner, LeaderClient,
+};
 use super::{Config, PdFuture};
 use super::{Error, PdClient, RegionInfo, RegionStat, Result, REQUEST_TIMEOUT};
 use tikv_util::security::SecurityManager;
@@ -562,5 +565,58 @@ impl PdClient for RpcClient {
         check_resp_header(resp.get_header())?;
 
         Ok(resp)
+    }
+
+    fn get_tso(&self) -> PdFuture<u64> {
+        let timer = Instant::now();
+
+        let mut req = pdpb::TsoRequest::default();
+        req.set_count(1);
+        req.set_header(self.header());
+        let executor = move |client: &RwLock<Inner>, req: pdpb::TsoRequest| {
+            let cli = client.read().unwrap();
+            let (req_sink, resp_stream) = cli.client.tso().unwrap();
+            let (keep_req_tx, mut keep_req_rx) = oneshot::channel();
+            let send_once = req_sink
+                .send((req.clone(), WriteFlags::default()))
+                .then(|s| {
+                    let _ = keep_req_tx.send(s);
+                    Ok(())
+                });
+            cli.client.spawn(send_once);
+            Box::new(
+                resp_stream
+                    .into_future()
+                    .map_err(|(err, _)| Error::Grpc(err))
+                    .and_then(move |(resp, _)| {
+                        // Now we can safely drop sink without
+                        // casusing a Cancel error.
+                        let _ = keep_req_rx.try_recv().unwrap();
+                        let resp = match resp {
+                            Some(r) => r,
+                            None => return Ok(0),
+                        };
+                        PD_REQUEST_HISTOGRAM_VEC
+                            .with_label_values(&["tso"])
+                            .observe(duration_to_sec(timer.elapsed()));
+                        check_resp_header(resp.get_header())?;
+                        let ts = resp.get_timestamp();
+                        let encoded = compose_ts(ts.physical as _, ts.logical as _);
+                        Ok(encoded)
+                    }),
+            ) as PdFuture<_>
+        };
+
+        self.leader_client
+            .request(req, executor, LEADER_CHANGE_RETRY)
+            .execute()
+    }
+
+    fn spawn(&self, future: PdFuture<()>) {
+        self.leader_client
+            .inner
+            .rl()
+            .client
+            .spawn(future.map_err(|_| ()));
     }
 }

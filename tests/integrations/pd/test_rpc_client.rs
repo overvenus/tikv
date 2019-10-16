@@ -101,6 +101,9 @@ fn test_rpc_client() {
     let tmp_region = client.get_region_by_id(region_id).wait().unwrap().unwrap();
     assert_eq!(tmp_region.get_id(), region.get_id());
 
+    let ts = client.get_tso().wait().unwrap();
+    assert_ne!(ts, 0);
+
     let mut prev_id = 0;
     for _ in 0..100 {
         let client = new_client(eps.clone(), None);
