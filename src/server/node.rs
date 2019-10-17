@@ -10,7 +10,7 @@ use super::Result;
 use crate::import::SSTImporter;
 use crate::raftstore::coprocessor::dispatcher::CoprocessorHost;
 use crate::raftstore::store::fsm::store::StoreMeta;
-use crate::raftstore::store::fsm::{RaftBatchSystem, RaftRouter};
+use crate::raftstore::store::fsm::{ApplyRouter, RaftBatchSystem, RaftRouter};
 use crate::raftstore::store::PdTask;
 use crate::raftstore::store::{
     self, initial_region, keys, Config as StoreConfig, SnapManager, Transport,
@@ -171,6 +171,10 @@ where
     /// raftstore.
     pub fn get_router(&self) -> RaftRouter {
         self.system.router()
+    }
+
+    pub fn get_apply_router(&self) -> ApplyRouter {
+        self.system.apply_router()
     }
 
     // check store, return store id for the engine.

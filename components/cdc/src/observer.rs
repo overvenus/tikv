@@ -104,7 +104,12 @@ impl QueryObserver for CdcObserver {
         if !self.maybe_registered(ctx.region()) {
             return;
         }
-
+        if index == 0 {
+            // TODO(cdc): hack, index == 0 means this is triggered by
+            // register_cmd_observer. What it needs is a call to maybe_registered
+            // which in turn sends load lock and init resolver.
+            return;
+        }
         let event = RawEvent::DataRequest {
             region_id: ctx.region().get_id(),
             index,

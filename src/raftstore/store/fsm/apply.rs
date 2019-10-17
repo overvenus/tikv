@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fmt::{self, Debug, Formatter};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::SyncSender;
@@ -636,6 +636,8 @@ pub struct ApplyDelegate {
     /// The latest synced apply index.
     last_sync_apply_index: u64,
 
+    cmd_observer_enabled: Option<Arc<AtomicBool>>,
+
     /// The local metrics, and it will be flushed periodically.
     metrics: ApplyMetrics,
 }
@@ -659,6 +661,7 @@ impl ApplyDelegate {
             pending_cmds: Default::default(),
             metrics: Default::default(),
             last_merge_version: 0,
+            cmd_observer_enabled: None,
             pending_request_snapshot_count: reg.pending_request_snapshot_count,
         }
     }
@@ -2271,6 +2274,10 @@ pub enum Msg {
     LogsUpToDate(u64),
     Destroy(Destroy),
     Snapshot(GenSnapTask),
+    RegisterCmdObserver {
+        region_id: u64,
+        enabled: Arc<AtomicBool>,
+    },
     #[cfg(test)]
     Validate(u64, Box<dyn FnOnce(&ApplyDelegate) + Send>),
 }
@@ -2305,6 +2312,9 @@ impl Debug for Msg {
             Msg::Destroy(ref d) => write!(f, "[region {}] destroy", d.region_id),
             Msg::Snapshot(GenSnapTask { region_id, .. }) => {
                 write!(f, "[region {}] requests a snapshot", region_id)
+            }
+            Msg::RegisterCmdObserver { region_id, .. } => {
+                write!(f, "[region {}] registers cmd observer", region_id)
             }
             #[cfg(test)]
             Msg::Validate(region_id, _) => write!(f, "[region {}] validate", region_id),
@@ -2639,6 +2649,26 @@ impl ApplyFsm {
         );
     }
 
+    fn handle_register_cmd_observer(
+        &mut self,
+        apply_ctx: &mut ApplyContext,
+        enabled: Arc<AtomicBool>,
+    ) {
+        assert!(!self
+            .delegate
+            .cmd_observer_enabled
+            .as_ref()
+            .map_or(false, |e| e.load(Ordering::Relaxed)));
+        self.delegate.cmd_observer_enabled = Some(enabled);
+        // TODO(cdc): in order to init cdc resolver, we need to call observer.
+        apply_ctx.host.pre_apply(
+            &self.delegate.region,
+            0, /* index */
+            &RaftCmdRequest::default(),
+        );
+        // TODO(cdc): take cmd_observer_enabled when enabled is false.
+    }
+
     fn handle_tasks(&mut self, apply_ctx: &mut ApplyContext, msgs: &mut Vec<Msg>) {
         let mut channel_timer = None;
         let mut drainer = msgs.drain(..);
@@ -2660,6 +2690,10 @@ impl ApplyFsm {
                 Some(Msg::CatchUpLogs(cul)) => self.catch_up_logs_for_merge(apply_ctx, cul),
                 Some(Msg::LogsUpToDate(_)) => {}
                 Some(Msg::Snapshot(snap_task)) => self.handle_snapshot(apply_ctx, snap_task),
+                Some(Msg::RegisterCmdObserver { region_id, enabled }) => {
+                    assert_eq!(self.delegate.region_id(), region_id);
+                    self.handle_register_cmd_observer(apply_ctx, enabled)
+                }
                 #[cfg(test)]
                 Some(Msg::Validate(_, f)) => f(&self.delegate),
                 None => break,
@@ -2868,6 +2902,12 @@ impl ApplyRouter {
                         "region_id" => region_id,
                         "merge" => ?cul.merge,
                     );
+                    return;
+                }
+                Msg::RegisterCmdObserver { region_id, .. } => {
+                    info!("target region is not found";
+                            "region_id" => region_id);
+                    // TODO(cdc) return region not found error.
                     return;
                 }
                 #[cfg(test)]

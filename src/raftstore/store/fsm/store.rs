@@ -943,6 +943,10 @@ impl RaftBatchSystem {
         self.router.clone()
     }
 
+    pub fn apply_router(&self) -> ApplyRouter {
+        self.apply_router.clone()
+    }
+
     pub fn spawn<T: Transport + 'static, C: PdClient + 'static>(
         &mut self,
         meta: metapb::Store,
