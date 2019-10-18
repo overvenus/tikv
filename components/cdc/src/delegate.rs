@@ -9,10 +9,22 @@ use tikv::storage::Key;
 use tikv_util::collections::HashMap;
 use tikv_util::Either;
 
+pub struct Downstream {
+    // The IP address of downstream.
+    peer: String,
+    sink: UnboundedSender<ChangeDataEvent>,
+}
+
+impl Downstream {
+    pub fn new(peer: String, sink: UnboundedSender<ChangeDataEvent>) -> Downstream {
+        Downstream { peer, sink }
+    }
+}
+
 pub struct Delegate {
     pub region_id: u64,
     pub pending: VecDeque<(u64, Either<Vec<Request>, AdminRequest>)>,
-    pub sink: UnboundedSender<ChangeDataEvent>,
+    pub downstreams: Vec<Downstream>,
     pub resolver: Option<Resolver>,
     initial_buffer: Option<
         Vec<
@@ -28,13 +40,31 @@ pub struct Delegate {
 }
 
 impl Delegate {
-    pub fn new(region_id: u64, sink: UnboundedSender<ChangeDataEvent>) -> Delegate {
+    pub fn new(region_id: u64) -> Delegate {
         Delegate {
             region_id,
             pending: VecDeque::new(),
-            sink,
+            downstreams: Vec::new(),
             resolver: None,
             initial_buffer: Some(Vec::new()),
+        }
+    }
+
+    pub fn subscribe(&mut self, downstream: Downstream) {
+        self.downstreams.push(downstream);
+    }
+
+    pub fn unsubscribe(&mut self, peer: String) {
+        self.downstreams.retain(|d| d.peer != peer)
+    }
+
+    fn broadcast(&self, change_data: ChangeDataEvent) {
+        for d in &self.downstreams {
+            if d.sink.unbounded_send(change_data.clone()).is_err() {
+                info!("send event failed";
+                        "downstream" => %d.peer,
+                        "change_data" => ?change_data);
+            }
         }
     }
 
@@ -83,11 +113,7 @@ impl Delegate {
         change_data_event.event = Some(Event_oneof_event::ResolvedTs(resolved_ts));
         let mut change_data = ChangeDataEvent::new();
         change_data.mut_events().push(change_data_event);
-        if self.sink.unbounded_send(change_data).is_err() {
-            info!("send event failed";
-                "resolved_ts" =>
-                resolved_ts);
-        }
+        self.broadcast(change_data);
     }
 
     pub fn on_data_requsts(&mut self, index: u64, reqs: Vec<Request>) {
@@ -146,10 +172,7 @@ impl Delegate {
     }
 
     pub fn sink_noop(&self, index: u64) {
-        if self.sink.unbounded_send(ChangeDataEvent::new()).is_err() {
-            info!("send event failed";
-                "index" => index);
-        }
+        self.broadcast(ChangeDataEvent::default());
     }
     pub fn sink_data(&mut self, index: u64, requests: Vec<Request>) {
         let mut kv: HashMap<Vec<u8>, EventRow> = HashMap::default();
@@ -244,26 +267,16 @@ impl Delegate {
         }
         let mut event_entries = EventEntries::new();
         event_entries.entries = entires.into();
-        self.warp_sink(index, Event_oneof_event::Entries(event_entries));
-    }
-    pub fn sink_admin(&self, index: u64, request: AdminRequest, response: AdminResponse) {
-        if self.sink.unbounded_send(ChangeDataEvent::new()).is_err() {
-            info!("send event failed";
-                "index" => index);
-        }
-    }
-
-    fn warp_sink(&self, index: u64, event: Event_oneof_event) {
         let mut change_data_event = Event::new();
         change_data_event.region_id = self.region_id;
         change_data_event.index = index;
-        change_data_event.event = Some(event);
+        change_data_event.event = Some(Event_oneof_event::Entries(event_entries));
         let mut change_data = ChangeDataEvent::new();
         change_data.mut_events().push(change_data_event);
-        if self.sink.unbounded_send(change_data).is_err() {
-            info!("send event failed";
-                "index" => index);
-        }
+        self.broadcast(change_data);
+    }
+    pub fn sink_admin(&self, index: u64, request: AdminRequest, response: AdminResponse) {
+        self.broadcast(ChangeDataEvent::default());
     }
 }
 
@@ -367,7 +380,8 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let region_id = 1;
         let (sink, events) = unbounded();
-        let mut delegate = Delegate::new(region_id, sink);
+        let mut delegate = Delegate::new(region_id);
+        delegate.subscribe(Downstream::new(String::new(), sink));
         let mut resolver = Resolver::new();
         resolver.init();
         delegate.on_region_ready(resolver);

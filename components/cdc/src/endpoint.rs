@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::{lazy, Future};
-use futures::sync::mpsc::UnboundedSender;
 use kvproto::cdcpb::*;
 use pd_client::PdClient;
 use resolved_ts::Resolver;
@@ -15,19 +14,20 @@ use tikv_util::timer::SteadyTimer;
 use tikv_util::worker::{Runnable, Scheduler};
 use tokio_threadpool::{Builder, ThreadPool};
 
-use crate::delegate::Delegate;
+use crate::delegate::{Delegate, Downstream};
 use crate::lock_scanner::LockScanner;
 use crate::CdcObserver;
 use crate::RawEvent;
+use crate::Result;
 
 pub enum Task {
     Register {
         request: ChangeDataRequest,
-        sink: UnboundedSender<ChangeDataEvent>,
+        downstream: Downstream,
     },
     Deregister {
         region_id: u64,
-        // error: Option<Error>,
+        peer: Result<String>,
     },
     RawEvent(RawEvent),
     MinTS {
@@ -52,9 +52,14 @@ impl fmt::Debug for Task {
         let mut de = f.debug_struct("CdcTask");
         match self {
             Task::Register { ref request, .. } => de.field("request", request).finish(),
-            Task::Deregister { ref region_id, .. } => {
-                de.field("deregister region_id", region_id).finish()
-            }
+            Task::Deregister {
+                ref region_id,
+                ref peer,
+                ..
+            } => de
+                .field("deregister region_id", region_id)
+                .field("peer", peer)
+                .finish(),
             Task::RawEvent(_) => de.field("raw_event", &"...").finish(),
             Task::MinTS { ref min_ts } => de.field("min_ts", min_ts).finish(),
             Task::ResolverReady { ref region_id, .. } => de.field("region_id", region_id).finish(),
@@ -103,36 +108,53 @@ impl Endpoint {
         ep
     }
 
-    fn on_deregister(&mut self, region_id: u64) {
-        info!("cdc deregister region"; "region_id" => region_id);
-        self.observer.deregister_region(region_id);
-        if let Some((_, enabled)) = self.capture_regions.remove(&region_id) {
-            enabled.store(false, Ordering::Relaxed);
+    fn on_deregister(&mut self, region_id: u64, peer: Result<String>) {
+        match peer {
+            Ok(p) => {
+                info!("cdc deregister region";
+                    "region_id" => region_id,
+                    "peer" => %p);
+                // The peer wants to deregister
+                self.capture_regions
+                    .get_mut(&region_id)
+                    .unwrap()
+                    .0
+                    .unsubscribe(p);
+            }
+            Err(e) => {
+                // Something went wrong, deregister all downstreams.
+                info!("cdc deregister region";
+                    "region_id" => region_id,
+                    "error" => %e);
+                self.observer.deregister_region(region_id);
+                if let Some((_, enabled)) = self.capture_regions.remove(&region_id) {
+                    enabled.store(false, Ordering::Relaxed);
+                }
+            }
         }
     }
 
-    pub fn on_register(
-        &mut self,
-        request: ChangeDataRequest,
-        sink: UnboundedSender<ChangeDataEvent>,
-    ) {
+    pub fn on_register(&mut self, request: ChangeDataRequest, downstream: Downstream) {
         let region_id = request.region_id;
         info!("cdc register region"; "region_id" => region_id);
-        let enabled = Arc::new(AtomicBool::new(true));
-        let delegate = Delegate::new(region_id, sink);
-        if self
-            .capture_regions
-            .insert(region_id, (delegate, enabled.clone()))
-            .is_some()
-        {
-            // TODO: should we close the sink?
-            warn!("replace region change data sink"; "region_id"=> region_id);
+        let mut enabled = None;
+        let delegate = self.capture_regions.entry(region_id).or_insert_with(|| {
+            let e = Arc::new(AtomicBool::new(true));
+            enabled = Some(e.clone());
+            (Delegate::new(region_id), e)
+        });
+
+        delegate.0.subscribe(downstream);
+        if let Some(e) = enabled {
+            self.observer.register_region(region_id);
+            self.apply_router.schedule_task(
+                region_id,
+                ApplyTask::RegisterCmdObserver {
+                    region_id,
+                    enabled: e,
+                },
+            );
         }
-        self.observer.register_region(region_id);
-        self.apply_router.schedule_task(
-            region_id,
-            ApplyTask::RegisterCmdObserver { region_id, enabled },
-        )
     }
 
     pub fn on_raw_event(&mut self, event: RawEvent) {
@@ -204,7 +226,10 @@ impl Endpoint {
                     error!("builder resolver failed"; "error" => ?e);
                     // TODO: record in metrics.
                     // TODO: attach error the the task.
-                    if let Err(e) = sched.schedule(Task::Deregister { region_id }) {
+                    if let Err(e) = sched.schedule(Task::Deregister {
+                        region_id,
+                        peer: Err(e),
+                    }) {
                         error!("schedule task failed"; "error" => ?e);
                     }
                     Ok(())
@@ -252,13 +277,16 @@ impl Runnable<Task> for Endpoint {
         match task {
             Task::RawEvent(event) => self.on_raw_event(event),
             Task::MinTS { min_ts } => self.on_min_ts(min_ts),
-            Task::Register { request, sink } => self.on_register(request, sink),
+            Task::Register {
+                request,
+                downstream,
+            } => self.on_register(request, downstream),
             Task::LoadLocks { region_snapshot } => self.on_region_load_locks(region_snapshot),
             Task::ResolverReady {
                 region_id,
                 resolver,
             } => self.on_region_ready(region_id, resolver),
-            Task::Deregister { region_id } => self.on_deregister(region_id),
+            Task::Deregister { region_id, peer } => self.on_deregister(region_id, peer),
         }
     }
 }

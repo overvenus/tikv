@@ -4,6 +4,7 @@ use grpcio::*;
 use kvproto::cdcpb::*;
 use tikv_util::worker::*;
 
+use crate::delegate::Downstream;
 use crate::endpoint::Task;
 
 #[derive(Clone)]
@@ -25,11 +26,16 @@ impl ChangeData for Service {
         sink: ServerStreamingSink<ChangeDataEvent>,
     ) {
         let region_id = request.region_id;
+        let peer = ctx.peer();
         // TODO: make it a bounded channel.
         let (tx, rx) = mpsc::unbounded();
+        let downstream = Downstream::new(peer.clone(), tx);
         if let Err(status) = self
             .scheduler
-            .schedule(Task::Register { request, sink: tx })
+            .schedule(Task::Register {
+                request,
+                downstream,
+            })
             .map_err(|e| RpcStatus::new(RpcStatusCode::INVALID_ARGUMENT, Some(format!("{:?}", e))))
         {
             error!("cdc task initiate failed"; "error" => ?status);
@@ -51,7 +57,12 @@ impl ChangeData for Service {
         }));
         let scheduler = self.scheduler.clone();
         ctx.spawn(send_resp.then(move |res| {
-            scheduler.schedule(Task::Deregister { region_id }).unwrap();
+            scheduler
+                .schedule(Task::Deregister {
+                    region_id,
+                    peer: Ok(peer),
+                })
+                .unwrap();
             match res {
                 Ok(_s) => {
                     info!("cdc send half closed");
