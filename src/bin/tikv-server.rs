@@ -213,7 +213,7 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     );
     SocketAddr::from_str(&server_cfg.engine_addr)
         .unwrap_or_else(|e| fatal!("failed to parser engine server address: {:?}", e));
-    engines.set_engine_client(
+    engines.set_engine_client_cfg(
         env.clone(),
         security_mgr.clone(),
         server_cfg.engine_addr.clone(),

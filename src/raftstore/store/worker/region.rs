@@ -638,7 +638,7 @@ impl Runner {
                 .thread_count(GENERATE_POOL_SIZE)
                 .build(),
             ctx: SnapContext {
-                engine_client: Arc::new(engines.engine_client()),
+                engine_client: Arc::new(engines.create_engine_client()),
                 engines,
                 mgr,
                 batch_size,

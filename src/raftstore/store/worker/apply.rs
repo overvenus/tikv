@@ -1105,7 +1105,7 @@ impl ApplyDelegate {
             AdminCmdType::ChangePeer => self.exec_change_peer(ctx, request),
             AdminCmdType::Split => self.exec_split(ctx, request),
             AdminCmdType::BatchSplit => self.exec_batch_split(ctx, request),
-            // TODO: how to handle compact log? Should we send compact log to engine server?
+            // CompactLog will check applied index, we should send it to engine definitely.
             AdminCmdType::CompactLog => self.exec_compact_log(ctx, request),
             AdminCmdType::TransferLeader => Err(box_err!("transfer leader won't exec")),
             AdminCmdType::ComputeHash => self.exec_compute_hash(ctx, request),
@@ -1712,6 +1712,7 @@ impl ApplyDelegate {
         ))
     }
 
+    // hacked by solotzg: make this function always return OK.
     fn exec_compact_log(
         &mut self,
         ctx: &mut ApplyContext,
@@ -1721,7 +1722,7 @@ impl ApplyDelegate {
             .with_label_values(&["compact", "all"])
             .inc();
 
-        let compact_index = req.get_compact_log().get_compact_index();
+        let mut compact_index = req.get_compact_log().get_compact_index();
         let resp = AdminResponse::new();
         let apply_state = &mut ctx.exec_ctx.as_mut().unwrap().apply_state;
         let first_index = peer_storage::first_index(apply_state);
@@ -1749,13 +1750,26 @@ impl ApplyDelegate {
                 req.get_compact_log()
             );
             // old format compact log command, safe to ignore.
-            return Err(box_err!(
-                "command format is outdated, please upgrade leader."
-            ));
+            panic!("command format is outdated, please upgrade leader.");
         }
 
         // compact failure is safe to be omitted, no need to assert.
-        compact_raft_log(&self.tag, apply_state, compact_index, compact_term)?;
+        {
+            debug!(
+                "{} compact log entries to prior to {}",
+                self.tag, compact_index
+            );
+            {
+                if compact_index <= apply_state.get_truncated_state().get_index() {
+                    return Ok((resp, None));
+                } else if compact_index > apply_state.get_applied_index() {
+                    compact_index = apply_state.get_applied_index();
+                }
+
+                apply_state.mut_truncated_state().set_index(compact_index);
+                apply_state.mut_truncated_state().set_term(compact_term);
+            }
+        }
 
         PEER_ADMIN_CMD_COUNTER_VEC
             .with_label_values(&["compact", "success"])
@@ -2438,7 +2452,7 @@ impl Runner {
             let header = resp.take_header();
             let region_id = header.get_region_id();
 
-            debug!(
+            info!(
                 "[region {}] receive apply command response {:?}",
                 region_id, resp
             );

@@ -956,7 +956,7 @@ impl Engines {
         }
     }
 
-    pub fn set_engine_client(
+    pub fn set_engine_client_cfg(
         &mut self,
         env: Arc<Environment>,
         security_mgr: Arc<SecurityManager>,
@@ -969,7 +969,7 @@ impl Engines {
         });
     }
 
-    pub fn engine_client(&self) -> EngineClient {
+    pub fn create_engine_client(&self) -> EngineClient {
         const DEFAULT_GRPC_STREAM_INITIAL_WINDOW_SIZE: i32 = 2 * 1024 * 1024;
 
         let cfg = self.engine_client_cfg.as_ref().unwrap();
