@@ -904,8 +904,8 @@ impl ApplyDelegate {
             ctx.wb_mut().rollback_to_save_point().unwrap();
             success = false;
             match e {
-                Error::StaleEpoch(..) => debug!("{} stale epoch err: {:?}", self.tag, e),
-                _ => error!("{} execute raft command err: {:?}", self.tag, e),
+                Error::StaleEpoch(..) => panic!("{} stale epoch err: {:?}", self.tag, e),
+                _ => panic!("{} execute raft command err: {:?}", self.tag, e),
             }
             (cmd_resp::new_error(e), None)
         });
@@ -1802,7 +1802,6 @@ impl ApplyDelegate {
                     self.handle_delete_range(req, &mut ranges, ctx.use_delete_range)
                 }
                 CmdType::IngestSST => {
-                    let _ = self.handle_ingest_sst(ctx, req, &mut ssts);
                     panic!("CmdType::IngestSST is not supported");
                 }
                 // Readonly commands are handled in raftstore directly.
