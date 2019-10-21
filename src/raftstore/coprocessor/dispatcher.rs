@@ -21,6 +21,7 @@ pub type BoxQueryObserver = Box<dyn QueryObserver + Send + Sync>;
 pub type BoxSplitCheckObserver = Box<dyn SplitCheckObserver + Send + Sync>;
 pub type BoxRoleObserver = Box<dyn RoleObserver + Send + Sync>;
 pub type BoxRegionChangeObserver = Box<dyn RegionChangeObserver + Send + Sync>;
+pub type BoxCmdObserver = Box<dyn CmdObserver + Send + Sync>;
 
 /// Registry contains all registered coprocessors.
 #[derive(Default)]
@@ -30,6 +31,7 @@ pub struct Registry {
     split_check_observers: Vec<Entry<BoxSplitCheckObserver>>,
     role_observers: Vec<Entry<BoxRoleObserver>>,
     region_change_observers: Vec<Entry<BoxRegionChangeObserver>>,
+    cmd_observers: Vec<Entry<BoxCmdObserver>>,
     // TODO: add endpoint
 }
 
@@ -65,6 +67,10 @@ impl Registry {
 
     pub fn register_region_change_observer(&mut self, priority: u32, rlo: BoxRegionChangeObserver) {
         push!(priority, rlo, self.region_change_observers);
+    }
+
+    pub fn register_cmd_observer(&mut self, priority: u32, rlo: BoxCmdObserver) {
+        push!(priority, rlo, self.cmd_observers);
     }
 }
 
@@ -254,6 +260,16 @@ impl CoprocessorHost {
         );
     }
 
+    pub fn on_cmd_registered(&self, region: &Region) {
+        loop_ob!(region, &self.registry.cmd_observers, on_registered,)
+    }
+
+    pub fn on_cmd_executed(&self, batch: &[CmdBatch]) {
+        for cmd_ob in &self.registry.cmd_observers {
+            cmd_ob.observer.on_batch_executed(batch)
+        }
+    }
+
     pub fn shutdown(&self) {
         for entry in &self.registry.admin_observers {
             entry.observer.stop();
@@ -262,6 +278,9 @@ impl CoprocessorHost {
             entry.observer.stop();
         }
         for entry in &self.registry.split_check_observers {
+            entry.observer.stop();
+        }
+        for entry in &self.registry.cmd_observers {
             entry.observer.stop();
         }
     }
@@ -368,6 +387,13 @@ mod tests {
         }
     }
 
+    impl CmdObserver for TestCoprocessor {
+        fn on_registered(&self, _: &mut ObserverContext<'_>) {}
+        fn on_batch_executed(&self, _: &[CmdBatch]) {
+            self.called.fetch_add(9, Ordering::SeqCst);
+        }
+    }
+
     macro_rules! assert_all {
         ($target:expr, $expect:expr) => {{
             for (c, e) in ($target).iter().zip($expect) {
@@ -396,6 +422,7 @@ mod tests {
             .register_role_observer(1, Box::new(ob.clone()));
         host.registry
             .register_region_change_observer(1, Box::new(ob.clone()));
+        host.registry.register_cmd_observer(1, Box::new(ob.clone()));
         let region = Region::default();
         let mut admin_req = RaftCmdRequest::default();
         admin_req.set_admin_request(AdminRequest::default());
@@ -405,6 +432,7 @@ mod tests {
         assert_all!(&[&ob.called], &[3]);
         let mut admin_resp = RaftCmdResponse::default();
         admin_resp.set_admin_response(AdminResponse::default());
+        admin_resp.header = Some(RaftResponseHeader::default()).into();
         host.post_apply(&region, 0, &mut admin_resp);
         assert_all!(&[&ob.called], &[6]);
 
@@ -414,7 +442,9 @@ mod tests {
         assert_all!(&[&ob.called], &[10]);
         host.pre_apply(&region, 0, &query_req);
         assert_all!(&[&ob.called], &[15]);
-        host.post_apply(&region, 0, &mut RaftCmdResponse::default());
+        let mut query_resp = admin_resp.clone();
+        query_resp.clear_admin_response();
+        host.post_apply(&region, 0, &mut query_resp);
         assert_all!(&[&ob.called], &[21]);
 
         host.on_role_change(&region, StateRole::Leader);
@@ -422,6 +452,9 @@ mod tests {
 
         host.on_region_changed(&region, RegionChangeEvent::Create, StateRole::Follower);
         assert_all!(&[&ob.called], &[36]);
+
+        host.on_cmd_executed(&[]);
+        assert_all!(&[&ob.called], &[45]);
     }
 
     #[test]
