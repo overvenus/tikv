@@ -1010,6 +1010,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_apply_abort() {
         use self::test_util::init_log_for_test;
         init_log_for_test().cancel_reset();

@@ -1739,6 +1739,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_storage_create_snapshot() {
         let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
         let mut cs = ConfState::new();
@@ -2024,6 +2025,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_storage_apply_snapshot() {
         let ents = vec![
             new_entry(3, 3),

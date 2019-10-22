@@ -2760,6 +2760,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_basic_flow() {
         let (tx, rx) = mpsc::channel();
         let (_tmp, engines) = create_tmp_engine("apply-basic");
@@ -3053,6 +3054,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_handle_raft_committed_entries() {
         let (_path, engines) = create_tmp_engine("test-delegate");
         let (import_dir, importer) = create_tmp_importer("test-delegate");
@@ -3455,6 +3457,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_split() {
         let (_path, engines) = create_tmp_engine("test-delegate");
         let (_import_dir, importer) = create_tmp_importer("test-delegate");
