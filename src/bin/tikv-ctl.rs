@@ -66,7 +66,7 @@ use kvproto::tikvpb_grpc::TikvClient;
 use raft::eraftpb::{ConfChange, Entry, EntryType};
 
 use tikv::config::TiKvConfig;
-use tikv::pd::{take_peer_address, Config as PdConfig, PdClient, RpcClient};
+use tikv::pd::{Config as PdConfig, PdClient, RpcClient};
 use tikv::raftstore::store::{keys, Engines};
 use tikv::server::debug::{BottommostLevelCompaction, Debugger, RegionInfo};
 use tikv::storage::{Key, CF_DEFAULT, CF_LOCK, CF_WRITE};
@@ -1914,14 +1914,13 @@ fn split_region(pd: &str, region_id: u64, key: Vec<u8>, mgr: Arc<SecurityManager
         .leader
         .expect("region must have leader");
 
-    let mut store = pd_client
+    let store = pd_client
         .get_store(leader.get_store_id())
         .expect("get_store should success");
 
     let tikv_client = {
         let cb = ChannelBuilder::new(Arc::new(Environment::new(1)));
-        let addr = take_peer_address(&mut store);
-        let channel = mgr.connect(cb, &addr);
+        let channel = mgr.connect(cb, store.get_address());
         TikvClient::new(channel)
     };
 

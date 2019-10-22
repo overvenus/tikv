@@ -78,7 +78,7 @@ impl<T: PdClient> Runner<T> {
         Ok(addr)
     }
 
-    fn get_address(&mut self, store_id: u64) -> Result<String> {
+    fn get_address(&self, store_id: u64) -> Result<String> {
         let pd_client = Arc::clone(&self.pd_client);
         let mut s = box_try!(pd_client.get_store(store_id));
         if s.get_state() == metapb::StoreState::Tombstone {
@@ -184,7 +184,7 @@ mod tests {
         fn get_store(&self, _: u64) -> Result<metapb::Store> {
             // The store address will be changed every millisecond.
             let mut store = self.store.clone();
-            let mut sock = take_peer_address(&mut store);
+            let mut sock = SocketAddr::from_str(store.get_address()).unwrap();
             sock.set_port(util::time::duration_to_ms(self.start.elapsed()) as u16);
             store.set_address(format!("{}:{}", sock.ip(), sock.port()));
             Ok(store)
@@ -273,6 +273,17 @@ mod tests {
         let store = new_store(STORE_ADDR, metapb::StoreState::Tombstone);
         let mut runner = new_runner(store);
         assert!(runner.get_address(0).is_err());
+    }
+
+    #[test]
+    fn test_resolve_store_peer_addr() {
+        let mut store = new_store("127.0.0.1:12345", metapb::StoreState::Up);
+        store.set_peer_address("127.0.0.1:22345".to_string());
+        let mut runner = new_runner(store.clone());
+        assert_eq!(
+            runner.get_address(0).unwrap(),
+            "127.0.0.1:22345".to_string()
+        );
     }
 
     #[test]

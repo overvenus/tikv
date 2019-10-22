@@ -1464,6 +1464,7 @@ mod tests {
     use util::worker::{Scheduler, Worker};
 
     use super::*;
+    use kvproto::metapb::Peer;
 
     fn new_storage(sched: Scheduler<RegionTask>, path: &TempDir) -> PeerStorage {
         let kv_db = Arc::new(new_engine(path.path().to_str().unwrap(), ALL_CFS, None).unwrap());
@@ -1474,7 +1475,14 @@ mod tests {
         bootstrap::bootstrap_store(&engines, 1, 1).expect("");
         let region = bootstrap::prepare_bootstrap(&engines, 1, 1, 1).expect("");
         let metrics = Rc::new(RefCell::new(CacheQueryStats::default()));
-        PeerStorage::new(engines, &region, sched, "".to_owned(), metrics).unwrap()
+        PeerStorage::new(
+            engines,
+            &Peer::new(),
+            &region,
+            sched,
+            "".to_owned(),
+            metrics,
+        ).unwrap()
     }
 
     fn new_storage_from_ents(

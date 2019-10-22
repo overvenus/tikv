@@ -217,6 +217,8 @@ mod tests {
     use util::security::SecurityConfig;
     use util::worker::FutureWorker;
 
+    use grpc;
+
     #[derive(Clone)]
     struct MockResolver {
         quick_fail: Arc<AtomicBool>,
@@ -294,9 +296,11 @@ mod tests {
         );
         let cop = coprocessor::Endpoint::new(&cfg, storage.get_engine(), cop_read_pool);
 
+        let env = Arc::new(grpc::Environment::new(1));
         let addr = Arc::new(Mutex::new(None));
         let mut server = Server::new(
             &cfg,
+            env,
             &security_mgr,
             storage,
             cop,

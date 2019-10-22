@@ -364,6 +364,7 @@ mod tests {
         let metrics = Rc::new(RefCell::new(CacheQueryStats::default()));
         PeerStorage::new(
             engines,
+            &Peer::new(),
             r,
             worker::dummy_scheduler(),
             "".to_owned(),

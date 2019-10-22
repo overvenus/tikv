@@ -786,6 +786,7 @@ mod tests {
     use util::worker::Worker;
 
     use super::*;
+    use kvproto::metapb::Peer;
 
     fn insert_range(
         pending_delete_ranges: &mut PendingDeleteRanges,
@@ -939,6 +940,7 @@ mod tests {
             sched
                 .schedule(Task::Apply {
                     region_id: id,
+                    peer: Peer::new(),
                     status,
                 })
                 .unwrap();
@@ -1074,7 +1076,7 @@ mod tests {
             sched
                 .schedule(Task::Apply {
                     region_id: id,
-                    peer: new_peer(1, 1),
+                    peer: Peer::new(),
                     status: status.clone(),
                 })
                 .unwrap();

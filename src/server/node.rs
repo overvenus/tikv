@@ -104,6 +104,8 @@ where
     {
         let mut store = metapb::Store::new();
         store.set_id(INVALID_ID);
+        println!("{}", cfg.engine_addr.to_string());
+        println!("{}", cfg.advertise_addr.to_string());
         if !cfg.engine_addr.is_empty() {
             store.set_address(cfg.engine_addr.clone());
         } else {

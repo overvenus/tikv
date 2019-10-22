@@ -24,7 +24,7 @@ use kvproto::import_sstpb_grpc::*;
 use kvproto::kvrpcpb::*;
 use kvproto::tikvpb_grpc::*;
 
-use pd::{take_peer_address, Config as PdConfig, PdClient, RegionInfo, RpcClient};
+use pd::{Config as PdConfig, PdClient, RegionInfo, RpcClient};
 use storage::types::Key;
 use util::collections::{HashMap, HashMapEntry};
 use util::security::SecurityManager;
@@ -91,10 +91,9 @@ impl Client {
         match channels.entry(store_id) {
             HashMapEntry::Occupied(e) => Ok(e.get().clone()),
             HashMapEntry::Vacant(e) => {
-                let mut store = self.pd.get_store(store_id)?;
+                let store = self.pd.get_store(store_id)?;
                 let builder = ChannelBuilder::new(Arc::clone(&self.env));
-                let addr = take_peer_address(&mut store);
-                let channel = builder.connect(&addr);
+                let channel = builder.connect(store.get_address());
                 Ok(e.insert(channel).clone())
             }
         }
