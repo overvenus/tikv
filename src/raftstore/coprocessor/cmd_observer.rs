@@ -50,6 +50,10 @@ impl CmdBatch {
     pub fn len(&self) -> usize {
         self.cmds.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.cmds.is_empty()
+    }
 }
 
 pub trait CmdObserver: Coprocessor {

@@ -1,4 +1,5 @@
-use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use futures::sync::mpsc::*;
 use kvproto::cdcpb::*;
@@ -9,50 +10,62 @@ use tikv::raftstore::Error as RaftStoreError;
 use tikv::storage::mvcc::{Lock, LockType, Write, WriteType};
 use tikv::storage::Key;
 use tikv_util::collections::HashMap;
-use tikv_util::Either;
 
 use crate::Error;
 
 pub struct Downstream {
+    pub id: usize,
     // The IP address of downstream.
     peer: String,
     sink: UnboundedSender<ChangeDataEvent>,
 }
 
 impl Downstream {
-    pub fn new(peer: String, sink: UnboundedSender<ChangeDataEvent>) -> Downstream {
-        Downstream { peer, sink }
+    pub fn new(id: usize, peer: String, sink: UnboundedSender<ChangeDataEvent>) -> Downstream {
+        Downstream { id, peer, sink }
     }
 }
 
 pub struct Delegate {
     pub region_id: u64,
-    pub pending: VecDeque<(u64, Either<Vec<Request>, AdminRequest>)>,
     pub downstreams: Vec<Downstream>,
     pub resolver: Option<Resolver>,
     initial_buffer: Option<Vec<CmdBatch>>,
+    enabled: Arc<AtomicBool>,
 }
 
 impl Delegate {
     pub fn new(region_id: u64) -> Delegate {
         Delegate {
             region_id,
-            pending: VecDeque::new(),
             downstreams: Vec::new(),
             resolver: None,
             initial_buffer: Some(Vec::new()),
+            enabled: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    pub fn enabled(&self) -> Arc<AtomicBool> {
+        self.enabled.clone()
     }
 
     pub fn subscribe(&mut self, downstream: Downstream) {
         self.downstreams.push(downstream);
     }
 
-    pub fn unsubscribe(&mut self, peer: String) {
-        self.downstreams.retain(|d| d.peer != peer)
+    pub fn unsubscribe(&mut self, id: usize) -> bool {
+        self.downstreams.retain(|d| d.id != id);
+        let is_last = self.downstreams.is_empty();
+        if is_last {
+            self.enabled.store(false, Ordering::Relaxed);
+        }
+        is_last
     }
 
     pub fn fail(&mut self, err: Error) {
+        // Stop observe further events.
+        self.enabled.store(false, Ordering::Relaxed);
+
         let mut change_data_event = Event::new();
         let mut cdc_err = EventError::default();
         let mut err = err.extract_error_header();
@@ -251,20 +264,20 @@ impl Delegate {
     fn sink_admin(&mut self, request: AdminRequest, mut response: AdminResponse) {
         let err_store = match request.get_cmd_type() {
             AdminCmdType::Split => RaftStoreError::EpochNotMatch(
-                format!("split"),
+                "split".to_owned(),
                 vec![
                     response.mut_split().take_left(),
                     response.mut_split().take_right(),
                 ],
             ),
             AdminCmdType::BatchSplit => RaftStoreError::EpochNotMatch(
-                format!("batchsplit"),
+                "batchsplit".to_owned(),
                 response.mut_splits().take_regions().into(),
             ),
             AdminCmdType::PrepareMerge
             | AdminCmdType::CommitMerge
             | AdminCmdType::RollbackMerge => {
-                RaftStoreError::EpochNotMatch(format!("merge"), vec![])
+                RaftStoreError::EpochNotMatch("merge".to_owned(), vec![])
             }
             _ => return,
         };
@@ -381,7 +394,7 @@ mod tests {
         let region_id = 1;
         let (sink, events) = unbounded();
         let mut delegate = Delegate::new(region_id);
-        delegate.subscribe(Downstream::new(String::new(), sink));
+        delegate.subscribe(Downstream::new(1, String::new(), sink));
         let mut resolver = Resolver::new();
         resolver.init();
         delegate.on_region_ready(resolver);
@@ -464,7 +477,9 @@ mod tests {
         let region_id = 1;
         let (sink, events) = unbounded();
         let mut delegate = Delegate::new(region_id);
-        delegate.subscribe(Downstream::new(String::new(), sink));
+        delegate.subscribe(Downstream::new(1, String::new(), sink));
+        let enabled = delegate.enabled();
+        assert!(enabled.load(Ordering::Relaxed));
         let mut resolver = Resolver::new();
         resolver.init();
         delegate.on_region_ready(resolver);
@@ -493,6 +508,8 @@ mod tests {
         delegate.fail(Error::Request(err_header));
         let err = receive_error();
         assert!(err.has_not_leader());
+        // Enable is disabled by any error.
+        assert!(!enabled.load(Ordering::Relaxed));
 
         let mut err_header = ErrorHeader::default();
         err_header.set_region_not_found(Default::default());

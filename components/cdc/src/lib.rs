@@ -10,7 +10,7 @@ mod lock_scanner;
 mod observer;
 mod service;
 
-pub use endpoint::Endpoint;
+pub use endpoint::{Endpoint, Task};
 pub use errors::{Error, Result};
 pub use observer::CdcObserver;
 pub use service::Service;

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use std::{thread, usize};
 
-use grpcio::{EnvBuilder, Error as GrpcError};
+use grpcio::{EnvBuilder, Error as GrpcError, Service};
 use kvproto::debugpb::create_debug;
 use kvproto::import_sstpb::create_import_sst;
 use kvproto::raft_cmdpb::*;
@@ -17,7 +17,7 @@ use tikv::config::TiKvConfig;
 use tikv::coprocessor;
 use tikv::import::{ImportSSTService, SSTImporter};
 use tikv::raftstore::coprocessor::{CoprocessorHost, RegionInfoAccessor};
-use tikv::raftstore::store::fsm::{RaftBatchSystem, RaftRouter};
+use tikv::raftstore::store::fsm::{ApplyRouter, RaftBatchSystem, RaftRouter};
 use tikv::raftstore::store::{Callback, LocalReader, SnapManager};
 use tikv::raftstore::Result;
 use tikv::server::load_statistics::ThreadLoad;
@@ -51,6 +51,7 @@ struct ServerMeta {
     sim_router: SimulateStoreTransport,
     sim_trans: SimulateServerTransport,
     raw_router: RaftRouter,
+    raw_apply_router: ApplyRouter,
     worker: Worker<ResolveTask>,
 }
 
@@ -60,6 +61,8 @@ pub struct ServerCluster {
     pub storages: HashMap<u64, SimulateEngine>,
     pub region_info_accessors: HashMap<u64, RegionInfoAccessor>,
     pub importers: HashMap<u64, Arc<SSTImporter>>,
+    pub pending_services: HashMap<u64, Vec<Box<dyn Fn() -> Service>>>,
+    pub coprocessor_hooks: HashMap<u64, Vec<Box<dyn Fn(&mut CoprocessorHost)>>>,
     snap_paths: HashMap<u64, TempDir>,
     pd_client: Arc<TestPdClient>,
     raft_client: RaftClient<RaftStoreBlackHole>,
@@ -92,6 +95,8 @@ impl ServerCluster {
             region_info_accessors: HashMap::default(),
             importers: HashMap::default(),
             snap_paths: HashMap::default(),
+            pending_services: HashMap::default(),
+            coprocessor_hooks: HashMap::default(),
             raft_client,
             _stats_pool: stats_pool,
         }
@@ -99,6 +104,10 @@ impl ServerCluster {
 
     pub fn get_addr(&self, node_id: u64) -> &str {
         &self.addrs[&node_id]
+    }
+
+    pub fn get_apply_router(&self, node_id: u64) -> ApplyRouter {
+        self.metas.get(&node_id).unwrap().raw_apply_router.clone()
     }
 }
 
@@ -186,6 +195,11 @@ impl Simulator for ServerCluster {
             .unwrap();
             svr.register_service(create_import_sst(import_service.clone()));
             svr.register_service(create_debug(debug_service.clone()));
+            if let Some(svcs) = self.pending_services.get(&node_id) {
+                for fact in svcs {
+                    svr.register_service(fact());
+                }
+            }
             match svr.build_and_bind() {
                 Ok(_) => {
                     server = Some(svr);
@@ -206,6 +220,7 @@ impl Simulator for ServerCluster {
         let trans = server.transport();
         let simulate_trans = SimulateTransport::new(trans.clone());
         let server_cfg = Arc::new(cfg.server.clone());
+        let apply_router = system.apply_router();
 
         // Create node.
         let mut node = Node::new(
@@ -220,6 +235,12 @@ impl Simulator for ServerCluster {
 
         let region_info_accessor = RegionInfoAccessor::new(&mut coprocessor_host);
         region_info_accessor.start();
+
+        if let Some(hooks) = self.coprocessor_hooks.get(&node_id) {
+            for hook in hooks {
+                hook(&mut coprocessor_host);
+            }
+        }
 
         node.start(
             engines.clone(),
@@ -244,6 +265,7 @@ impl Simulator for ServerCluster {
             node_id,
             ServerMeta {
                 raw_router: router,
+                raw_apply_router: apply_router,
                 node,
                 server,
                 sim_router,

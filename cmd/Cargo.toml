@@ -7,7 +7,7 @@ publish = false
 default-run = "tikv-server"
 
 [features]
-default = ["tikv/default"]
+default = ["tikv/default", "cdc/no_validate"]
 tcmalloc = ["tikv/tcmalloc"]
 jemalloc = ["tikv/jemalloc"]
 mimalloc = ["tikv/mimalloc"]

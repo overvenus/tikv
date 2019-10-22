@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use futures::future::{err, ok};
 use futures::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use futures::{Future, Stream};
+use futures_cpupool::{Builder, CpuPool};
 use tokio_timer::timer::Handle;
 
 use kvproto::metapb::{self, Region};
@@ -668,6 +669,8 @@ pub struct TestPdClient {
     cluster: Arc<RwLock<Cluster>>,
     timer: Handle,
     is_incompatible: bool,
+    tso: AtomicUsize,
+    poller: CpuPool,
 }
 
 impl TestPdClient {
@@ -677,6 +680,8 @@ impl TestPdClient {
             cluster: Arc::new(RwLock::new(Cluster::new(cluster_id))),
             timer: GLOBAL_TIMER_HANDLE.clone(),
             is_incompatible,
+            tso: AtomicUsize::new(1),
+            poller: Builder::new().pool_size(1).create(),
         }
     }
 
@@ -1199,5 +1204,14 @@ impl PdClient for TestPdClient {
         resp.set_header(header);
         resp.set_region_id(region_id);
         Ok(resp)
+    }
+
+    fn get_tso(&self) -> PdFuture<u64> {
+        let tso = self.tso.fetch_add(1, Ordering::SeqCst);
+        Box::new(futures::future::result(Ok(tso as _)))
+    }
+
+    fn spawn(&self, fut: PdFuture<()>) {
+        self.poller.spawn(fut).forget();
     }
 }

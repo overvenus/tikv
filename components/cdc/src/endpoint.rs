@@ -1,5 +1,4 @@
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,7 +26,7 @@ pub enum Task {
     },
     Deregister {
         region_id: u64,
-        peer: Result<String>,
+        id: Result<usize>,
     },
     MultiBatch {
         multi: Vec<CmdBatch>,
@@ -42,6 +41,8 @@ pub enum Task {
     LoadLocks {
         region_snapshot: RegionSnapshot,
     },
+    #[cfg(not(validate))]
+    Validate(u64, Box<dyn FnOnce(Option<&Delegate>) + Send>),
 }
 
 impl fmt::Display for Task {
@@ -56,11 +57,10 @@ impl fmt::Debug for Task {
             Task::Register { ref request, .. } => de.field("request", request).finish(),
             Task::Deregister {
                 ref region_id,
-                ref peer,
-                ..
+                ref id,
             } => de
                 .field("deregister region_id", region_id)
-                .field("peer", peer)
+                .field("id", id)
                 .finish(),
             Task::MinTS { ref min_ts } => de.field("min_ts", min_ts).finish(),
             Task::ResolverReady { ref region_id, .. } => de.field("region_id", region_id).finish(),
@@ -73,17 +73,20 @@ impl fmt::Debug for Task {
                 )
                 .finish(),
             Task::MultiBatch { multi } => de.field("multibatch", &multi.len()).finish(),
+            #[cfg(not(validate))]
+            Task::Validate(region_id, _) => de.field("region_id", &region_id).finish(),
         }
     }
 }
 
 pub struct Endpoint {
-    capture_regions: HashMap<u64, (Delegate, Arc<AtomicBool>)>,
+    capture_regions: HashMap<u64, Delegate>,
     scheduler: Scheduler<Task>,
     apply_router: ApplyRouter,
 
     pd_client: Arc<dyn PdClient>,
     timer: SteadyTimer,
+    min_ts_interval: Duration,
 
     lock_workers: ThreadPool,
 }
@@ -102,20 +105,26 @@ impl Endpoint {
             timer: SteadyTimer::default(),
             lock_workers,
             apply_router,
+            min_ts_interval: Duration::from_secs(10),
         };
-        ep.register_min_ts_event(Duration::from_secs(10));
+        ep.register_min_ts_event();
         ep
     }
 
-    fn on_deregister(&mut self, region_id: u64, peer: Result<String>) {
-        match peer {
-            Ok(p) => {
-                info!("cdc deregister region";
-                    "region_id" => region_id,
-                    "peer" => %p);
+    pub fn set_min_ts_interval(&mut self, dur: Duration) {
+        self.min_ts_interval = dur;
+    }
+
+    fn on_deregister(&mut self, region_id: u64, id: Result<usize>) {
+        let mut is_last = false;
+        match id {
+            Ok(id) => {
                 // The peer wants to deregister
-                if let Some((delegate, _)) = self.capture_regions.get_mut(&region_id) {
-                    delegate.unsubscribe(p);
+                if let Some(delegate) = self.capture_regions.get_mut(&region_id) {
+                    info!("cdc deregister region";
+                        "region_id" => region_id,
+                        "id" => %id);
+                    is_last = delegate.unsubscribe(id);
                 }
             }
             Err(e) => {
@@ -123,11 +132,14 @@ impl Endpoint {
                 info!("cdc deregister region";
                     "region_id" => region_id,
                     "error" => %e);
-                if let Some((mut delegate, enabled)) = self.capture_regions.remove(&region_id) {
-                    enabled.store(false, Ordering::Relaxed);
+                if let Some(mut delegate) = self.capture_regions.remove(&region_id) {
                     delegate.fail(e);
+                    is_last = true;
                 }
             }
+        }
+        if is_last {
+            self.capture_regions.remove(&region_id);
         }
     }
 
@@ -136,12 +148,12 @@ impl Endpoint {
         info!("cdc register region"; "region_id" => region_id);
         let mut enabled = None;
         let delegate = self.capture_regions.entry(region_id).or_insert_with(|| {
-            let e = Arc::new(AtomicBool::new(true));
-            enabled = Some(e.clone());
-            (Delegate::new(region_id), e)
+            let d = Delegate::new(region_id);
+            enabled = Some(d.enabled());
+            d
         });
 
-        delegate.0.subscribe(downstream);
+        delegate.subscribe(downstream);
         if let Some(e) = enabled {
             let scheduler = self.scheduler.clone();
             self.apply_router.schedule_task(
@@ -163,7 +175,7 @@ impl Endpoint {
                             let err = resp.response.take_header().take_error();
                             let deregister = Task::Deregister {
                                 region_id,
-                                peer: Err(Error::Request(err)),
+                                id: Err(Error::Request(err)),
                             };
                             scheduler.schedule(deregister).unwrap();
                         }
@@ -175,7 +187,7 @@ impl Endpoint {
 
     pub fn on_multi_batch(&mut self, multi: Vec<CmdBatch>) {
         for batch in multi {
-            if let Some((delegate, _)) = self.capture_regions.get_mut(&batch.region_id) {
+            if let Some(delegate) = self.capture_regions.get_mut(&batch.region_id) {
                 delegate.on_batch(batch);
             }
         }
@@ -210,7 +222,7 @@ impl Endpoint {
                     // TODO: attach error the the task.
                     if let Err(e) = sched.schedule(Task::Deregister {
                         region_id,
-                        peer: Err(e),
+                        id: Err(e),
                     }) {
                         error!("schedule task failed"; "error" => ?e);
                     }
@@ -221,19 +233,19 @@ impl Endpoint {
     }
 
     fn on_region_ready(&mut self, region_id: u64, resolver: Resolver) {
-        let (delegate, _) = self.capture_regions.get_mut(&region_id).unwrap();
+        let delegate = self.capture_regions.get_mut(&region_id).unwrap();
         delegate.on_region_ready(resolver);
     }
 
     fn on_min_ts(&mut self, min_ts: u64) {
-        for (delegate, _) in self.capture_regions.values_mut() {
+        for delegate in self.capture_regions.values_mut() {
             delegate.on_min_ts(min_ts);
         }
-        self.register_min_ts_event(Duration::from_secs(10));
+        self.register_min_ts_event();
     }
 
-    fn register_min_ts_event(&self, dur: Duration) {
-        let timeout = self.timer.delay(dur);
+    fn register_min_ts_event(&self) {
+        let timeout = self.timer.delay(self.min_ts_interval);
         let tso = self.pd_client.get_tso();
         let scheduler = self.scheduler.clone();
         let fut = tso
@@ -267,8 +279,12 @@ impl Runnable<Task> for Endpoint {
                 region_id,
                 resolver,
             } => self.on_region_ready(region_id, resolver),
-            Task::Deregister { region_id, peer } => self.on_deregister(region_id, peer),
+            Task::Deregister { region_id, id } => self.on_deregister(region_id, id),
             Task::MultiBatch { multi } => self.on_multi_batch(multi),
+            #[cfg(not(validate))]
+            Task::Validate(region_id, validate) => {
+                validate(self.capture_regions.get(&region_id));
+            }
         }
     }
 }

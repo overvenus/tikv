@@ -58,6 +58,7 @@ impl LockScanner {
         }
     }
 
+    #[allow(dead_code)]
     pub fn statistics(&self) -> &CFStatistics {
         &self.statistics
     }

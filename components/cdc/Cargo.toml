@@ -38,3 +38,11 @@ features = ["nightly", "push", "process"]
 test_util = { path = "../test_util" }
 test_raftstore = { path = "../test_raftstore" }
 tempfile = "3.0"
+
+[features]
+default = ["no_validate"]
+no_validate = []
+
+[[test]]
+name = "integrations"
+path = "tests/integrations/mod.rs"

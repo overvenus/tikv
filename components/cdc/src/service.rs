@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use futures::sync::mpsc;
 use futures::{Future, Sink, Stream};
 use grpcio::*;
@@ -10,11 +13,15 @@ use crate::endpoint::Task;
 #[derive(Clone)]
 pub struct Service {
     scheduler: Scheduler<Task>,
+    stream_id: Arc<AtomicUsize>,
 }
 
 impl Service {
     pub fn new(scheduler: Scheduler<Task>) -> Service {
-        Service { scheduler }
+        Service {
+            scheduler,
+            stream_id: Arc::default(),
+        }
     }
 }
 
@@ -27,9 +34,10 @@ impl ChangeData for Service {
     ) {
         let region_id = request.region_id;
         let peer = ctx.peer();
+        let id = self.stream_id.fetch_add(1, Ordering::Relaxed);
         // TODO: make it a bounded channel.
         let (tx, rx) = mpsc::unbounded();
-        let downstream = Downstream::new(peer.clone(), tx);
+        let downstream = Downstream::new(id, peer.clone(), tx);
         if let Err(status) = self
             .scheduler
             .schedule(Task::Register {
@@ -60,7 +68,7 @@ impl ChangeData for Service {
             scheduler
                 .schedule(Task::Deregister {
                     region_id,
-                    peer: Ok(peer),
+                    id: Ok(id),
                 })
                 .unwrap();
             match res {
