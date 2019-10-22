@@ -2,12 +2,16 @@ use std::collections::VecDeque;
 
 use futures::sync::mpsc::*;
 use kvproto::cdcpb::*;
-use kvproto::raft_cmdpb::{AdminRequest, AdminResponse, CmdType, RaftResponseHeader, Request};
+use kvproto::raft_cmdpb::{AdminCmdType, AdminRequest, AdminResponse, CmdType, Request};
 use resolved_ts::Resolver;
+use tikv::raftstore::coprocessor::{Cmd, CmdBatch};
+use tikv::raftstore::Error as RaftStoreError;
 use tikv::storage::mvcc::{Lock, LockType, Write, WriteType};
 use tikv::storage::Key;
 use tikv_util::collections::HashMap;
 use tikv_util::Either;
+
+use crate::Error;
 
 pub struct Downstream {
     // The IP address of downstream.
@@ -26,17 +30,7 @@ pub struct Delegate {
     pub pending: VecDeque<(u64, Either<Vec<Request>, AdminRequest>)>,
     pub downstreams: Vec<Downstream>,
     pub resolver: Option<Resolver>,
-    initial_buffer: Option<
-        Vec<
-            Either<
-                (u64, Either<Vec<Request>, AdminRequest>),
-                (
-                    u64,
-                    Either<RaftResponseHeader, (RaftResponseHeader, AdminResponse)>,
-                ),
-            >,
-        >,
-    >,
+    initial_buffer: Option<Vec<CmdBatch>>,
 }
 
 impl Delegate {
@@ -58,6 +52,34 @@ impl Delegate {
         self.downstreams.retain(|d| d.peer != peer)
     }
 
+    pub fn fail(&mut self, err: Error) {
+        let mut change_data_event = Event::new();
+        let mut cdc_err = EventError::default();
+        let mut err = err.extract_error_header();
+        if err.has_region_not_found() {
+            let region_not_found = err.take_region_not_found();
+            cdc_err.set_region_not_found(region_not_found);
+        } else if err.has_not_leader() {
+            let not_leader = err.take_not_leader();
+            cdc_err.set_not_leader(not_leader);
+        } else if err.has_epoch_not_match() {
+            let epoch_not_match = err.take_epoch_not_match();
+            cdc_err.set_epoch_not_match(epoch_not_match);
+        } else {
+            panic!(
+                "region met unknown error region_id: {}, error: {:?}",
+                self.region_id, err
+            );
+        }
+        info!("region met error";
+            "region_id" => self.region_id, "error" => ?cdc_err);
+        change_data_event.event = Some(Event_oneof_event::Error(cdc_err));
+        change_data_event.region_id = self.region_id;
+        let mut change_data = ChangeDataEvent::new();
+        change_data.mut_events().push(change_data_event);
+        self.broadcast(change_data);
+    }
+
     fn broadcast(&self, change_data: ChangeDataEvent) {
         for d in &self.downstreams {
             if d.sink.unbounded_send(change_data.clone()).is_err() {
@@ -74,22 +96,9 @@ impl Delegate {
             "region resolver should not be ready"
         );
         self.resolver = Some(resolver);
-        for buffer in self.initial_buffer.take() {
-            for e in buffer {
-                match e {
-                    Either::Left((index, Either::Left(reqs))) => {
-                        self.on_data_requsts(index, reqs);
-                    }
-                    Either::Left((index, Either::Right(req))) => {
-                        self.on_admin_requst(index, req);
-                    }
-                    Either::Right((index, Either::Left(header))) => {
-                        self.on_data_responses(index, header);
-                    }
-                    Either::Right((index, Either::Right((header, resp)))) => {
-                        self.on_admin_response(index, header, resp);
-                    }
-                }
+        if let Some(multi) = self.initial_buffer.take() {
+            for batch in multi {
+                self.on_batch(batch);
             }
         }
     }
@@ -116,65 +125,28 @@ impl Delegate {
         self.broadcast(change_data);
     }
 
-    pub fn on_data_requsts(&mut self, index: u64, reqs: Vec<Request>) {
-        if let Some(buf) = self.initial_buffer.as_mut() {
-            buf.push(Either::Left((index, Either::Left(reqs))));
-            return;
-        }
-        self.pending.push_back((index, Either::Left(reqs)))
-    }
-    pub fn on_data_responses(&mut self, index: u64, header: RaftResponseHeader) {
-        if let Some(buf) = self.initial_buffer.as_mut() {
-            buf.push(Either::Right((index, Either::Left(header))));
-            return;
-        }
-        while let Some((idx, req)) = self.pending.pop_front() {
-            if idx < index {
-                warn!("requests gap";
-                    "region_id" => self.region_id,
-                    "pervious_index" => idx,
-                    "current_index" => index);
-            // TODO: handle gap
-            } else if idx == index {
-                if !header.has_error() {
-                    match req {
-                        Either::Left(requests) => self.sink_data(index, requests),
-                        Either::Right(_) => unreachable!(),
-                    }
+    pub fn on_batch(&mut self, batch: CmdBatch) {
+        for cmd in batch.into_iter(self.region_id) {
+            let Cmd {
+                index,
+                mut request,
+                mut response,
+            } = cmd;
+            if !response.get_header().has_error() {
+                if !request.has_admin_request() {
+                    self.sink_data(index, request.requests.into());
                 } else {
-                    self.sink_noop(index);
+                    self.sink_admin(request.take_admin_request(), response.take_admin_response());
                 }
-                break;
             } else {
-                self.pending.push_front((idx, req));
-                break;
+                let err_header = response.mut_header().take_error();
+                let err = Error::Request(err_header);
+                self.fail(err);
             }
         }
     }
 
-    pub fn on_admin_requst(&mut self, index: u64, req: AdminRequest) {
-        if let Some(buf) = self.initial_buffer.as_mut() {
-            buf.push(Either::Left((index, Either::Right(req))));
-            return;
-        }
-        self.pending.push_back((index, Either::Right(req)))
-    }
-    pub fn on_admin_response(
-        &mut self,
-        index: u64,
-        header: RaftResponseHeader,
-        resp: AdminResponse,
-    ) {
-        if let Some(buf) = self.initial_buffer.as_mut() {
-            buf.push(Either::Right((index, Either::Right((header, resp)))));
-            return;
-        }
-    }
-
-    pub fn sink_noop(&self, index: u64) {
-        self.broadcast(ChangeDataEvent::default());
-    }
-    pub fn sink_data(&mut self, index: u64, requests: Vec<Request>) {
+    fn sink_data(&mut self, index: u64, requests: Vec<Request>) {
         let mut kv: HashMap<Vec<u8>, EventRow> = HashMap::default();
         for mut req in requests {
             if req.cmd_type == CmdType::Put {
@@ -275,8 +247,29 @@ impl Delegate {
         change_data.mut_events().push(change_data_event);
         self.broadcast(change_data);
     }
-    pub fn sink_admin(&self, index: u64, request: AdminRequest, response: AdminResponse) {
-        self.broadcast(ChangeDataEvent::default());
+
+    fn sink_admin(&mut self, request: AdminRequest, mut response: AdminResponse) {
+        let err_store = match request.get_cmd_type() {
+            AdminCmdType::Split => RaftStoreError::EpochNotMatch(
+                format!("split"),
+                vec![
+                    response.mut_split().take_left(),
+                    response.mut_split().take_right(),
+                ],
+            ),
+            AdminCmdType::BatchSplit => RaftStoreError::EpochNotMatch(
+                format!("batchsplit"),
+                response.mut_splits().take_regions().into(),
+            ),
+            AdminCmdType::PrepareMerge
+            | AdminCmdType::CommitMerge
+            | AdminCmdType::RollbackMerge => {
+                RaftStoreError::EpochNotMatch(format!("merge"), vec![])
+            }
+            _ => return,
+        };
+        let err = Error::Request(err_store.into());
+        self.fail(err);
     }
 }
 
@@ -285,6 +278,7 @@ mod tests {
     use super::*;
     use engine::rocks::*;
     use futures::{Future, Stream};
+    use kvproto::errorpb::Error as ErrorHeader;
     use kvproto::metapb::Region;
     use kvproto::raft_cmdpb::{RaftCmdRequest, RaftCmdResponse, Response};
     use kvproto::raft_serverpb::RaftMessage;
@@ -303,7 +297,7 @@ mod tests {
     struct MockRouter {
         region: Region,
         engine: Arc<DB>,
-        sender: UtilSender<RaftCmdRequest>,
+        sender: UtilSender<Cmd>,
     }
     impl RaftStoreRouter for MockRouter {
         fn send_raft_msg(&self, _: RaftMessage) -> RaftStoreResult<()> {
@@ -328,7 +322,7 @@ mod tests {
                         }
                     }
                     CmdType::Snap => {
-                        snap = Some(self.engine.snapshot());
+                        snap = Some(Snapshot::new(self.engine.clone()));
                     }
                     CmdType::Delete => {
                         if !req.get_put().get_cf().is_empty() {
@@ -354,15 +348,21 @@ mod tests {
             if let Some(snap) = snap {
                 cb.invoke_read(ReadResponse {
                     response,
-                    snapshot: Some(RegionSnapshot::from_raw(
-                        self.engine.clone(),
+                    snapshot: Some(RegionSnapshot::from_snapshot(
+                        snap.into_sync(),
                         self.region.clone(),
                     )),
                 })
             } else {
-                cb.invoke_with_response(response);
+                cb.invoke_with_response(response.clone());
                 // Send write request only.
-                self.sender.send(req).unwrap();
+                self.sender
+                    .send(Cmd {
+                        index: 1,
+                        request: req,
+                        response,
+                    })
+                    .unwrap();
             }
             Ok(())
         }
@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delegate() {
+    fn test_txn() {
         let tmp = tempfile::TempDir::new().unwrap();
         let region_id = 1;
         let (sink, events) = unbounded();
@@ -401,9 +401,10 @@ mod tests {
 
         let events_wrap = Cell::new(Some(events));
         let mut check_event = |event_row: EventRow| {
-            let mut cmd = cmds.try_recv().unwrap();
-            delegate.on_data_requsts(1, cmd.take_requests().into());
-            delegate.on_data_responses(1, RaftResponseHeader::new());
+            let cmd = cmds.try_recv().unwrap();
+            let mut batch = CmdBatch::new(1);
+            batch.push(1, cmd);
+            delegate.on_batch(batch);
             let (change_data, events) = events_wrap
                 .replace(None)
                 .unwrap()
@@ -456,5 +457,109 @@ mod tests {
         row.op_type = EventRowOpType::Put;
         row.r_type = EventLogType::Commit;
         check_event(row);
+    }
+
+    #[test]
+    fn test_error() {
+        let region_id = 1;
+        let (sink, events) = unbounded();
+        let mut delegate = Delegate::new(region_id);
+        delegate.subscribe(Downstream::new(String::new(), sink));
+        let mut resolver = Resolver::new();
+        resolver.init();
+        delegate.on_region_ready(resolver);
+
+        let events_wrap = Cell::new(Some(events));
+        let receive_error = || {
+            let (change_data, events) = events_wrap
+                .replace(None)
+                .unwrap()
+                .into_future()
+                .wait()
+                .unwrap();
+            events_wrap.set(Some(events));
+            let mut change_data = change_data.unwrap();
+            assert_eq!(change_data.events.len(), 1);
+            let change_data_event = &mut change_data.events[0];
+            let event = change_data_event.event.take().unwrap();
+            match event {
+                Event_oneof_event::Error(err) => err,
+                _ => panic!("unknown event"),
+            }
+        };
+
+        let mut err_header = ErrorHeader::default();
+        err_header.set_not_leader(Default::default());
+        delegate.fail(Error::Request(err_header));
+        let err = receive_error();
+        assert!(err.has_not_leader());
+
+        let mut err_header = ErrorHeader::default();
+        err_header.set_region_not_found(Default::default());
+        delegate.fail(Error::Request(err_header));
+        let err = receive_error();
+        assert!(err.has_region_not_found());
+
+        let mut err_header = ErrorHeader::default();
+        err_header.set_epoch_not_match(Default::default());
+        delegate.fail(Error::Request(err_header));
+        let err = receive_error();
+        assert!(err.has_epoch_not_match());
+
+        // Split
+        let mut region = Region::default();
+        region.set_id(1);
+        let mut request = AdminRequest::default();
+        request.cmd_type = AdminCmdType::Split;
+        let mut response = AdminResponse::default();
+        response.mut_split().set_left(region.clone());
+        delegate.sink_admin(request, response);
+        let mut err = receive_error();
+        assert!(err.has_epoch_not_match());
+        err.take_epoch_not_match()
+            .current_regions
+            .into_iter()
+            .find(|r| r.get_id() == 1)
+            .unwrap();
+
+        let mut request = AdminRequest::default();
+        request.cmd_type = AdminCmdType::BatchSplit;
+        let mut response = AdminResponse::default();
+        response
+            .mut_splits()
+            .set_regions(vec![region.clone()].into());
+        delegate.sink_admin(request, response);
+        let mut err = receive_error();
+        assert!(err.has_epoch_not_match());
+        err.take_epoch_not_match()
+            .current_regions
+            .into_iter()
+            .find(|r| r.get_id() == 1)
+            .unwrap();
+
+        // Merge
+        let mut request = AdminRequest::default();
+        request.cmd_type = AdminCmdType::PrepareMerge;
+        let response = AdminResponse::default();
+        delegate.sink_admin(request, response);
+        let mut err = receive_error();
+        assert!(err.has_epoch_not_match());
+        assert!(err.take_epoch_not_match().current_regions.is_empty());
+
+        let mut request = AdminRequest::default();
+        request.cmd_type = AdminCmdType::CommitMerge;
+        let response = AdminResponse::default();
+        delegate.sink_admin(request, response);
+        let mut err = receive_error();
+        assert!(err.has_epoch_not_match());
+        assert!(err.take_epoch_not_match().current_regions.is_empty());
+
+        let mut request = AdminRequest::default();
+        request.cmd_type = AdminCmdType::RollbackMerge;
+        let response = AdminResponse::default();
+        delegate.sink_admin(request, response);
+        let mut err = receive_error();
+        assert!(err.has_epoch_not_match());
+        assert!(err.take_epoch_not_match().current_regions.is_empty());
     }
 }

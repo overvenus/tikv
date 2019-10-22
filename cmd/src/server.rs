@@ -45,7 +45,7 @@ pub fn run_tikv(mut config: TiKvConfig) {
     // It is okay to use the config w/o `validate()`,
     // because `initial_logger()` handles various conditions.
     initial_logger(&config);
-    tikv_util::set_panic_hook(false, &config.storage.data_dir);
+    tikv_util::set_panic_hook(true, &config.storage.data_dir);
 
     // Print version information.
     tikv::log_tikv_info();
@@ -291,13 +291,10 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
         fatal!("failed to register cdc service");
     }
     let apply_router = node.get_apply_router();
-    let cdc_ob = cdc::CdcObserver::new(cdc_scheduler, engines.clone());
+    let cdc_ob = cdc::CdcObserver::new(cdc_scheduler);
     coprocessor_host
         .registry
-        .register_admin_observer(100, Box::new(cdc_ob.clone()) as _);
-    coprocessor_host
-        .registry
-        .register_query_observer(100, Box::new(cdc_ob.clone()) as _);
+        .register_cmd_observer(100, Box::new(cdc_ob.clone()) as _);
 
     // Create region collection.
     let region_info_accessor = RegionInfoAccessor::new(&mut coprocessor_host);
@@ -344,7 +341,6 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
 
     // Start CDC.
     let cdc_endpoint = cdc::Endpoint::new(
-        cdc_ob,
         pd_client.clone(),
         cdc_worker.scheduler(),
         apply_router,

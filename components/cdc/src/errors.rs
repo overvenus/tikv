@@ -3,11 +3,12 @@
 use std::io::Error as IoError;
 use std::{error, result};
 
+use kvproto::errorpb::Error as ErrorHeader;
 use tikv::storage::kv::Error as EngineError;
 use tikv::storage::mvcc::Error as MvccError;
 use tikv::storage::txn::Error as TxnError;
 
-/// The error type for backup.
+/// The error type for cdc.
 #[derive(Debug, Fail)]
 pub enum Error {
     #[fail(display = "Other error {}", _0)]
@@ -22,6 +23,8 @@ pub enum Error {
     Txn(TxnError),
     #[fail(display = "Mvcc error {}", _0)]
     Mvcc(MvccError),
+    #[fail(display = "Request error {:?}", _0)]
+    Request(ErrorHeader),
 }
 
 macro_rules! impl_from {
@@ -46,3 +49,19 @@ impl_from! {
 }
 
 pub type Result<T> = result::Result<T, Error>;
+
+impl Error {
+    pub fn extract_error_header(self) -> ErrorHeader {
+        match self {
+            Error::Engine(EngineError::Request(e))
+            | Error::Txn(TxnError::Engine(EngineError::Request(e)))
+            | Error::Txn(TxnError::Mvcc(MvccError::Engine(EngineError::Request(e))))
+            | Error::Request(e) => e,
+            other => {
+                let mut e = ErrorHeader::default();
+                e.set_message(format!("{:?}", other));
+                e
+            }
+        }
+    }
+}

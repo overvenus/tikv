@@ -260,10 +260,6 @@ impl CoprocessorHost {
         );
     }
 
-    pub fn on_cmd_registered(&self, region: &Region) {
-        loop_ob!(region, &self.registry.cmd_observers, on_registered,)
-    }
-
     pub fn on_cmd_executed(&self, batch: &[CmdBatch]) {
         for cmd_ob in &self.registry.cmd_observers {
             cmd_ob.observer.on_batch_executed(batch)
@@ -388,7 +384,6 @@ mod tests {
     }
 
     impl CmdObserver for TestCoprocessor {
-        fn on_registered(&self, _: &mut ObserverContext<'_>) {}
         fn on_batch_executed(&self, _: &[CmdBatch]) {
             self.called.fetch_add(9, Ordering::SeqCst);
         }

@@ -33,11 +33,12 @@ use crate::import::SSTImporter;
 use crate::raftstore::coprocessor::{Cmd, CmdBatch, CoprocessorHost};
 use crate::raftstore::store::fsm::{RaftPollerBuilder, RaftRouter};
 use crate::raftstore::store::metrics::*;
-use crate::raftstore::store::msg::{Callback, PeerMsg};
+use crate::raftstore::store::msg::{Callback, PeerMsg, ReadResponse};
 use crate::raftstore::store::peer::Peer;
 use crate::raftstore::store::peer_storage::{self, write_initial_apply_state, write_peer_state};
 use crate::raftstore::store::util::check_region_epoch;
 use crate::raftstore::store::util::KeysInfoFormatter;
+use crate::raftstore::store::RegionSnapshot;
 use crate::raftstore::store::{cmd_resp, keys, util, Config};
 use crate::raftstore::{Error, Result};
 use tikv_util::escape;
@@ -2311,6 +2312,7 @@ pub enum Msg {
     RegisterCmdObserver {
         region_id: u64,
         enabled: Arc<AtomicBool>,
+        cb: Callback,
     },
     #[cfg(test)]
     Validate(u64, Box<dyn FnOnce(&ApplyDelegate) + Send>),
@@ -2687,6 +2689,7 @@ impl ApplyFsm {
         &mut self,
         apply_ctx: &mut ApplyContext,
         enabled: Arc<AtomicBool>,
+        cb: Callback,
     ) {
         assert!(!self
             .delegate
@@ -2694,7 +2697,15 @@ impl ApplyFsm {
             .as_ref()
             .map_or(false, |e| e.load(Ordering::Relaxed)));
         self.delegate.cmd_observer_enabled = Some(enabled);
-        apply_ctx.host.on_cmd_registered(&self.delegate.region);
+        let resp = ReadResponse {
+            response: Default::default(),
+            snapshot: Some(RegionSnapshot::from_raw(
+                apply_ctx.engines.kv.clone(),
+                self.delegate.region.clone(),
+            )),
+        };
+        cb.invoke_read(resp);
+
         // TODO(cdc): take cmd_observer_enabled when enabled is false.
     }
 
@@ -2719,9 +2730,13 @@ impl ApplyFsm {
                 Some(Msg::CatchUpLogs(cul)) => self.catch_up_logs_for_merge(apply_ctx, cul),
                 Some(Msg::LogsUpToDate(_)) => {}
                 Some(Msg::Snapshot(snap_task)) => self.handle_snapshot(apply_ctx, snap_task),
-                Some(Msg::RegisterCmdObserver { region_id, enabled }) => {
+                Some(Msg::RegisterCmdObserver {
+                    region_id,
+                    enabled,
+                    cb,
+                }) => {
                     assert_eq!(self.delegate.region_id(), region_id);
-                    self.handle_register_cmd_observer(apply_ctx, enabled)
+                    self.handle_register_cmd_observer(apply_ctx, enabled, cb);
                 }
                 #[cfg(test)]
                 Some(Msg::Validate(_, f)) => f(&self.delegate),
@@ -2933,10 +2948,14 @@ impl ApplyRouter {
                     );
                     return;
                 }
-                Msg::RegisterCmdObserver { region_id, .. } => {
-                    info!("target region is not found";
+                Msg::RegisterCmdObserver { region_id, cb, .. } => {
+                    warn!("target region is not found";
                             "region_id" => region_id);
-                    // TODO(cdc) return region not found error.
+                    let resp = ReadResponse {
+                        response: cmd_resp::new_error(Error::RegionNotFound(region_id)),
+                        snapshot: None,
+                    };
+                    cb.invoke_read(resp);
                     return;
                 }
                 #[cfg(test)]
@@ -3000,7 +3019,6 @@ mod tests {
 
     use crate::import::test_helpers::*;
     use crate::raftstore::store::{Config, RegionTask};
-    use tikv_util::collections::HashSet;
     use tikv_util::worker::dummy_scheduler;
 
     use super::*;
@@ -3455,7 +3473,6 @@ mod tests {
         pre_query_count: Arc<AtomicUsize>,
         post_admin_count: Arc<AtomicUsize>,
         post_query_count: Arc<AtomicUsize>,
-        cmd_regions: Arc<Mutex<HashSet<u64>>>,
         cmd_sink: Option<Arc<Mutex<Sender<CmdBatch>>>>,
     }
 
@@ -3478,13 +3495,6 @@ mod tests {
     }
 
     impl CmdObserver for ApplyObserver {
-        fn on_registered(&self, ctx: &mut ObserverContext<'_>) {
-            self.cmd_regions
-                .lock()
-                .unwrap()
-                .insert(ctx.region().get_id());
-        }
-
         fn on_batch_executed(&self, batch: &[CmdBatch]) {
             for b in batch {
                 if let Some(sink) = self.cmd_sink.as_ref() {
@@ -3781,11 +3791,16 @@ mod tests {
             .unwrap_err();
 
         // Register cmd observer to region 1.
+        let enabled = Arc::new(AtomicBool::new(true));
         router.schedule_task(
             1,
             Msg::RegisterCmdObserver {
                 region_id: 1,
-                enabled: Arc::new(AtomicBool::new(true)),
+                enabled: enabled.clone(),
+                cb: Callback::Read(Box::new(|resp: ReadResponse| {
+                    assert!(!resp.response.get_header().has_error());
+                    assert!(resp.snapshot.is_some());
+                })),
             },
         );
 
@@ -3797,7 +3812,6 @@ mod tests {
             .build();
         router.schedule_task(1, Msg::apply(Apply::new(1, 2, vec![put_entry])));
         fetch_apply_res(&rx);
-        assert!(obs.cmd_regions.lock().unwrap().contains(&1));
         let resp = capture_rx.recv_timeout(Duration::from_secs(3)).unwrap();
         assert!(!resp.get_header().has_error(), "{:?}", resp);
         assert_eq!(resp.get_responses().len(), 1);
@@ -3818,6 +3832,35 @@ mod tests {
         );
         let cmd_batch = cmdbatch_rx.recv_timeout(Duration::from_secs(3)).unwrap();
         assert_eq!(2, cmd_batch.len());
+
+        // Stop observer regoin 1.
+        enabled.store(false, Ordering::SeqCst);
+        let put_entry = EntryBuilder::new(5, 2)
+            .put(b"k2", b"v2")
+            .epoch(1, 3)
+            .build();
+        router.schedule_task(1, Msg::apply(Apply::new(1, 2, vec![put_entry])));
+        // Must not receive new cmd.
+        cmdbatch_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap_err();
+
+        // Must response a RegionNotFound error.
+        router.schedule_task(
+            2,
+            Msg::RegisterCmdObserver {
+                region_id: 2,
+                enabled: enabled.clone(),
+                cb: Callback::Read(Box::new(|resp: ReadResponse| {
+                    assert!(resp
+                        .response
+                        .get_header()
+                        .get_error()
+                        .has_region_not_found());
+                    assert!(resp.snapshot.is_none());
+                })),
+            },
+        );
 
         system.shutdown();
     }
@@ -3964,6 +4007,7 @@ mod tests {
             Msg::RegisterCmdObserver {
                 region_id: 1,
                 enabled: Arc::new(AtomicBool::new(true)),
+                cb: Callback::Read(Box::new(|_| ())),
             },
         );
 

@@ -7,7 +7,9 @@ use futures::future::{lazy, Future};
 use kvproto::cdcpb::*;
 use pd_client::PdClient;
 use resolved_ts::Resolver;
+use tikv::raftstore::coprocessor::*;
 use tikv::raftstore::store::fsm::{ApplyRouter, ApplyTask};
+use tikv::raftstore::store::msg::{Callback, ReadResponse};
 use tikv::raftstore::store::RegionSnapshot;
 use tikv_util::collections::HashMap;
 use tikv_util::timer::SteadyTimer;
@@ -16,9 +18,7 @@ use tokio_threadpool::{Builder, ThreadPool};
 
 use crate::delegate::{Delegate, Downstream};
 use crate::lock_scanner::LockScanner;
-use crate::CdcObserver;
-use crate::RawEvent;
-use crate::Result;
+use crate::{Error, Result};
 
 pub enum Task {
     Register {
@@ -29,7 +29,9 @@ pub enum Task {
         region_id: u64,
         peer: Result<String>,
     },
-    RawEvent(RawEvent),
+    MultiBatch {
+        multi: Vec<CmdBatch>,
+    },
     MinTS {
         min_ts: u64,
     },
@@ -60,7 +62,6 @@ impl fmt::Debug for Task {
                 .field("deregister region_id", region_id)
                 .field("peer", peer)
                 .finish(),
-            Task::RawEvent(_) => de.field("raw_event", &"...").finish(),
             Task::MinTS { ref min_ts } => de.field("min_ts", min_ts).finish(),
             Task::ResolverReady { ref region_id, .. } => de.field("region_id", region_id).finish(),
             Task::LoadLocks {
@@ -71,13 +72,13 @@ impl fmt::Debug for Task {
                     &region_snapshot.get_region().get_id(),
                 )
                 .finish(),
+            Task::MultiBatch { multi } => de.field("multibatch", &multi.len()).finish(),
         }
     }
 }
 
 pub struct Endpoint {
     capture_regions: HashMap<u64, (Delegate, Arc<AtomicBool>)>,
-    observer: CdcObserver,
     scheduler: Scheduler<Task>,
     apply_router: ApplyRouter,
 
@@ -89,7 +90,6 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub fn new(
-        observer: CdcObserver,
         pd_client: Arc<dyn PdClient>,
         scheduler: Scheduler<Task>,
         apply_router: ApplyRouter,
@@ -97,7 +97,6 @@ impl Endpoint {
         let lock_workers = Builder::new().name_prefix("cdcwkr").pool_size(4).build();
         let ep = Endpoint {
             capture_regions: HashMap::default(),
-            observer,
             scheduler,
             pd_client,
             timer: SteadyTimer::default(),
@@ -115,20 +114,18 @@ impl Endpoint {
                     "region_id" => region_id,
                     "peer" => %p);
                 // The peer wants to deregister
-                self.capture_regions
-                    .get_mut(&region_id)
-                    .unwrap()
-                    .0
-                    .unsubscribe(p);
+                if let Some((delegate, _)) = self.capture_regions.get_mut(&region_id) {
+                    delegate.unsubscribe(p);
+                }
             }
             Err(e) => {
                 // Something went wrong, deregister all downstreams.
                 info!("cdc deregister region";
                     "region_id" => region_id,
                     "error" => %e);
-                self.observer.deregister_region(region_id);
-                if let Some((_, enabled)) = self.capture_regions.remove(&region_id) {
+                if let Some((mut delegate, enabled)) = self.capture_regions.remove(&region_id) {
                     enabled.store(false, Ordering::Relaxed);
+                    delegate.fail(e);
                 }
             }
         }
@@ -146,55 +143,40 @@ impl Endpoint {
 
         delegate.0.subscribe(downstream);
         if let Some(e) = enabled {
-            self.observer.register_region(region_id);
+            let scheduler = self.scheduler.clone();
             self.apply_router.schedule_task(
                 region_id,
                 ApplyTask::RegisterCmdObserver {
                     region_id,
                     enabled: e,
+                    cb: Callback::Read(Box::new(move |mut resp: ReadResponse| {
+                        if let Some(region_snapshot) = resp.snapshot {
+                            let load_locks = Task::LoadLocks { region_snapshot };
+                            info!("schedule load locks"; "region_id" => region_id);
+                            scheduler.schedule(load_locks).unwrap();
+                        } else {
+                            assert!(
+                                resp.response.get_header().has_error(),
+                                "no snashot and no error? {:?}",
+                                resp.response
+                            );
+                            let err = resp.response.take_header().take_error();
+                            let deregister = Task::Deregister {
+                                region_id,
+                                peer: Err(Error::Request(err)),
+                            };
+                            scheduler.schedule(deregister).unwrap();
+                        }
+                    })),
                 },
             );
         }
     }
 
-    pub fn on_raw_event(&mut self, event: RawEvent) {
-        match event {
-            RawEvent::DataRequest {
-                region_id,
-                index,
-                requests,
-            } => {
-                if let Some((delegate, _)) = self.capture_regions.get_mut(&region_id) {
-                    delegate.on_data_requsts(index, requests)
-                }
-            }
-            RawEvent::DataResponse {
-                region_id,
-                index,
-                header,
-            } => {
-                if let Some((delegate, _)) = self.capture_regions.get_mut(&region_id) {
-                    delegate.on_data_responses(index, header)
-                }
-            }
-            RawEvent::AdminRequest {
-                region_id,
-                index,
-                request,
-            } => {
-                if let Some((delegate, _)) = self.capture_regions.get_mut(&region_id) {
-                    delegate.on_admin_requst(index, request)
-                }
-            }
-            RawEvent::AdminResponse {
-                region_id,
-                index,
-                header,
-                response,
-            } => {
-                if let Some((delegate, _)) = self.capture_regions.get_mut(&region_id) {
-                    delegate.on_admin_response(index, header, response)
-                }
+    pub fn on_multi_batch(&mut self, multi: Vec<CmdBatch>) {
+        for batch in multi {
+            if let Some((delegate, _)) = self.capture_regions.get_mut(&batch.region_id) {
+                delegate.on_batch(batch);
             }
         }
     }
@@ -275,7 +257,6 @@ impl Runnable<Task> for Endpoint {
     fn run(&mut self, task: Task) {
         debug!("run cdc task"; "task" => %task);
         match task {
-            Task::RawEvent(event) => self.on_raw_event(event),
             Task::MinTS { min_ts } => self.on_min_ts(min_ts),
             Task::Register {
                 request,
@@ -287,6 +268,7 @@ impl Runnable<Task> for Endpoint {
                 resolver,
             } => self.on_region_ready(region_id, resolver),
             Task::Deregister { region_id, peer } => self.on_deregister(region_id, peer),
+            Task::MultiBatch { multi } => self.on_multi_batch(multi),
         }
     }
 }

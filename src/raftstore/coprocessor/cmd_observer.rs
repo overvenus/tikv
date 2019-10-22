@@ -53,8 +53,6 @@ impl CmdBatch {
 }
 
 pub trait CmdObserver: Coprocessor {
-    /// Hook to call after region is registerd to observe cmd.
-    fn on_registered(&self, ctx: &mut ObserverContext<'_>);
     /// Hook to call after applying write request.
     fn on_batch_executed(&self, batch: &[CmdBatch]);
 }
