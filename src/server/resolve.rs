@@ -257,21 +257,21 @@ mod tests {
     #[test]
     fn test_resolve_store_state_up() {
         let store = new_store(STORE_ADDR, metapb::StoreState::Up);
-        let mut runner = new_runner(store);
+        let runner = new_runner(store);
         assert!(runner.get_address(0).is_ok());
     }
 
     #[test]
     fn test_resolve_store_state_offline() {
         let store = new_store(STORE_ADDR, metapb::StoreState::Offline);
-        let mut runner = new_runner(store);
+        let runner = new_runner(store);
         assert!(runner.get_address(0).is_ok());
     }
 
     #[test]
     fn test_resolve_store_state_tombstone() {
         let store = new_store(STORE_ADDR, metapb::StoreState::Tombstone);
-        let mut runner = new_runner(store);
+        let runner = new_runner(store);
         assert!(runner.get_address(0).is_err());
     }
 
@@ -279,7 +279,7 @@ mod tests {
     fn test_resolve_store_peer_addr() {
         let mut store = new_store("127.0.0.1:12345", metapb::StoreState::Up);
         store.set_peer_address("127.0.0.1:22345".to_string());
-        let mut runner = new_runner(store.clone());
+        let runner = new_runner(store.clone());
         assert_eq!(
             runner.get_address(0).unwrap(),
             "127.0.0.1:22345".to_string()

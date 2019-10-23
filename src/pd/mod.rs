@@ -182,7 +182,6 @@ const REQUEST_TIMEOUT: u64 = 2; // 2s
 
 /// Takes the peer address (for sending raft messages) from a store.
 pub fn take_peer_address(store: &mut metapb::Store) -> String {
-    println!("{}, {}", store.get_peer_address(), store.get_address());
     if !store.get_peer_address().is_empty() {
         store.take_peer_address()
     } else {

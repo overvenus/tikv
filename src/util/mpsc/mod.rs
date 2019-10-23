@@ -380,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_unbounded() {
         let (tx, rx) = super::unbounded::<u64>();
         tx.try_send(1).unwrap();
@@ -441,6 +442,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_loose() {
         let (tx, rx) = super::loose_bounded(10);
         tx.try_send(1).unwrap();
