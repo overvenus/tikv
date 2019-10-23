@@ -18,7 +18,7 @@ use engine::Engines;
 use engine::{util as engine_util, Mutable, Peekable};
 use engine::{ALL_CFS, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE};
 use kvproto::import_sstpb::SstMeta;
-use kvproto::metapb::{Peer as PeerMeta, Region};
+use kvproto::metapb::{Peer as PeerMeta, Region, RegionEpoch};
 use kvproto::raft_cmdpb::{
     AdminCmdType, AdminRequest, AdminResponse, ChangePeerRequest, CmdType, CommitMergeRequest,
     RaftCmdRequest, RaftCmdResponse, Request, Response,
@@ -36,8 +36,8 @@ use crate::raftstore::store::metrics::*;
 use crate::raftstore::store::msg::{Callback, PeerMsg, ReadResponse};
 use crate::raftstore::store::peer::Peer;
 use crate::raftstore::store::peer_storage::{self, write_initial_apply_state, write_peer_state};
-use crate::raftstore::store::util::check_region_epoch;
 use crate::raftstore::store::util::KeysInfoFormatter;
+use crate::raftstore::store::util::{check_region_epoch, compare_region_epoch};
 use crate::raftstore::store::RegionSnapshot;
 use crate::raftstore::store::{cmd_resp, keys, util, Config};
 use crate::raftstore::{Error, Result};
@@ -2311,6 +2311,7 @@ pub enum Msg {
     Snapshot(GenSnapTask),
     RegisterCmdObserver {
         region_id: u64,
+        region_epoch: RegionEpoch,
         enabled: Arc<AtomicBool>,
         cb: Callback,
     },
@@ -2688,6 +2689,7 @@ impl ApplyFsm {
     fn handle_register_cmd_observer(
         &mut self,
         apply_ctx: &mut ApplyContext,
+        region_epoch: RegionEpoch,
         enabled: Arc<AtomicBool>,
         cb: Callback,
     ) {
@@ -2697,12 +2699,24 @@ impl ApplyFsm {
             .as_ref()
             .map_or(false, |e| e.load(Ordering::Relaxed)));
         self.delegate.cmd_observer_enabled = Some(enabled);
-        let resp = ReadResponse {
-            response: Default::default(),
-            snapshot: Some(RegionSnapshot::from_raw(
-                apply_ctx.engines.kv.clone(),
-                self.delegate.region.clone(),
-            )),
+        let resp = match compare_region_epoch(
+            &region_epoch,
+            &self.delegate.region,
+            false, /* check_conf_ver */
+            true,  /* check_ver */
+            true,  /* include_region */
+        ) {
+            Ok(()) => ReadResponse {
+                response: Default::default(),
+                snapshot: Some(RegionSnapshot::from_raw(
+                    apply_ctx.engines.kv.clone(),
+                    self.delegate.region.clone(),
+                )),
+            },
+            Err(e) => ReadResponse {
+                response: cmd_resp::new_error(e),
+                snapshot: None,
+            },
         };
         cb.invoke_read(resp);
 
@@ -2732,11 +2746,12 @@ impl ApplyFsm {
                 Some(Msg::Snapshot(snap_task)) => self.handle_snapshot(apply_ctx, snap_task),
                 Some(Msg::RegisterCmdObserver {
                     region_id,
+                    region_epoch,
                     enabled,
                     cb,
                 }) => {
                     assert_eq!(self.delegate.region_id(), region_id);
-                    self.handle_register_cmd_observer(apply_ctx, enabled, cb);
+                    self.handle_register_cmd_observer(apply_ctx, region_epoch, enabled, cb);
                 }
                 #[cfg(test)]
                 Some(Msg::Validate(_, f)) => f(&self.delegate),
@@ -3775,6 +3790,7 @@ mod tests {
         reg.region.set_end_key(b"k5".to_vec());
         reg.region.mut_region_epoch().set_conf_ver(1);
         reg.region.mut_region_epoch().set_version(3);
+        let region_epoch = reg.region.get_region_epoch().clone();
         router.schedule_task(1, Msg::Registration(reg));
 
         let put_entry = EntryBuilder::new(1, 1)
@@ -3796,6 +3812,7 @@ mod tests {
             1,
             Msg::RegisterCmdObserver {
                 region_id: 1,
+                region_epoch: region_epoch.clone(),
                 enabled: enabled.clone(),
                 cb: Callback::Read(Box::new(|resp: ReadResponse| {
                     assert!(!resp.response.get_header().has_error());
@@ -3850,6 +3867,7 @@ mod tests {
             2,
             Msg::RegisterCmdObserver {
                 region_id: 2,
+                region_epoch,
                 enabled: enabled.clone(),
                 cb: Callback::Read(Box::new(|resp: ReadResponse| {
                     assert!(resp
@@ -3976,6 +3994,7 @@ mod tests {
         reg.region.set_id(1);
         reg.region.set_end_key(b"k5".to_vec());
         reg.region.mut_region_epoch().set_version(3);
+        let region_epoch = reg.region.get_region_epoch().clone();
         let peers = vec![new_peer(2, 3), new_peer(4, 5), new_learner_peer(6, 7)];
         reg.region.set_peers(peers.clone().into());
         let (tx, _rx) = mpsc::channel();
@@ -4002,12 +4021,17 @@ mod tests {
         system.spawn("test-split".to_owned(), builder);
 
         router.schedule_task(1, Msg::Registration(reg.clone()));
+        let enabled = Arc::new(AtomicBool::new(true));
         router.schedule_task(
             1,
             Msg::RegisterCmdObserver {
                 region_id: 1,
-                enabled: Arc::new(AtomicBool::new(true)),
-                cb: Callback::Read(Box::new(|_| ())),
+                region_epoch: region_epoch.clone(),
+                enabled: enabled.clone(),
+                cb: Callback::Read(Box::new(|resp: ReadResponse| {
+                    assert!(!resp.response.get_header().has_error(), "{:?}", resp);
+                    assert!(resp.snapshot.is_some());
+                })),
             },
         );
 
@@ -4143,6 +4167,27 @@ mod tests {
         checker.check(b"k3", b"k31", 1, &[3, 5, 7], false);
         checker.check(b"k31", b"k32", 24, &[25, 26, 27], true);
         checker.check(b"k32", b"k4", 28, &[29, 30, 31], true);
+
+        let (tx, rx) = mpsc::channel();
+        enabled.store(false, Ordering::SeqCst);
+        router.schedule_task(
+            1,
+            Msg::RegisterCmdObserver {
+                region_id: 1,
+                region_epoch: region_epoch.clone(),
+                enabled: Arc::new(AtomicBool::new(true)),
+                cb: Callback::Read(Box::new(move |resp: ReadResponse| {
+                    assert!(
+                        resp.response.get_header().get_error().has_epoch_not_match(),
+                        "{:?}",
+                        resp
+                    );
+                    assert!(resp.snapshot.is_none());
+                    tx.send(()).unwrap();
+                })),
+            },
+        );
+        rx.recv_timeout(Duration::from_millis(500)).unwrap();
     }
 
     #[test]

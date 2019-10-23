@@ -295,6 +295,9 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     coprocessor_host
         .registry
         .register_cmd_observer(100, Box::new(cdc_ob.clone()) as _);
+    coprocessor_host
+        .registry
+        .register_role_observer(100, Box::new(cdc_ob.clone()) as _);
 
     // Create region collection.
     let region_info_accessor = RegionInfoAccessor::new(&mut coprocessor_host);
@@ -340,7 +343,12 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
     }
 
     // Start CDC.
-    let cdc_endpoint = cdc::Endpoint::new(pd_client.clone(), cdc_worker.scheduler(), apply_router);
+    let cdc_endpoint = cdc::Endpoint::new(
+        pd_client.clone(),
+        cdc_worker.scheduler(),
+        apply_router,
+        cdc_ob,
+    );
     cdc_worker
         .start(cdc_endpoint)
         .unwrap_or_else(|e| fatal!("failed to start cdc: {}", e));

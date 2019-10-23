@@ -55,14 +55,17 @@ struct ServerMeta {
     worker: Worker<ResolveTask>,
 }
 
+type PendingServices = Vec<Box<dyn Fn() -> Service>>;
+type CopHooks = Vec<Box<dyn Fn(&mut CoprocessorHost)>>;
+
 pub struct ServerCluster {
     metas: HashMap<u64, ServerMeta>,
     addrs: HashMap<u64, String>,
     pub storages: HashMap<u64, SimulateEngine>,
     pub region_info_accessors: HashMap<u64, RegionInfoAccessor>,
     pub importers: HashMap<u64, Arc<SSTImporter>>,
-    pub pending_services: HashMap<u64, Vec<Box<dyn Fn() -> Service>>>,
-    pub coprocessor_hooks: HashMap<u64, Vec<Box<dyn Fn(&mut CoprocessorHost)>>>,
+    pub pending_services: HashMap<u64, PendingServices>,
+    pub coprocessor_hooks: HashMap<u64, CopHooks>,
     snap_paths: HashMap<u64, TempDir>,
     pd_client: Arc<TestPdClient>,
     raft_client: RaftClient<RaftStoreBlackHole>,

@@ -262,7 +262,7 @@ impl Delegate {
     }
 
     fn sink_admin(&mut self, request: AdminRequest, mut response: AdminResponse) {
-        let err_store = match request.get_cmd_type() {
+        let store_err = match request.get_cmd_type() {
             AdminCmdType::Split => RaftStoreError::EpochNotMatch(
                 "split".to_owned(),
                 vec![
@@ -281,7 +281,7 @@ impl Delegate {
             }
             _ => return,
         };
-        let err = Error::Request(err_store.into());
+        let err = Error::Request(store_err.into());
         self.fail(err);
     }
 }

@@ -82,9 +82,7 @@ impl Resolver {
     /// Requirement of min_ts:
     ///   1. later commit_ts must be great than the min_ts.
     pub fn resolve(&mut self, min_ts: u64) -> Option<u64> {
-        if self.resolved_ts.is_none() {
-            return None;
-        }
+        self.resolved_ts?;
         let min_start_ts = *self.locks.keys().next().unwrap_or(&min_ts);
         let new_resolved_ts = cmp::min(min_start_ts, min_ts);
         if let Some(old_resolved_ts) = self.resolved_ts {

@@ -17,7 +17,7 @@ use tokio_threadpool::{Builder, ThreadPool};
 
 use crate::delegate::{Delegate, Downstream};
 use crate::lock_scanner::LockScanner;
-use crate::{Error, Result};
+use crate::{CdcObserver, Error, Result};
 
 pub enum Task {
     Register {
@@ -83,6 +83,7 @@ pub struct Endpoint {
     capture_regions: HashMap<u64, Delegate>,
     scheduler: Scheduler<Task>,
     apply_router: ApplyRouter,
+    observer: CdcObserver,
 
     pd_client: Arc<dyn PdClient>,
     timer: SteadyTimer,
@@ -96,11 +97,13 @@ impl Endpoint {
         pd_client: Arc<dyn PdClient>,
         scheduler: Scheduler<Task>,
         apply_router: ApplyRouter,
+        observer: CdcObserver,
     ) -> Endpoint {
         let lock_workers = Builder::new().name_prefix("cdcwkr").pool_size(4).build();
         let ep = Endpoint {
             capture_regions: HashMap::default(),
             scheduler,
+            observer,
             pd_client,
             timer: SteadyTimer::default(),
             lock_workers,
@@ -140,10 +143,12 @@ impl Endpoint {
         }
         if is_last {
             self.capture_regions.remove(&region_id);
+            // Unsubscribe region role change events.
+            self.observer.unsubscribe_region(region_id);
         }
     }
 
-    pub fn on_register(&mut self, request: ChangeDataRequest, downstream: Downstream) {
+    pub fn on_register(&mut self, mut request: ChangeDataRequest, downstream: Downstream) {
         let region_id = request.region_id;
         info!("cdc register region"; "region_id" => region_id);
         let mut enabled = None;
@@ -154,13 +159,17 @@ impl Endpoint {
         });
 
         delegate.subscribe(downstream);
-        if let Some(e) = enabled {
+        if let Some(enabled) = enabled {
+            // Subscribe region role change events.
+            self.observer.subscribe_region(region_id);
+
             let scheduler = self.scheduler.clone();
             self.apply_router.schedule_task(
                 region_id,
                 ApplyTask::RegisterCmdObserver {
                     region_id,
-                    enabled: e,
+                    region_epoch: request.take_region_epoch(),
+                    enabled,
                     cb: Callback::Read(Box::new(move |mut resp: ReadResponse| {
                         if let Some(region_snapshot) = resp.snapshot {
                             let load_locks = Task::LoadLocks { region_snapshot };
