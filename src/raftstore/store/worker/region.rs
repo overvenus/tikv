@@ -863,6 +863,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_pending_applies() {
         let temp_dir = TempDir::new("test_pending_applies").unwrap();
         let mut cf_opts = ColumnFamilyOptions::new();

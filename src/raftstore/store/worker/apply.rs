@@ -37,7 +37,6 @@ use protobuf::RepeatedField;
 use raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType};
 use rocksdb::rocksdb_options::WriteOptions;
 use rocksdb::{WriteBatch, DB};
-use uuid::Uuid;
 
 use import::SSTImporter;
 use raft::NO_LIMIT;
@@ -50,7 +49,7 @@ use raftstore::store::peer_storage::{self, write_initial_apply_state, write_peer
 use raftstore::store::util::check_region_epoch;
 use raftstore::store::{cmd_resp, keys, util, Engines, Store};
 use raftstore::{Error, Result};
-use storage::{ALL_CFS, CF_DEFAULT, CF_RAFT, CF_WRITE};
+use storage::{ALL_CFS, CF_DEFAULT, CF_RAFT};
 use util::collections::HashMap;
 use util::time::{duration_to_sec, Instant, SlowTimer};
 use util::worker::Runnable;
@@ -2003,38 +2002,6 @@ pub fn get_change_peer_cmd(msg: &RaftCmdRequest) -> Option<&ChangePeerRequest> {
     Some(req.get_change_peer())
 }
 
-fn check_sst_for_ingestion(sst: &SSTMeta, region: &Region) -> Result<()> {
-    let uuid = sst.get_uuid();
-    if let Err(e) = Uuid::from_bytes(uuid) {
-        return Err(box_err!("invalid uuid {:?}: {:?}", uuid, e));
-    }
-
-    let cf_name = sst.get_cf_name();
-    if cf_name != CF_DEFAULT && cf_name != CF_WRITE {
-        return Err(box_err!("invalid cf name {}", cf_name));
-    }
-
-    let region_id = sst.get_region_id();
-    if region_id != region.get_id() {
-        return Err(Error::RegionNotFound(region_id));
-    }
-
-    let epoch = sst.get_region_epoch();
-    let region_epoch = region.get_region_epoch();
-    if epoch.get_conf_ver() != region_epoch.get_conf_ver()
-        || epoch.get_version() != region_epoch.get_version()
-    {
-        let error = format!("{:?} != {:?}", epoch, region_epoch);
-        return Err(Error::StaleEpoch(error, vec![region.clone()]));
-    }
-
-    let range = sst.get_range();
-    util::check_key_in_region(range.get_start(), region)?;
-    util::check_key_in_region(range.get_end(), region)?;
-
-    Ok(())
-}
-
 // Consistency Check
 impl ApplyDelegate {
     fn exec_compute_hash(
@@ -2672,7 +2639,7 @@ mod tests {
 
     use super::*;
     use import::test_helpers::*;
-    use storage::CF_LOCK;
+    use storage::{CF_LOCK, CF_WRITE};
     use util::collections::HashMap;
 
     pub fn create_tmp_engine(path: &str) -> (TempDir, Engines) {
@@ -3272,50 +3239,6 @@ mod tests {
         assert_eq!(delegate.apply_state.get_applied_index(), index as u64);
         assert_eq!(obs.pre_query_count.load(Ordering::SeqCst), index);
         assert_eq!(obs.post_query_count.load(Ordering::SeqCst), index);
-    }
-
-    #[test]
-    fn test_check_sst_for_ingestion() {
-        let mut sst = SSTMeta::new();
-        let mut region = Region::new();
-
-        // Check uuid and cf name
-        assert!(check_sst_for_ingestion(&sst, &region).is_err());
-        sst.set_uuid(Uuid::new_v4().as_bytes().to_vec());
-        sst.set_cf_name(CF_DEFAULT.to_owned());
-        check_sst_for_ingestion(&sst, &region).unwrap();
-        sst.set_cf_name("test".to_owned());
-        assert!(check_sst_for_ingestion(&sst, &region).is_err());
-        sst.set_cf_name(CF_WRITE.to_owned());
-        check_sst_for_ingestion(&sst, &region).unwrap();
-
-        // Check region id
-        region.set_id(1);
-        sst.set_region_id(2);
-        assert!(check_sst_for_ingestion(&sst, &region).is_err());
-        sst.set_region_id(1);
-        check_sst_for_ingestion(&sst, &region).unwrap();
-
-        // Check region epoch
-        region.mut_region_epoch().set_conf_ver(1);
-        assert!(check_sst_for_ingestion(&sst, &region).is_err());
-        sst.mut_region_epoch().set_conf_ver(1);
-        check_sst_for_ingestion(&sst, &region).unwrap();
-        region.mut_region_epoch().set_version(1);
-        assert!(check_sst_for_ingestion(&sst, &region).is_err());
-        sst.mut_region_epoch().set_version(1);
-        check_sst_for_ingestion(&sst, &region).unwrap();
-
-        // Check region range
-        region.set_start_key(vec![2]);
-        region.set_end_key(vec![8]);
-        sst.mut_range().set_start(vec![1]);
-        sst.mut_range().set_end(vec![8]);
-        assert!(check_sst_for_ingestion(&sst, &region).is_err());
-        sst.mut_range().set_start(vec![2]);
-        assert!(check_sst_for_ingestion(&sst, &region).is_err());
-        sst.mut_range().set_end(vec![7]);
-        check_sst_for_ingestion(&sst, &region).unwrap();
     }
 
     #[test]
