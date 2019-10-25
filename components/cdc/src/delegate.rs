@@ -3,9 +3,11 @@ use std::sync::Arc;
 
 use futures::sync::mpsc::*;
 use kvproto::cdcpb::*;
+use kvproto::metapb::{Region, RegionEpoch};
 use kvproto::raft_cmdpb::{AdminCmdType, AdminRequest, AdminResponse, CmdType, Request};
 use resolved_ts::Resolver;
 use tikv::raftstore::coprocessor::{Cmd, CmdBatch};
+use tikv::raftstore::store::util::compare_region_epoch;
 use tikv::raftstore::Error as RaftStoreError;
 use tikv::storage::mvcc::{Lock, LockType, Write, WriteType};
 use tikv::storage::Key;
@@ -14,24 +16,53 @@ use tikv_util::collections::HashMap;
 use crate::Error;
 
 pub struct Downstream {
+    // TODO: include cdc request.
+    // TODO: make ID a concrete type.
     pub id: usize,
     // The IP address of downstream.
     peer: String,
+    region_epoch: RegionEpoch,
     sink: UnboundedSender<ChangeDataEvent>,
 }
 
 impl Downstream {
-    pub fn new(id: usize, peer: String, sink: UnboundedSender<ChangeDataEvent>) -> Downstream {
-        Downstream { id, peer, sink }
+    pub fn new(
+        id: usize,
+        peer: String,
+        region_epoch: RegionEpoch,
+        sink: UnboundedSender<ChangeDataEvent>,
+    ) -> Downstream {
+        Downstream {
+            id,
+            peer,
+            sink,
+            region_epoch,
+        }
     }
+
+    fn sink(&self, change_data: ChangeDataEvent) {
+        if let Err(e) = self.sink.unbounded_send(change_data) {
+            info!("send event failed";
+                "downstream" => %self.peer,
+                "change_data" => ?e.into_inner());
+        }
+    }
+}
+
+#[derive(Default)]
+struct Pending {
+    multi_batch: Vec<CmdBatch>,
+    downstreams: Vec<Downstream>,
 }
 
 pub struct Delegate {
     pub region_id: u64,
+    region: Option<Region>,
     pub downstreams: Vec<Downstream>,
     pub resolver: Option<Resolver>,
-    initial_buffer: Option<Vec<CmdBatch>>,
+    pending: Option<Pending>,
     enabled: Arc<AtomicBool>,
+    failed: bool,
 }
 
 impl Delegate {
@@ -40,8 +71,10 @@ impl Delegate {
             region_id,
             downstreams: Vec::new(),
             resolver: None,
-            initial_buffer: Some(Vec::new()),
+            region: None,
+            pending: Some(Pending::default()),
             enabled: Arc::new(AtomicBool::new(true)),
+            failed: false,
         }
     }
 
@@ -50,11 +83,40 @@ impl Delegate {
     }
 
     pub fn subscribe(&mut self, downstream: Downstream) {
-        self.downstreams.push(downstream);
+        if let Some(region) = self.region.as_ref() {
+            if let Err(e) = compare_region_epoch(
+                &downstream.region_epoch,
+                region,
+                false, /* check_conf_ver */
+                true,  /* check_ver */
+                true,  /* include_region */
+            ) {
+                let err = Error::Request(e.into());
+                let change_data_error = self.error_event(err);
+                downstream.sink(change_data_error);
+                return;
+            }
+            self.downstreams.push(downstream);
+        } else {
+            self.pending.as_mut().unwrap().downstreams.push(downstream);
+        }
     }
 
-    pub fn unsubscribe(&mut self, id: usize) -> bool {
-        self.downstreams.retain(|d| d.id != id);
+    pub fn unsubscribe(&mut self, id: usize, err: Option<Error>) -> bool {
+        let change_data_error = err.map(|err| self.error_event(err));
+        let downstreams = if self.pending.is_some() {
+            &mut self.pending.as_mut().unwrap().downstreams
+        } else {
+            &mut self.downstreams
+        };
+        downstreams.retain(|d| {
+            if d.id == id {
+                if let Some(change_data_error) = change_data_error.clone() {
+                    d.sink(change_data_error);
+                }
+            }
+            d.id != id
+        });
         let is_last = self.downstreams.is_empty();
         if is_last {
             self.enabled.store(false, Ordering::Relaxed);
@@ -62,10 +124,7 @@ impl Delegate {
         is_last
     }
 
-    pub fn fail(&mut self, err: Error) {
-        // Stop observe further events.
-        self.enabled.store(false, Ordering::Relaxed);
-
+    fn error_event(&self, err: Error) -> ChangeDataEvent {
         let mut change_data_event = Event::new();
         let mut cdc_err = EventError::default();
         let mut err = err.extract_error_header();
@@ -84,33 +143,54 @@ impl Delegate {
                 self.region_id, err
             );
         }
-        info!("region met error";
-            "region_id" => self.region_id, "error" => ?cdc_err);
         change_data_event.event = Some(Event_oneof_event::Error(cdc_err));
         change_data_event.region_id = self.region_id;
         let mut change_data = ChangeDataEvent::new();
         change_data.mut_events().push(change_data_event);
+        change_data
+    }
+
+    pub fn fail(&mut self, err: Error) {
+        // Stop observe further events.
+        self.enabled.store(false, Ordering::Relaxed);
+
+        info!("region met error";
+            "region_id" => self.region_id, "error" => ?err);
+        let change_data = self.error_event(err);
         self.broadcast(change_data);
+
+        // Mark this delegate has failed.
+        self.failed = true;
+    }
+
+    pub fn has_failed(&self) -> bool {
+        self.failed
     }
 
     fn broadcast(&self, change_data: ChangeDataEvent) {
-        for d in &self.downstreams {
-            if d.sink.unbounded_send(change_data.clone()).is_err() {
-                info!("send event failed";
-                        "downstream" => %d.peer,
-                        "change_data" => ?change_data);
-            }
+        let downstreams = if self.pending.is_some() {
+            &self.pending.as_ref().unwrap().downstreams
+        } else {
+            &self.downstreams
+        };
+        for d in downstreams {
+            d.sink(change_data.clone());
         }
     }
 
-    pub fn on_region_ready(&mut self, resolver: Resolver) {
+    pub fn on_region_ready(&mut self, resolver: Resolver, region: Region) {
         assert!(
             self.resolver.is_none(),
             "region resolver should not be ready"
         );
         self.resolver = Some(resolver);
-        if let Some(multi) = self.initial_buffer.take() {
-            for batch in multi {
+        self.region = Some(region);
+        if let Some(pending) = self.pending.take() {
+            // Re-subscribe pending downstreams.
+            for downstream in pending.downstreams {
+                self.subscribe(downstream);
+            }
+            for batch in pending.multi_batch {
                 self.on_batch(batch);
             }
         }
@@ -139,6 +219,10 @@ impl Delegate {
     }
 
     pub fn on_batch(&mut self, batch: CmdBatch) {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.multi_batch.push(batch);
+            return;
+        }
         for cmd in batch.into_iter(self.region_id) {
             let Cmd {
                 index,
@@ -392,16 +476,25 @@ mod tests {
     fn test_txn() {
         let tmp = tempfile::TempDir::new().unwrap();
         let region_id = 1;
-        let (sink, events) = unbounded();
-        let mut delegate = Delegate::new(region_id);
-        delegate.subscribe(Downstream::new(1, String::new(), sink));
-        let mut resolver = Resolver::new();
-        resolver.init();
-        delegate.on_region_ready(resolver);
-
-        let mut region = Region::new();
+        let mut region = Region::default();
         region.set_id(region_id);
         region.mut_peers().push(Default::default());
+        region.mut_region_epoch().set_version(2);
+        region.mut_region_epoch().set_conf_ver(2);
+        let region_epoch = region.get_region_epoch().clone();
+
+        let (sink, events) = unbounded();
+        let mut delegate = Delegate::new(region_id);
+        delegate.subscribe(Downstream::new(
+            1,
+            String::new(),
+            region_epoch.clone(),
+            sink,
+        ));
+        let mut resolver = Resolver::new();
+        resolver.init();
+        delegate.on_region_ready(resolver, region.clone());
+
         let engine = Arc::new(
             util::new_engine(tmp.path().to_str().unwrap(), None, engine::ALL_CFS, None).unwrap(),
         );
@@ -475,14 +568,26 @@ mod tests {
     #[test]
     fn test_error() {
         let region_id = 1;
+        let mut region = Region::default();
+        region.set_id(region_id);
+        region.mut_peers().push(Default::default());
+        region.mut_region_epoch().set_version(2);
+        region.mut_region_epoch().set_conf_ver(2);
+        let region_epoch = region.get_region_epoch().clone();
+
         let (sink, events) = unbounded();
         let mut delegate = Delegate::new(region_id);
-        delegate.subscribe(Downstream::new(1, String::new(), sink));
+        delegate.subscribe(Downstream::new(
+            1,
+            String::new(),
+            region_epoch.clone(),
+            sink,
+        ));
         let enabled = delegate.enabled();
         assert!(enabled.load(Ordering::Relaxed));
         let mut resolver = Resolver::new();
         resolver.init();
-        delegate.on_region_ready(resolver);
+        delegate.on_region_ready(resolver, region);
 
         let events_wrap = Cell::new(Some(events));
         let receive_error = || {

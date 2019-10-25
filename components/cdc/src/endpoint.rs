@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use futures::future::{lazy, Future};
 use kvproto::cdcpb::*;
+use kvproto::metapb::Region;
 use pd_client::PdClient;
 use resolved_ts::Resolver;
 use tikv::raftstore::coprocessor::*;
@@ -17,7 +18,7 @@ use tokio_threadpool::{Builder, ThreadPool};
 
 use crate::delegate::{Delegate, Downstream};
 use crate::lock_scanner::LockScanner;
-use crate::{CdcObserver, Error, Result};
+use crate::{CdcObserver, Error};
 
 pub enum Task {
     Register {
@@ -26,7 +27,8 @@ pub enum Task {
     },
     Deregister {
         region_id: u64,
-        id: Result<usize>,
+        id: Option<usize>,
+        err: Option<Error>,
     },
     MultiBatch {
         multi: Vec<CmdBatch>,
@@ -36,6 +38,7 @@ pub enum Task {
     },
     ResolverReady {
         region_id: u64,
+        region: Region,
         resolver: Resolver,
     },
     LoadLocks {
@@ -54,12 +57,23 @@ impl fmt::Debug for Task {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut de = f.debug_struct("CdcTask");
         match self {
-            Task::Register { ref request, .. } => de.field("request", request).finish(),
+            Task::Register {
+                ref request,
+                ref downstream,
+                ..
+            } => de
+                .field("register request", request)
+                .field("request", request)
+                .field("id", &downstream.id)
+                .finish(),
             Task::Deregister {
                 ref region_id,
                 ref id,
+                ref err,
             } => de
-                .field("deregister region_id", region_id)
+                .field("deregister", &"")
+                .field("region_id", region_id)
+                .field("err", err)
                 .field("id", id)
                 .finish(),
             Task::MinTS { ref min_ts } => de.field("min_ts", min_ts).finish(),
@@ -118,31 +132,32 @@ impl Endpoint {
         self.min_ts_interval = dur;
     }
 
-    fn on_deregister(&mut self, region_id: u64, id: Result<usize>) {
+    fn on_deregister(&mut self, region_id: u64, id: Option<usize>, err: Option<Error>) {
+        info!("cdc deregister region";
+            "region_id" => region_id,
+            "id" => ?id,
+            "error" => ?err);
         let mut is_last = false;
-        match id {
-            Ok(id) => {
+        match (id, err) {
+            (Some(id), err) => {
                 // The peer wants to deregister
                 if let Some(delegate) = self.capture_regions.get_mut(&region_id) {
-                    info!("cdc deregister region";
-                        "region_id" => region_id,
-                        "id" => %id);
-                    is_last = delegate.unsubscribe(id);
+                    is_last = delegate.unsubscribe(id, err);
+                }
+                if is_last {
+                    self.capture_regions.remove(&region_id);
                 }
             }
-            Err(e) => {
+            (None, Some(err)) => {
                 // Something went wrong, deregister all downstreams.
-                info!("cdc deregister region";
-                    "region_id" => region_id,
-                    "error" => %e);
                 if let Some(mut delegate) = self.capture_regions.remove(&region_id) {
-                    delegate.fail(e);
+                    delegate.fail(err);
                     is_last = true;
                 }
             }
+            (None, None) => panic!("none id none error?"),
         }
         if is_last {
-            self.capture_regions.remove(&region_id);
             // Unsubscribe region role change events.
             self.observer.unsubscribe_region(region_id);
         }
@@ -158,8 +173,10 @@ impl Endpoint {
             d
         });
 
+        let id = downstream.id;
         delegate.subscribe(downstream);
         if let Some(enabled) = enabled {
+            // The region has never been registered.
             // Subscribe region role change events.
             self.observer.subscribe_region(region_id);
 
@@ -184,7 +201,8 @@ impl Endpoint {
                             let err = resp.response.take_header().take_error();
                             let deregister = Task::Deregister {
                                 region_id,
-                                id: Err(Error::Request(err)),
+                                id: Some(id),
+                                err: Some(Error::Request(err)),
                             };
                             scheduler.schedule(deregister).unwrap();
                         }
@@ -196,8 +214,14 @@ impl Endpoint {
 
     pub fn on_multi_batch(&mut self, multi: Vec<CmdBatch>) {
         for batch in multi {
-            if let Some(delegate) = self.capture_regions.get_mut(&batch.region_id) {
+            let mut has_failed = false;
+            let region_id = batch.region_id;
+            if let Some(delegate) = self.capture_regions.get_mut(&region_id) {
                 delegate.on_batch(batch);
+                has_failed = delegate.has_failed();
+            }
+            if has_failed {
+                self.capture_regions.remove(&region_id);
             }
         }
     }
@@ -208,6 +232,7 @@ impl Endpoint {
         // spawn the task to a thread pool.
         let sched = self.scheduler.clone();
         let region_id = region_snapshot.get_region().get_id();
+        let region = region_snapshot.get_region().clone();
         self.lock_workers.spawn(
             lazy(move || {
                 let mut lock_scanner = LockScanner::new(region_snapshot)?;
@@ -220,6 +245,7 @@ impl Endpoint {
                     if let Err(e) = sched.schedule(Task::ResolverReady {
                         region_id,
                         resolver,
+                        region,
                     }) {
                         error!("schedule task failed"; "error" => ?e);
                     }
@@ -227,11 +253,12 @@ impl Endpoint {
                 }
                 Err(e) => {
                     error!("builder resolver failed"; "error" => ?e);
+                    // Unregister all downstreams.
                     // TODO: record in metrics.
-                    // TODO: attach error the the task.
                     if let Err(e) = sched.schedule(Task::Deregister {
                         region_id,
-                        id: Err(e),
+                        id: None,
+                        err: Some(e),
                     }) {
                         error!("schedule task failed"; "error" => ?e);
                     }
@@ -241,9 +268,9 @@ impl Endpoint {
         );
     }
 
-    fn on_region_ready(&mut self, region_id: u64, resolver: Resolver) {
+    fn on_region_ready(&mut self, region_id: u64, resolver: Resolver, region: Region) {
         let delegate = self.capture_regions.get_mut(&region_id).unwrap();
-        delegate.on_region_ready(resolver);
+        delegate.on_region_ready(resolver, region);
     }
 
     fn on_min_ts(&mut self, min_ts: u64) {
@@ -287,8 +314,9 @@ impl Runnable<Task> for Endpoint {
             Task::ResolverReady {
                 region_id,
                 resolver,
-            } => self.on_region_ready(region_id, resolver),
-            Task::Deregister { region_id, id } => self.on_deregister(region_id, id),
+                region,
+            } => self.on_region_ready(region_id, resolver, region),
+            Task::Deregister { region_id, id, err } => self.on_deregister(region_id, id, err),
             Task::MultiBatch { multi } => self.on_multi_batch(multi),
             #[cfg(not(validate))]
             Task::Validate(region_id, validate) => {

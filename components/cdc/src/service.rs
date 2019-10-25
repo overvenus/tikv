@@ -35,9 +35,10 @@ impl ChangeData for Service {
         let region_id = request.region_id;
         let peer = ctx.peer();
         let id = self.stream_id.fetch_add(1, Ordering::Relaxed);
+        let region_epoch = request.get_region_epoch().clone();
         // TODO: make it a bounded channel.
         let (tx, rx) = mpsc::unbounded();
-        let downstream = Downstream::new(id, peer.clone(), tx);
+        let downstream = Downstream::new(id, peer.clone(), region_epoch, tx);
         if let Err(status) = self
             .scheduler
             .schedule(Task::Register {
@@ -65,12 +66,14 @@ impl ChangeData for Service {
         }));
         let scheduler = self.scheduler.clone();
         ctx.spawn(send_resp.then(move |res| {
-            scheduler
-                .schedule(Task::Deregister {
-                    region_id,
-                    id: Ok(id),
-                })
-                .unwrap();
+            // Unregister this downstream only.
+            if let Err(e) = scheduler.schedule(Task::Deregister {
+                region_id,
+                id: Some(id),
+                err: None,
+            }) {
+                error!("cdc deregister failed"; "error" => ?e);
+            }
             match res {
                 Ok(_s) => {
                     info!("cdc send half closed");

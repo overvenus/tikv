@@ -56,10 +56,12 @@ impl RoleObserver for CdcObserver {
         if role != StateRole::Leader {
             let region_id = ctx.region().get_id();
             if self.is_subscribed(region_id) {
+                // Unregister all downstreams.
                 let store_err = RaftStoreError::NotLeader(region_id, None);
                 if let Err(e) = self.sink.schedule(Task::Deregister {
                     region_id,
-                    id: Err(CdcError::Request(store_err.into())),
+                    id: None,
+                    err: Some(CdcError::Request(store_err.into())),
                 }) {
                     warn!("schedule cdc task failed"; "error" => ?e);
                 }
@@ -96,9 +98,10 @@ mod tests {
         let mut ctx = ObserverContext::new(&region);
         observer.on_role_change(&mut ctx, StateRole::Follower);
         match rx.recv_timeout(Duration::from_millis(10)).unwrap().unwrap() {
-            Task::Deregister { region_id, id } => {
+            Task::Deregister { region_id, id, err } => {
                 assert_eq!(region_id, 1);
-                assert!(id.is_err());
+                assert!(id.is_none(), "{:?}", id);
+                assert!(err.is_some(), "{:?}", err);
             }
             _ => panic!("unexpected task"),
         };

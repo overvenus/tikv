@@ -222,32 +222,28 @@ fn test_cdc_basic() {
         }
         _ => panic!("unknown event"),
     }
+    // The delegate must be removed.
+    scheduler
+        .schedule(Task::Validate(
+            1,
+            Box::new(|delegate| {
+                assert!(delegate.is_none());
+            }),
+        ))
+        .unwrap();
 
     // The second stream.
     let mut req = ChangeDataRequest::default();
     req.region_id = 1;
     req.set_region_epoch(suite.get_context(1).take_region_epoch());
     let event_feed2 = suite.cdc_cli.event_feed(&req).unwrap();
-    let event_feed1 = event_feed_wrap.replace(Some(event_feed2));
+    event_feed_wrap.replace(Some(event_feed2));
     let event = receive_event(true);
     match event {
         Event_oneof_event::ResolvedTs(ts) => assert_ne!(0, ts),
+        Event_oneof_event::Error(e) => panic!("{:?}", e),
         _ => panic!("unknown event"),
     }
-    scheduler
-        .schedule(Task::Validate(
-            1,
-            Box::new(|delegate| {
-                let d = delegate.unwrap();
-                assert_eq!(d.downstreams.len(), 2);
-            }),
-        ))
-        .unwrap();
-
-    // Drop event_feed2 and cancel its server streaming.
-    event_feed_wrap.replace(None);
-    // Sleep a while to make sure the stream is deregistered.
-    sleep_ms(500);
     scheduler
         .schedule(Task::Validate(
             1,
@@ -258,10 +254,10 @@ fn test_cdc_basic() {
         ))
         .unwrap();
 
-    // Drop all event_feed.
-    drop(event_feed1);
+    // Drop event_feed2 and cancel its server streaming.
+    event_feed_wrap.replace(None);
     // Sleep a while to make sure the stream is deregistered.
-    sleep_ms(500);
+    sleep_ms(200);
     scheduler
         .schedule(Task::Validate(
             1,
@@ -392,6 +388,76 @@ fn test_cdc_not_leader() {
         .unwrap();
     rx.recv_timeout(Duration::from_millis(200)).unwrap();
 
+    event_feed_wrap.replace(None);
+    suite.stop();
+}
+
+#[test]
+fn test_cdc_stale_epoch_after_region_ready() {
+    let mut suite = TestSuite::new(3);
+
+    // Make sure region 1 is ready.
+    let (k, v) = ("key1".to_owned(), "value".to_owned());
+    let start_ts = suite.cluster.pd_client.get_tso().wait().unwrap();
+    let mut mutation = Mutation::default();
+    mutation.op = Op::Put;
+    mutation.key = k.clone().into_bytes();
+    mutation.value = v.clone().into_bytes();
+    suite.must_kv_prewrite(vec![mutation], k.clone().into_bytes(), start_ts);
+
+    let mut req = ChangeDataRequest::default();
+    req.region_id = 1;
+    req.set_region_epoch(suite.get_context(1).take_region_epoch());
+    let event_feed = suite.cdc_cli.event_feed(&req).unwrap();
+
+    let event_feed_wrap = Cell::new(Some(event_feed));
+    let receive_event = |keep_resolved_ts: bool| loop {
+        let (change_data, events) =
+            match event_feed_wrap.replace(None).unwrap().into_future().wait() {
+                Ok(res) => res,
+                Err(e) => panic!("receive failed {:?}", e.0),
+            };
+        event_feed_wrap.set(Some(events));
+        let mut change_data = change_data.unwrap();
+        assert_eq!(change_data.events.len(), 1);
+        let change_data_event = &mut change_data.events[0];
+        let event = change_data_event.event.take().unwrap();
+        match event {
+            Event_oneof_event::ResolvedTs(_) if !keep_resolved_ts => continue,
+            other => return other,
+        }
+    };
+
+    // Make sure region 1 is registered.
+    let event = receive_event(true);
+    match event {
+        Event_oneof_event::ResolvedTs(ts) => assert_ne!(0, ts),
+        _ => panic!("unknown event"),
+    }
+
+    let mut req = ChangeDataRequest::default();
+    req.region_id = 1;
+    req.set_region_epoch(Default::default()); // zero epoch is always stale.
+    let event_feed = suite.cdc_cli.event_feed(&req).unwrap();
+    let feed1_holder = event_feed_wrap.replace(Some(event_feed));
+    // Must receive epoch not match error.
+    let event = receive_event(false);
+    match event {
+        Event_oneof_event::Error(err) => {
+            assert!(err.has_epoch_not_match(), "{:?}", err);
+        }
+        _ => panic!("unknown event"),
+    }
+
+    // Must not receive any error on event feed 1.
+    event_feed_wrap.replace(feed1_holder);
+    let event = receive_event(true);
+    match event {
+        Event_oneof_event::ResolvedTs(ts) => assert_ne!(0, ts),
+        _ => panic!("unknown event"),
+    }
+
+    // Cancel event feed before finishing test.
     event_feed_wrap.replace(None);
     suite.stop();
 }
