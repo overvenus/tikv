@@ -162,6 +162,8 @@ impl Config {
             ));
         }
 
+        box_try!(config::check_addr(&self.engine_addr));
+
         let non_zero_entries = vec![
             (
                 "concurrent-send-snap-limit",
