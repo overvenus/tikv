@@ -269,7 +269,7 @@ impl PdClient for RpcClient {
         let executor = move |client: &RwLock<Inner>, req: pdpb::GetRegionByIdRequest| {
             let handler = client
                 .rl()
-                .client
+                .client_stub
                 .get_region_by_id_async_opt(&req, Self::call_option())
                 .unwrap();
             Box::new(handler.map_err(Error::Grpc).and_then(move |mut resp| {
@@ -375,7 +375,7 @@ impl PdClient for RpcClient {
         let executor = move |client: &RwLock<Inner>, req: pdpb::AskSplitRequest| {
             let handler = client
                 .rl()
-                .client
+                .client_stub
                 .ask_split_async_opt(&req, Self::call_option())
                 .unwrap();
             Box::new(handler.map_err(Error::Grpc).and_then(move |resp| {
@@ -407,7 +407,7 @@ impl PdClient for RpcClient {
         let executor = move |client: &RwLock<Inner>, req: pdpb::AskBatchSplitRequest| {
             let handler = client
                 .rl()
-                .client
+                .client_stub
                 .ask_batch_split_async_opt(&req, Self::call_option())
                 .unwrap();
             Box::new(handler.map_err(Error::Grpc).and_then(move |resp| {
@@ -434,7 +434,7 @@ impl PdClient for RpcClient {
         let executor = move |client: &RwLock<Inner>, req: pdpb::StoreHeartbeatRequest| {
             let handler = client
                 .rl()
-                .client
+                .client_stub
                 .store_heartbeat_async_opt(&req, Self::call_option())
                 .unwrap();
             Box::new(handler.map_err(Error::Grpc).and_then(move |resp| {
@@ -461,7 +461,7 @@ impl PdClient for RpcClient {
         let executor = move |client: &RwLock<Inner>, req: pdpb::ReportBatchSplitRequest| {
             let handler = client
                 .rl()
-                .client
+                .client_stub
                 .report_batch_split_async_opt(&req, Self::call_option())
                 .unwrap();
             Box::new(handler.map_err(Error::Grpc).and_then(move |resp| {
@@ -511,7 +511,7 @@ impl PdClient for RpcClient {
             let option = CallOption::default().timeout(Duration::from_secs(REQUEST_TIMEOUT));
             let handler = client
                 .rl()
-                .client
+                .client_stub
                 .get_gc_safe_point_async_opt(&req, option)
                 .unwrap();
             Box::new(handler.map_err(Error::Grpc).and_then(move |resp| {
@@ -575,7 +575,7 @@ impl PdClient for RpcClient {
         req.set_header(self.header());
         let executor = move |client: &RwLock<Inner>, req: pdpb::TsoRequest| {
             let cli = client.read().unwrap();
-            let (req_sink, resp_stream) = cli.client.tso().unwrap();
+            let (req_sink, resp_stream) = cli.client_stub.tso().unwrap();
             let (keep_req_tx, mut keep_req_rx) = oneshot::channel();
             let send_once = req_sink
                 .send((req.clone(), WriteFlags::default()))
@@ -583,7 +583,7 @@ impl PdClient for RpcClient {
                     let _ = keep_req_tx.send(s);
                     Ok(())
                 });
-            cli.client.spawn(send_once);
+            cli.client_stub.spawn(send_once);
             Box::new(
                 resp_stream
                     .into_future()
@@ -616,7 +616,7 @@ impl PdClient for RpcClient {
         self.leader_client
             .inner
             .rl()
-            .client
+            .client_stub
             .spawn(future.map_err(|_| ()));
     }
 }
