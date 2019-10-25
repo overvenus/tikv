@@ -46,10 +46,8 @@ use util::setup::*;
 use util::signal_handler;
 
 use std::fs::File;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::process;
-use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
