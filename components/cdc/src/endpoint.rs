@@ -11,6 +11,7 @@ use tikv::raftstore::coprocessor::*;
 use tikv::raftstore::store::fsm::{ApplyRouter, ApplyTask};
 use tikv::raftstore::store::msg::{Callback, ReadResponse};
 use tikv::raftstore::store::RegionSnapshot;
+use tikv::storage::txn::TxnEntry;
 use tikv_util::collections::HashMap;
 use tikv_util::timer::SteadyTimer;
 use tikv_util::worker::{Runnable, Scheduler};
@@ -43,6 +44,11 @@ pub enum Task {
     },
     LoadLocks {
         region_snapshot: RegionSnapshot,
+    },
+    IncrementalScan {
+        region_id: u64,
+        downstream_id: usize,
+        entries: Vec<Option<TxnEntry>>,
     },
     #[cfg(not(validate))]
     Validate(u64, Box<dyn FnOnce(Option<&Delegate>) + Send>),
@@ -87,6 +93,15 @@ impl fmt::Debug for Task {
                 )
                 .finish(),
             Task::MultiBatch { multi } => de.field("multibatch", &multi.len()).finish(),
+            Task::IncrementalScan {
+                ref region_id,
+                ref downstream_id,
+                ref entries,
+            } => de
+                .field("region_id", &region_id)
+                .field("downstream", &downstream_id)
+                .field("scan_entries", &entries.len())
+                .finish(),
             #[cfg(not(validate))]
             Task::Validate(region_id, _) => de.field("region_id", &region_id).finish(),
         }
@@ -226,6 +241,19 @@ impl Endpoint {
         }
     }
 
+    pub fn on_incremental_scan(
+        &mut self,
+        region_id: u64,
+        downstream_id: usize,
+        entries: Vec<Option<TxnEntry>>,
+    ) {
+        if let Some(delegate) = self.capture_regions.get_mut(&region_id) {
+            delegate.on_scan(downstream_id, entries);
+        } else {
+            warn!("region not found on incremental scan"; "region_id" => region_id);
+        }
+    }
+
     fn on_region_load_locks(&mut self, region_snapshot: RegionSnapshot) {
         info!("load locks for resolver";
             "region_id" => region_snapshot.get_region().get_id());
@@ -318,6 +346,13 @@ impl Runnable<Task> for Endpoint {
             } => self.on_region_ready(region_id, resolver, region),
             Task::Deregister { region_id, id, err } => self.on_deregister(region_id, id, err),
             Task::MultiBatch { multi } => self.on_multi_batch(multi),
+            Task::IncrementalScan {
+                region_id,
+                downstream_id,
+                entries,
+            } => {
+                self.on_incremental_scan(region_id, downstream_id, entries);
+            }
             #[cfg(not(validate))]
             Task::Validate(region_id, validate) => {
                 validate(self.capture_regions.get(&region_id));

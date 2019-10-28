@@ -356,41 +356,42 @@ impl<S: Snapshot> Scanner<S> {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[allow(unused)]
+pub mod tests {
     use super::super::ScannerBuilder;
     use super::*;
+    use crate::storage::mvcc::lock::{Lock, LockType};
     use crate::storage::mvcc::tests::*;
     use crate::storage::{Engine, Key, TestEngineBuilder};
 
     use kvproto::kvrpcpb::Context;
 
     #[derive(Default)]
-    struct EntryBuilder {
-        key: Vec<u8>,
-        value: Vec<u8>,
-        start_ts: u64,
-        commit_ts: u64,
+    pub struct EntryBuilder {
+        pub key: Vec<u8>,
+        pub value: Vec<u8>,
+        pub start_ts: u64,
+        pub commit_ts: u64,
     }
 
     impl EntryBuilder {
-        fn key(&mut self, key: &[u8]) -> &mut Self {
+        pub fn key(&mut self, key: &[u8]) -> &mut Self {
             self.key = key.to_owned();
             self
         }
-        fn value(&mut self, val: &[u8]) -> &mut Self {
+        pub fn value(&mut self, val: &[u8]) -> &mut Self {
             self.value = val.to_owned();
             self
         }
-        fn start_ts(&mut self, start_ts: u64) -> &mut Self {
+        pub fn start_ts(&mut self, start_ts: u64) -> &mut Self {
             self.start_ts = start_ts;
             self
         }
-        fn commit_ts(&mut self, commit_ts: u64) -> &mut Self {
+        pub fn commit_ts(&mut self, commit_ts: u64) -> &mut Self {
             self.commit_ts = commit_ts;
             self
         }
-        fn build_commit(&self, wt: WriteType, is_short_value: bool) -> TxnEntry {
+        pub fn build_commit(&self, wt: WriteType, is_short_value: bool) -> TxnEntry {
             let write_key = Key::from_raw(&self.key).append_ts(self.commit_ts);
             let (key, value, short) = if is_short_value {
                 (vec![], vec![], Some(self.value.clone()))
@@ -407,6 +408,28 @@ mod tests {
             TxnEntry::Commit {
                 default: (key, value),
                 write: (write_key.into_encoded(), write_value.to_bytes()),
+            }
+        }
+        pub fn build_prewrite(&self, lt: LockType, is_short_value: bool) -> TxnEntry {
+            let lock_key = Key::from_raw(&self.key);
+            let (key, value, short) = if is_short_value {
+                (vec![], vec![], Some(self.value.clone()))
+            } else {
+                (self.key.clone(), self.value.clone(), None)
+            };
+            let lock_value = Lock::new(
+                lt,
+                lock_key.clone().into_encoded(),
+                self.start_ts,
+                1000, // ttl
+                short,
+                0, // for_update_ts
+                0, // txn_size
+                0, // min_commit_ts
+            );
+            TxnEntry::Prewrite {
+                default: (key, value),
+                lock: (lock_key.into_encoded(), lock_value.to_bytes()),
             }
         }
     }

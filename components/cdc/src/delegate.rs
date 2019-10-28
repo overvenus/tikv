@@ -1,3 +1,4 @@
+use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -10,11 +11,13 @@ use tikv::raftstore::coprocessor::{Cmd, CmdBatch};
 use tikv::raftstore::store::util::compare_region_epoch;
 use tikv::raftstore::Error as RaftStoreError;
 use tikv::storage::mvcc::{Lock, LockType, Write, WriteType};
+use tikv::storage::txn::TxnEntry;
 use tikv::storage::Key;
 use tikv_util::collections::HashMap;
 
 use crate::Error;
 
+#[derive(Clone)]
 pub struct Downstream {
     // TODO: include cdc request.
     // TODO: make ID a concrete type.
@@ -53,6 +56,7 @@ impl Downstream {
 struct Pending {
     multi_batch: Vec<CmdBatch>,
     downstreams: Vec<Downstream>,
+    scan: Vec<(usize, Vec<Option<TxnEntry>>)>,
 }
 
 pub struct Delegate {
@@ -190,6 +194,9 @@ impl Delegate {
             for downstream in pending.downstreams {
                 self.subscribe(downstream);
             }
+            for (downstream_id, entires) in pending.scan {
+                self.on_scan(downstream_id, entires);
+            }
             for batch in pending.multi_batch {
                 self.on_batch(batch);
             }
@@ -243,63 +250,100 @@ impl Delegate {
         }
     }
 
+    pub fn on_scan(&mut self, downstream_id: usize, entries: Vec<Option<TxnEntry>>) {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.scan.push((downstream_id, entries));
+            return;
+        }
+        let d = if let Some(d) = self.downstreams.iter_mut().find(|d| d.id == downstream_id) {
+            d
+        } else {
+            warn!("downstream not found"; "downstream_id" => downstream_id);
+            return;
+        };
+
+        let mut rows = Vec::with_capacity(entries.len());
+        for entry in entries {
+            match entry {
+                Some(TxnEntry::Prewrite { default, lock }) => {
+                    let mut row = EventRow::default();
+                    let skip = decode_lock(lock.0, &lock.1, &mut row);
+                    if skip {
+                        continue;
+                    }
+                    decode_default(default.1, &mut row);
+                    rows.push(row);
+                }
+                Some(TxnEntry::Commit { default, write }) => {
+                    let mut row = EventRow::default();
+                    let skip = decode_write(write.0, &write.1, &mut row);
+                    if skip {
+                        continue;
+                    }
+                    decode_default(default.1, &mut row);
+
+                    // This type means the row is self-contained, it has,
+                    //   1. start_ts
+                    //   2. commit_ts
+                    //   3. key
+                    //   4. value
+                    row.r_type = EventLogType::Committed;
+                    rows.push(row);
+                }
+                None => {
+                    let mut row = EventRow::default();
+
+                    // This type means scan has finised.
+                    row.r_type = EventLogType::Initialized;
+                    rows.push(row);
+                }
+            }
+        }
+
+        let mut event_entries = EventEntries::new();
+        event_entries.entries = rows.into();
+        let mut change_data_event = Event::new();
+        change_data_event.region_id = self.region_id;
+        change_data_event.event = Some(Event_oneof_event::Entries(event_entries));
+        let mut change_data = ChangeDataEvent::new();
+        change_data.mut_events().push(change_data_event);
+        d.sink(change_data);
+    }
+
     fn sink_data(&mut self, index: u64, requests: Vec<Request>) {
-        let mut kv: HashMap<Vec<u8>, EventRow> = HashMap::default();
+        let mut rows = HashMap::default();
         for mut req in requests {
             if req.cmd_type == CmdType::Put {
                 let mut put = req.take_put();
                 match put.cf.as_str() {
                     "write" => {
-                        let write = Write::parse(put.get_value()).unwrap();
-                        let (op_type, r_type) = match write.write_type {
-                            WriteType::Put => (EventRowOpType::Put, EventLogType::Commit),
-                            WriteType::Delete => (EventRowOpType::Delete, EventLogType::Commit),
-                            WriteType::Rollback => {
-                                (EventRowOpType::Unknown, EventLogType::Rollback)
-                            }
-                            other => {
-                                debug!("skip write record";
-                                    "write" => ?other);
-                                continue;
-                            }
-                        };
-                        let key = Key::from_encoded(put.take_key());
-                        let commit_ts = key.decode_ts().unwrap();
-                        let start_ts = write.start_ts;
-
-                        let mut row = kv.entry(key.to_raw().unwrap()).or_default();
-                        row.start_ts = start_ts;
-                        row.commit_ts = commit_ts;
-                        row.key = key.to_raw().unwrap();
-                        row.op_type = op_type;
-                        row.r_type = r_type;
+                        let mut row = EventRow::default();
+                        let skip = decode_write(put.take_key(), put.get_value(), &mut row);
+                        if skip {
+                            continue;
+                        }
 
                         // In order to advance resolved ts,
                         // we must untrack inflight txns if they are committed.
                         assert!(self.resolver.is_some(), "region resolver should be ready");
                         let resolver = self.resolver.as_mut().unwrap();
-                        resolver.untrack_lock(start_ts, Some(commit_ts), key);
+                        resolver.untrack_lock(row.start_ts, Some(row.commit_ts), row.key.clone());
+
+                        let r = rows.insert(row.key.clone(), row);
+                        assert!(r.is_none());
                     }
                     "lock" => {
-                        let lock = Lock::parse(put.get_value()).unwrap();
-                        let op_type = match lock.lock_type {
-                            LockType::Put => EventRowOpType::Put,
-                            LockType::Delete => EventRowOpType::Delete,
-                            other => {
-                                debug!("skip lock record";
-                                    "lock" => ?other);
-                                continue;
-                            }
-                        };
-                        let key = Key::from_encoded(put.take_key());
-                        let start_ts = lock.ts;
+                        let mut row = EventRow::default();
+                        let skip = decode_lock(put.take_key(), put.get_value(), &mut row);
+                        if skip {
+                            continue;
+                        }
 
-                        let mut row = kv.entry(key.to_raw().unwrap()).or_default();
-                        row.start_ts = start_ts;
-                        row.key = key.to_raw().unwrap();
-                        row.op_type = op_type;
-                        row.r_type = EventLogType::Prewrite;
-                        if let Some(value) = lock.short_value {
+                        let occupied = rows.entry(row.key.clone()).or_default();
+                        if !occupied.value.is_empty() {
+                            assert!(row.value.is_empty());
+                            let mut value = vec![];
+                            mem::swap(&mut occupied.value, &mut value);
                             row.value = value;
                         }
 
@@ -307,16 +351,14 @@ impl Delegate {
                         // we must track inflight txns.
                         assert!(self.resolver.is_some(), "region resolver should be ready");
                         let resolver = self.resolver.as_mut().unwrap();
-                        resolver.track_lock(start_ts, key);
+                        resolver.track_lock(row.start_ts, row.key.clone());
+
+                        *occupied = row;
                     }
                     "" | "default" => {
-                        let key = Key::from_encoded(put.take_key());
-
-                        let mut row = kv.entry(key.to_raw().unwrap()).or_default();
-                        let value = put.get_value();
-                        if !value.is_empty() {
-                            row.value = value.to_vec();
-                        }
+                        let key = Key::from_encoded(put.take_key()).truncate_ts().unwrap();
+                        let row = rows.entry(key.to_raw().unwrap()).or_default();
+                        decode_default(put.take_value(), row);
                     }
                     other => {
                         panic!("invalid cf {}", other);
@@ -330,8 +372,8 @@ impl Delegate {
                 );
             }
         }
-        let mut entires = Vec::with_capacity(kv.len());
-        for (_, v) in kv {
+        let mut entires = Vec::with_capacity(rows.len());
+        for (_, v) in rows {
             entires.push(v);
         }
         let mut event_entries = EventEntries::new();
@@ -370,6 +412,59 @@ impl Delegate {
     }
 }
 
+fn decode_write(key: Vec<u8>, value: &[u8], row: &mut EventRow) -> bool {
+    let write = Write::parse(value).unwrap();
+    let (op_type, r_type) = match write.write_type {
+        WriteType::Put => (EventRowOpType::Put, EventLogType::Commit),
+        WriteType::Delete => (EventRowOpType::Delete, EventLogType::Commit),
+        WriteType::Rollback => (EventRowOpType::Unknown, EventLogType::Rollback),
+        other => {
+            debug!("skip write record"; "write" => ?other);
+            return true;
+        }
+    };
+    let key = Key::from_encoded(key);
+    let commit_ts = key.decode_ts().unwrap();
+    row.start_ts = write.start_ts;
+    row.commit_ts = commit_ts;
+    row.key = key.truncate_ts().unwrap().to_raw().unwrap();
+    row.op_type = op_type;
+    row.r_type = r_type;
+
+    false
+}
+
+fn decode_lock(key: Vec<u8>, value: &[u8], row: &mut EventRow) -> bool {
+    let lock = Lock::parse(value).unwrap();
+    let op_type = match lock.lock_type {
+        LockType::Put => EventRowOpType::Put,
+        LockType::Delete => EventRowOpType::Delete,
+        other => {
+            info!("skip lock record";
+                "type" => ?other,
+                "start_ts" => ?lock.ts,
+                "for_update_ts" => ?lock.for_update_ts);
+            return true;
+        }
+    };
+    let key = Key::from_encoded(key);
+    row.start_ts = lock.ts;
+    row.key = key.to_raw().unwrap();
+    row.op_type = op_type;
+    row.r_type = EventLogType::Prewrite;
+    if let Some(value) = lock.short_value {
+        row.value = value;
+    }
+
+    false
+}
+
+fn decode_default(value: Vec<u8>, row: &mut EventRow) {
+    if !value.is_empty() {
+        row.value = value.to_vec();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +482,7 @@ mod tests {
     use tikv::raftstore::Result as RaftStoreResult;
     use tikv::server::transport::RaftStoreRouter;
     use tikv::server::RaftKv;
+    use tikv::storage::mvcc::reader::tests::*;
     use tikv::storage::mvcc::tests::*;
     use tikv_util::mpsc::{bounded, Sender as UtilSender};
 
@@ -683,5 +779,101 @@ mod tests {
         let mut err = receive_error();
         assert!(err.has_epoch_not_match());
         assert!(err.take_epoch_not_match().current_regions.is_empty());
+    }
+
+    #[test]
+    fn test_scan() {
+        let region_id = 1;
+        let mut region = Region::default();
+        region.set_id(region_id);
+        region.mut_peers().push(Default::default());
+        region.mut_region_epoch().set_version(2);
+        region.mut_region_epoch().set_conf_ver(2);
+        let region_epoch = region.get_region_epoch().clone();
+
+        let (sink, events) = unbounded();
+        let mut delegate = Delegate::new(region_id);
+        delegate.subscribe(Downstream::new(
+            1,
+            String::new(),
+            region_epoch.clone(),
+            sink,
+        ));
+        let enabled = delegate.enabled();
+        assert!(enabled.load(Ordering::Relaxed));
+
+        let events_wrap = Cell::new(Some(events));
+        let check_event = |event_rows: Vec<EventRow>| {
+            let (change_data, events) = events_wrap
+                .replace(None)
+                .unwrap()
+                .into_future()
+                .wait()
+                .unwrap();
+            events_wrap.set(Some(events));
+            let mut change_data = change_data.unwrap();
+            assert_eq!(change_data.events.len(), 1);
+            let change_data_event = &mut change_data.events[0];
+            assert_eq!(change_data_event.region_id, region_id);
+            assert_eq!(change_data_event.index, 0);
+            let event = change_data_event.event.take().unwrap();
+            match event {
+                Event_oneof_event::Entries(entries) => {
+                    assert_eq!(entries.entries, event_rows.into());
+                }
+                _ => panic!("unknown event"),
+            }
+        };
+        let into_entry = |e: Option<EntryBuilder>| {
+            e.map(|e| {
+                if e.commit_ts == 0 {
+                    e.build_prewrite(LockType::Put, false)
+                } else {
+                    e.build_commit(WriteType::Put, false)
+                }
+            })
+        };
+
+        // Stashed in pending before region ready.
+        let entries = vec![
+            Some(EntryBuilder {
+                key: b"a".to_vec(),
+                value: b"b".to_vec(),
+                start_ts: 1,
+                commit_ts: 0,
+            }),
+            Some(EntryBuilder {
+                key: b"a".to_vec(),
+                value: b"b".to_vec(),
+                start_ts: 1,
+                commit_ts: 2,
+            }),
+            None,
+        ];
+        delegate.on_scan(1, entries.into_iter().map(into_entry).collect());
+        assert_eq!(delegate.pending.as_ref().unwrap().scan.len(), 1);
+
+        let mut resolver = Resolver::new();
+        resolver.init();
+        delegate.on_region_ready(resolver, region);
+
+        // Flush all pending entries.
+        let mut row1 = EventRow::new();
+        row1.start_ts = 1;
+        row1.commit_ts = 0;
+        row1.key = b"a".to_vec();
+        row1.op_type = EventRowOpType::Put;
+        row1.r_type = EventLogType::Prewrite;
+        row1.value = b"b".to_vec();
+        let mut row2 = EventRow::new();
+        row2.start_ts = 1;
+        row2.commit_ts = 2;
+        row2.key = b"a".to_vec();
+        row2.op_type = EventRowOpType::Put;
+        row2.r_type = EventLogType::Committed;
+        row2.value = b"b".to_vec();
+        let mut row3 = EventRow::new();
+        row3.r_type = EventLogType::Initialized;
+        check_event(vec![row1, row2, row3]);
     }
 }

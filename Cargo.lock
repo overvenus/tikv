@@ -2548,6 +2548,7 @@ dependencies = [
 name = "resolved_ts"
 version = "0.0.1"
 dependencies = [
+ "hex",
  "kvproto 0.0.2 (git+https://github.com/pingcap/kvproto.git)",
  "tikv",
  "tikv_alloc",

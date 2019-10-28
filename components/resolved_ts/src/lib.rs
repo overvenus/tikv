@@ -1,11 +1,10 @@
 use std::cmp;
 use std::collections::BTreeMap;
-use tikv::storage::Key;
 use tikv_util::collections::HashSet;
 
 pub struct Resolver {
     // start_ts -> locked keys.
-    locks: BTreeMap<u64, HashSet<Key>>,
+    locks: BTreeMap<u64, HashSet<Vec<u8>>>,
     resolved_ts: Option<u64>,
     min_ts: Option<u64>,
 }
@@ -27,23 +26,20 @@ impl Resolver {
         self.resolved_ts
     }
 
-    pub fn locks(&self) -> &BTreeMap<u64, HashSet<Key>> {
+    pub fn locks(&self) -> &BTreeMap<u64, HashSet<Vec<u8>>> {
         &self.locks
     }
 
-    pub fn track_lock(&mut self, start_ts: u64, key: Key) {
+    pub fn track_lock(&mut self, start_ts: u64, key: Vec<u8>) {
         self.locks.entry(start_ts).or_default().insert(key);
     }
 
-    pub fn untrack_lock(&mut self, start_ts: u64, commit_ts: Option<u64>, key: Key) {
-        // This key is from the write cf which is alway appended a ts,
-        // The ts must be removed before trying to remove tracked lock key.
-        let truncated_key = key.truncate_ts().unwrap();
+    pub fn untrack_lock(&mut self, start_ts: u64, commit_ts: Option<u64>, key: Vec<u8>) {
         if let Some(commit_ts) = commit_ts {
             assert!(
                 self.resolved_ts.map_or(true, |rts| commit_ts > rts),
                 "{}@{}, commit@{} > {:?}",
-                truncated_key,
+                hex::encode_upper(key),
                 start_ts,
                 commit_ts,
                 self.resolved_ts
@@ -51,7 +47,7 @@ impl Resolver {
             assert!(
                 self.min_ts.map_or(true, |mts| commit_ts > mts),
                 "{}@{}, commit@{} > {:?}",
-                truncated_key,
+                hex::encode_upper(key),
                 start_ts,
                 commit_ts,
                 self.min_ts
@@ -62,14 +58,14 @@ impl Resolver {
         assert!(
             entry.is_some(),
             "{}@{} is not tracked",
-            truncated_key,
+            hex::encode_upper(key),
             start_ts
         );
         let locked_keys = entry.unwrap();
         assert!(
-            locked_keys.remove(&truncated_key),
+            locked_keys.remove(&key),
             "{}@{} is not tracked, {:?}",
-            truncated_key,
+            hex::encode_upper(key),
             start_ts,
             locked_keys,
         );
@@ -102,6 +98,7 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tikv::storage::Key;
 
     #[derive(Clone)]
     enum Event {
@@ -117,28 +114,28 @@ mod tests {
             vec![Event::Lock(1, Key::from_raw(b"a")), Event::Resolve(2, 1)],
             vec![
                 Event::Lock(1, Key::from_raw(b"a")),
-                Event::Unlock(1, Some(2), Key::from_raw(b"a").append_ts(2)),
+                Event::Unlock(1, Some(2), Key::from_raw(b"a")),
                 Event::Resolve(2, 2),
             ],
             vec![
                 Event::Lock(3, Key::from_raw(b"a")),
-                Event::Unlock(3, Some(4), Key::from_raw(b"a").append_ts(4)),
+                Event::Unlock(3, Some(4), Key::from_raw(b"a")),
                 Event::Resolve(2, 2),
             ],
             vec![
                 Event::Lock(1, Key::from_raw(b"a")),
-                Event::Unlock(1, Some(2), Key::from_raw(b"a").append_ts(2)),
+                Event::Unlock(1, Some(2), Key::from_raw(b"a")),
                 Event::Lock(1, Key::from_raw(b"b")),
                 Event::Resolve(2, 1),
             ],
             vec![
                 Event::Lock(2, Key::from_raw(b"a")),
-                Event::Unlock(2, Some(3), Key::from_raw(b"a").append_ts(3)),
+                Event::Unlock(2, Some(3), Key::from_raw(b"a")),
                 Event::Resolve(2, 2),
                 // Pessimistic txn may write a smaller start_ts.
                 Event::Lock(1, Key::from_raw(b"a")),
                 Event::Resolve(2, 2),
-                Event::Unlock(1, Some(4), Key::from_raw(b"a").append_ts(4)),
+                Event::Unlock(1, Some(4), Key::from_raw(b"a")),
                 Event::Resolve(3, 3),
             ],
         ];
@@ -148,9 +145,11 @@ mod tests {
             resolver.init();
             for e in case.clone() {
                 match e {
-                    Event::Lock(start_ts, key) => resolver.track_lock(start_ts, key),
+                    Event::Lock(start_ts, key) => {
+                        resolver.track_lock(start_ts, key.into_raw().unwrap())
+                    }
                     Event::Unlock(start_ts, commit_ts, key) => {
-                        resolver.untrack_lock(start_ts, commit_ts, key)
+                        resolver.untrack_lock(start_ts, commit_ts, key.into_raw().unwrap())
                     }
                     Event::Resolve(min_ts, expect) => {
                         assert_eq!(resolver.resolve(min_ts).unwrap(), expect, "case {}", i)
@@ -161,9 +160,11 @@ mod tests {
             let mut resolver = Resolver::new();
             for e in case {
                 match e {
-                    Event::Lock(start_ts, key) => resolver.track_lock(start_ts, key),
+                    Event::Lock(start_ts, key) => {
+                        resolver.track_lock(start_ts, key.into_raw().unwrap())
+                    }
                     Event::Unlock(start_ts, commit_ts, key) => {
-                        resolver.untrack_lock(start_ts, commit_ts, key)
+                        resolver.untrack_lock(start_ts, commit_ts, key.into_raw().unwrap())
                     }
                     Event::Resolve(min_ts, _) => {
                         assert_eq!(resolver.resolve(min_ts), None, "case {}", i)

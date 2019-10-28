@@ -52,7 +52,10 @@ impl LockScanner {
                 let lock_value = self.lock_cursor.value(&mut self.statistics);
                 Lock::parse(lock_value)?
             };
-            resolver.track_lock(lock.ts, Key::from_encoded_slice(locked_key));
+            resolver.track_lock(
+                lock.ts,
+                Key::from_encoded_slice(locked_key).to_raw().unwrap(),
+            );
 
             self.lock_cursor.next(&mut self.statistics);
         }
