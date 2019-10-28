@@ -393,7 +393,10 @@ pub mod tests {
         }
         pub fn build_commit(&self, wt: WriteType, is_short_value: bool) -> TxnEntry {
             let write_key = Key::from_raw(&self.key).append_ts(self.commit_ts);
-            let (key, value, short) = if is_short_value {
+
+            let (key, value, short) = if wt != WriteType::Put {
+                (vec![], vec![], None)
+            } else if is_short_value {
                 (vec![], vec![], Some(self.value.clone()))
             } else {
                 (
