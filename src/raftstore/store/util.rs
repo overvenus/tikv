@@ -329,7 +329,7 @@ pub fn check_term(req: &RaftCmdRequest, term: u64) -> Result<()> {
     if header.get_term() == 0 || term <= header.get_term() + 1 {
         Ok(())
     } else {
-        // If header's term is 2 verions behind current term,
+        // If header's term is 2 versions behind current term,
         // leadership may have been changed away.
         Err(Error::StaleCommand)
     }

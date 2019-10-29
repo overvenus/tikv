@@ -27,6 +27,8 @@ pub const DEFAULT_CLUSTER_ID: u64 = 0;
 pub const DEFAULT_LISTENING_ADDR: &str = "127.0.0.1:20160";
 const DEFAULT_ADVERTISE_LISTENING_ADDR: &str = "";
 const DEFAULT_ENGINE_LISTENING_ADDR: &str = "127.0.0.1:3930";
+pub const DEFAULT_ENGINE_LABEL_KEY: &str = "engine";
+pub const DEFAULT_ENGINE_LABEL_VALUE: &str = "tiflash";
 const DEFAULT_GRPC_CONCURRENCY: usize = 4;
 const DEFAULT_GRPC_CONCURRENT_STREAM: i32 = 1024;
 const DEFAULT_GRPC_RAFT_CONN_NUM: usize = 10;
@@ -112,7 +114,12 @@ impl Default for Config {
         Config {
             cluster_id: DEFAULT_CLUSTER_ID,
             addr: DEFAULT_LISTENING_ADDR.to_owned(),
-            labels: HashMap::default(),
+            labels: [(
+                DEFAULT_ENGINE_LABEL_KEY.to_owned(),
+                DEFAULT_ENGINE_LABEL_VALUE.to_owned(),
+            )].iter()
+                .cloned()
+                .collect(),
             advertise_addr: DEFAULT_ADVERTISE_LISTENING_ADDR.to_owned(),
             engine_addr: DEFAULT_ENGINE_LISTENING_ADDR.to_owned(),
             grpc_compression_type: GrpcCompressionType::None,
@@ -203,6 +210,14 @@ impl Config {
             validate_label(v, "value")?;
         }
 
+        if !self.labels.contains_key("engine")
+            || self.labels.get(&"engine".to_owned()).unwrap() != "tiflash"
+        {
+            return Err(box_err!(
+                "server.labels should not contain any label with key 'engine'."
+            ));
+        }
+
         Ok(())
     }
 
@@ -249,6 +264,7 @@ fn validate_label(s: &str, tp: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::ToOwned;
     use util::config::ReadableDuration;
 
     #[test]
@@ -282,6 +298,14 @@ mod tests {
 
         let mut invalid_cfg = cfg.clone();
         invalid_cfg.grpc_stream_initial_window_size = ReadableSize(i32::MAX as u64 + 1);
+        assert!(invalid_cfg.validate().is_err());
+
+        assert!(cfg.labels.contains_key("engine"));
+
+        let mut invalid_cfg = cfg.clone();
+        invalid_cfg
+            .labels
+            .insert("engine".to_owned(), "invalid_engine".to_owned());
         assert!(invalid_cfg.validate().is_err());
 
         cfg.labels.insert("k1".to_owned(), "v1".to_owned());

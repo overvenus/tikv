@@ -20,6 +20,7 @@ use clap::ArgMatches;
 use slog_scope::GlobalLoggerGuard;
 
 use tikv::config::{MetricConfig, TiKvConfig};
+use tikv::server::config::{DEFAULT_ENGINE_LABEL_KEY, DEFAULT_ENGINE_LABEL_VALUE};
 use tikv::util::collections::HashMap;
 use tikv::util::{self, logger};
 
@@ -112,11 +113,19 @@ pub fn overwrite_config_with_cmd_args(config: &mut TiKvConfig, matches: &ArgMatc
     }
 
     if let Some(labels_vec) = matches.values_of("labels") {
-        let mut labels = HashMap::default();
+        let mut labels: HashMap<String, String> = [(
+            DEFAULT_ENGINE_LABEL_KEY.to_owned(),
+            DEFAULT_ENGINE_LABEL_VALUE.to_owned(),
+        )].iter()
+            .cloned()
+            .collect();
         labels_vec
             .map(|s| {
                 let mut parts = s.split('=');
                 let key = parts.next().unwrap().to_owned();
+                if key == "engine" {
+                    fatal!("invalid label: {:?}, cannot set label key to 'engine'", s)
+                };
                 let value = match parts.next() {
                     None => fatal!("invalid label: {:?}", s),
                     Some(v) => v.to_owned(),
