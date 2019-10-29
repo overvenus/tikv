@@ -430,6 +430,9 @@ fn decode_write(key: Vec<u8>, value: &[u8], row: &mut EventRow) -> bool {
     row.key = key.truncate_ts().unwrap().to_raw().unwrap();
     row.op_type = op_type;
     row.r_type = r_type;
+    if let Some(value) = write.short_value {
+        row.value = value;
+    }
 
     false
 }
@@ -658,6 +661,7 @@ mod tests {
         row.key = key.to_vec();
         row.op_type = EventRowOpType::Put;
         row.r_type = EventLogType::Commit;
+        row.value = value.to_vec(); // short value.
         check_event(row);
     }
 
