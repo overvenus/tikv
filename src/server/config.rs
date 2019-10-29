@@ -21,6 +21,7 @@ use util::config::{self, ReadableDuration, ReadableSize};
 use util::io_limiter::DEFAULT_SNAP_MAX_BYTES_PER_SEC;
 
 pub use raftstore::store::Config as RaftStoreConfig;
+use std::borrow::ToOwned;
 pub use storage::Config as StorageConfig;
 
 pub const DEFAULT_CLUSTER_ID: u64 = 0;
@@ -210,8 +211,18 @@ impl Config {
             validate_label(v, "value")?;
         }
 
-        if !self.labels.contains_key("engine")
-            || self.labels.get(&"engine".to_owned()).unwrap() != "tiflash"
+        if !self
+            .labels
+            .contains_key(&DEFAULT_ENGINE_LABEL_KEY.to_owned())
+        {
+            self.labels.insert(
+                DEFAULT_ENGINE_LABEL_KEY.to_owned(),
+                DEFAULT_ENGINE_LABEL_VALUE.to_owned(),
+            );
+        } else if self
+            .labels
+            .get(&DEFAULT_ENGINE_LABEL_KEY.to_owned())
+            .unwrap() != DEFAULT_ENGINE_LABEL_VALUE
         {
             return Err(box_err!(
                 "server.labels should not contain any label with key 'engine'."
