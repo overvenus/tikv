@@ -72,6 +72,7 @@ impl TestSuite {
             let mut cdc_endpoint =
                 cdc::Endpoint::new(pd_cli.clone(), worker.scheduler(), apply_router, cdc_ob);
             cdc_endpoint.set_min_ts_interval(Duration::from_millis(100));
+            cdc_endpoint.set_scan_batch_size(2);
             worker.start(cdc_endpoint).unwrap();
         }
 
@@ -150,15 +151,6 @@ impl TestSuite {
 fn test_cdc_basic() {
     let mut suite = TestSuite::new(1);
 
-    let (k, v) = ("key1".to_owned(), "value".to_owned());
-    // Prewrite
-    let start_ts = suite.cluster.pd_client.get_tso().wait().unwrap();
-    let mut mutation = Mutation::default();
-    mutation.op = Op::Put;
-    mutation.key = k.clone().into_bytes();
-    mutation.value = v.clone().into_bytes();
-    suite.must_kv_prewrite(vec![mutation], k.clone().into_bytes(), start_ts);
-
     let mut req = ChangeDataRequest::default();
     req.region_id = 1;
     req.set_region_epoch(suite.get_context(1).take_region_epoch());
@@ -181,11 +173,21 @@ fn test_cdc_basic() {
             other => return other,
         }
     };
-    // Even if there is no write, resolved ts should be advanced regularly.
-    let event = receive_event(true);
-    match event {
-        Event_oneof_event::ResolvedTs(ts) => assert_ne!(0, ts),
-        _ => panic!("unknown event"),
+    for _ in 0..2 {
+        let event = receive_event(true);
+        match event {
+            // Even if there is no write,
+            // resolved ts should be advanced regularly.
+            Event_oneof_event::ResolvedTs(ts) => assert_ne!(0, ts),
+            // Even if there is no write,
+            // it should always outputs an Initialized event.
+            Event_oneof_event::Entries(es) => {
+                assert!(es.entries.len() == 1, "{:?}", es);
+                let e = &es.entries[0];
+                assert_eq!(e.r_type, EventLogType::Initialized, "{:?}", es);
+            }
+            _ => panic!("unknown event"),
+        }
     }
 
     // There must be a delegate.
@@ -199,6 +201,23 @@ fn test_cdc_basic() {
             }),
         ))
         .unwrap();
+
+    let (k, v) = ("key1".to_owned(), "value".to_owned());
+    // Prewrite
+    let start_ts = suite.cluster.pd_client.get_tso().wait().unwrap();
+    let mut mutation = Mutation::default();
+    mutation.op = Op::Put;
+    mutation.key = k.clone().into_bytes();
+    mutation.value = v.clone().into_bytes();
+    suite.must_kv_prewrite(vec![mutation], k.clone().into_bytes(), start_ts);
+    let event = receive_event(false);
+    match event {
+        Event_oneof_event::Entries(entries) => {
+            assert_eq!(entries.entries.len(), 1);
+            assert_eq!(entries.entries[0].r_type, EventLogType::Prewrite);
+        }
+        _ => panic!("unknown event"),
+    }
 
     // Commit
     let commit_ts = suite.cluster.pd_client.get_tso().wait().unwrap();
@@ -238,9 +257,14 @@ fn test_cdc_basic() {
     req.set_region_epoch(suite.get_context(1).take_region_epoch());
     let event_feed2 = suite.cdc_cli.event_feed(&req).unwrap();
     event_feed_wrap.replace(Some(event_feed2));
-    let event = receive_event(true);
+    let event = receive_event(false);
+
     match event {
-        Event_oneof_event::ResolvedTs(ts) => assert_ne!(0, ts),
+        Event_oneof_event::Entries(es) => {
+            assert!(es.entries.len() == 1, "{:?}", es);
+            let e = &es.entries[0];
+            assert_eq!(e.r_type, EventLogType::Initialized, "{:?}", es);
+        }
         Event_oneof_event::Error(e) => panic!("{:?}", e),
         _ => panic!("unknown event"),
     }
@@ -278,7 +302,9 @@ fn test_cdc_basic() {
         Event_oneof_event::Error(err) => {
             assert!(err.has_epoch_not_match(), "{:?}", err);
         }
-        _ => panic!("unknown event"),
+        Event_oneof_event::ResolvedTs(e) => panic!("{:?}", e),
+        Event_oneof_event::Entries(e) => panic!("{:?}", e),
+        Event_oneof_event::Admin(e) => panic!("{:?}", e),
     }
 
     suite.stop();
@@ -287,15 +313,6 @@ fn test_cdc_basic() {
 #[test]
 fn test_cdc_not_leader() {
     let mut suite = TestSuite::new(3);
-
-    // Make sure region 1 is ready.
-    let (k, v) = ("key1".to_owned(), "value".to_owned());
-    let start_ts = suite.cluster.pd_client.get_tso().wait().unwrap();
-    let mut mutation = Mutation::default();
-    mutation.op = Op::Put;
-    mutation.key = k.clone().into_bytes();
-    mutation.value = v.clone().into_bytes();
-    suite.must_kv_prewrite(vec![mutation], k.clone().into_bytes(), start_ts);
 
     let leader = suite.cluster.leader_of_region(1).unwrap();
     let mut req = ChangeDataRequest::default();
@@ -322,9 +339,15 @@ fn test_cdc_not_leader() {
     };
 
     // Make sure region 1 is registered.
-    let event = receive_event(true);
+    let event = receive_event(false);
     match event {
-        Event_oneof_event::ResolvedTs(ts) => assert_ne!(0, ts),
+        // Even if there is no write,
+        // it should always outputs an Initialized event.
+        Event_oneof_event::Entries(es) => {
+            assert!(es.entries.len() == 1, "{:?}", es);
+            let e = &es.entries[0];
+            assert_eq!(e.r_type, EventLogType::Initialized, "{:?}", es);
+        }
         _ => panic!("unknown event"),
     }
 
@@ -396,15 +419,6 @@ fn test_cdc_not_leader() {
 fn test_cdc_stale_epoch_after_region_ready() {
     let mut suite = TestSuite::new(3);
 
-    // Make sure region 1 is ready.
-    let (k, v) = ("key1".to_owned(), "value".to_owned());
-    let start_ts = suite.cluster.pd_client.get_tso().wait().unwrap();
-    let mut mutation = Mutation::default();
-    mutation.op = Op::Put;
-    mutation.key = k.clone().into_bytes();
-    mutation.value = v.clone().into_bytes();
-    suite.must_kv_prewrite(vec![mutation], k.clone().into_bytes(), start_ts);
-
     let mut req = ChangeDataRequest::default();
     req.region_id = 1;
     req.set_region_epoch(suite.get_context(1).take_region_epoch());
@@ -429,9 +443,15 @@ fn test_cdc_stale_epoch_after_region_ready() {
     };
 
     // Make sure region 1 is registered.
-    let event = receive_event(true);
+    let event = receive_event(false);
     match event {
-        Event_oneof_event::ResolvedTs(ts) => assert_ne!(0, ts),
+        // Even if there is no write,
+        // it should always outputs an Initialized event.
+        Event_oneof_event::Entries(es) => {
+            assert!(es.entries.len() == 1, "{:?}", es);
+            let e = &es.entries[0];
+            assert_eq!(e.r_type, EventLogType::Initialized, "{:?}", es);
+        }
         _ => panic!("unknown event"),
     }
 
