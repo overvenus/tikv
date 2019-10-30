@@ -9,7 +9,7 @@ use kvproto::metapb::Region;
 use pd_client::PdClient;
 use resolved_ts::Resolver;
 use tikv::raftstore::coprocessor::*;
-use tikv::raftstore::store::fsm::{ApplyRouter, ApplyTask};
+use tikv::raftstore::store::fsm::{ApplyRouter, ApplyTask, ChangeCmd};
 use tikv::raftstore::store::msg::{Callback, ReadResponse};
 use tikv::raftstore::store::RegionSnapshot;
 use tikv::storage::mvcc::reader::ScannerBuilder;
@@ -186,56 +186,45 @@ impl Endpoint {
             d
         });
 
-        let id = downstream.id;
+        let downstream_id = downstream.id;
         let checkpoint_ts = request.checkpoint_ts;
+        let sched = self.scheduler.clone();
+        let workers = self.workers.sender().clone();
+        let batch_size = self.scan_batch_size;
+
+        let init = Initializer {
+            workers,
+            sched,
+            region_id,
+            downstream_id,
+            checkpoint_ts,
+            batch_size,
+            build_resolver: enabled.is_some(),
+        };
         delegate.subscribe(downstream);
-        if let Some(enabled) = enabled {
+        let change_cmd = if let Some(enabled) = enabled {
             // The region has never been registered.
             // Subscribe region role change events.
             self.observer.subscribe_region(region_id);
 
-            let scheduler = self.scheduler.clone();
-            let workers = self.workers.sender().clone();
-            let batch_size = self.scan_batch_size;
-            self.apply_router.schedule_task(
+            ApplyTask::Change(ChangeCmd::RegisterObserver {
                 region_id,
-                ApplyTask::RegisterCmdObserver {
-                    region_id,
-                    region_epoch: request.take_region_epoch(),
-                    enabled,
-                    cb: Callback::Read(Box::new(move |mut resp: ReadResponse| {
-                        if let Some(region_snapshot) = resp.snapshot {
-                            async_build_resolver(
-                                workers.clone(),
-                                scheduler.clone(),
-                                region_snapshot.clone(),
-                            );
-                            async_incremental_scan(
-                                workers,
-                                scheduler,
-                                region_snapshot,
-                                id,
-                                checkpoint_ts,
-                                batch_size,
-                            );
-                        } else {
-                            assert!(
-                                resp.response.get_header().has_error(),
-                                "no snashot and no error? {:?}",
-                                resp.response
-                            );
-                            let err = resp.response.take_header().take_error();
-                            let deregister = Task::Deregister {
-                                region_id,
-                                id: Some(id),
-                                err: Some(Error::Request(err)),
-                            };
-                            scheduler.schedule(deregister).unwrap();
-                        }
-                    })),
-                },
-            );
-        }
+                region_epoch: request.take_region_epoch(),
+                enabled,
+                cb: Callback::Read(Box::new(move |resp: ReadResponse| {
+                    init.on_change_cmd(resp);
+                })),
+            })
+        } else {
+            ApplyTask::Change(ChangeCmd::Snapshot {
+                region_id,
+                region_epoch: request.take_region_epoch(),
+                cb: Callback::Read(Box::new(move |resp: ReadResponse| {
+                    init.on_change_cmd(resp);
+                })),
+            })
+        };
+        self.apply_router.schedule_task(region_id, change_cmd);
     }
 
     pub fn on_multi_batch(&mut self, multi: Vec<CmdBatch>) {
@@ -298,111 +287,147 @@ impl Endpoint {
     }
 }
 
-fn async_build_resolver(workers: PoolSender, sched: Scheduler<Task>, snap: RegionSnapshot) {
-    info!("async build resolver"; "region_id" => snap.get_region().get_id());
-    // spawn the task to a thread pool.
-    let region_id = snap.get_region().get_id();
-    let region = snap.get_region().clone();
-    workers
-        .spawn(
-            lazy(move || {
-                let mut lock_scanner = LockScanner::new(snap)?;
-                lock_scanner.build_resolver()
-            })
-            .then(move |res| match res {
-                Ok(resolver) => {
-                    info!("schedule resolver ready";
-                    "region_id" => region_id);
-                    if let Err(e) = sched.schedule(Task::ResolverReady {
-                        region_id,
-                        resolver,
-                        region,
-                    }) {
-                        error!("schedule task failed"; "error" => ?e);
-                    }
-                    Ok(())
-                }
-                Err(e) => {
-                    error!("builder resolver failed"; "error" => ?e);
-                    // Unregister all downstreams.
-                    // TODO: record in metrics.
-                    if let Err(e) = sched.schedule(Task::Deregister {
-                        region_id,
-                        id: None,
-                        err: Some(e),
-                    }) {
-                        error!("schedule task failed"; "error" => ?e);
-                    }
-                    Ok(())
-                }
-            }),
-        )
-        .unwrap();
-}
-
-fn async_incremental_scan(
+struct Initializer {
     workers: PoolSender,
     sched: Scheduler<Task>,
-    snap: RegionSnapshot,
+
+    region_id: u64,
     downstream_id: usize,
     checkpoint_ts: u64,
     batch_size: usize,
-) {
-    info!("async incremental scan";
-        "region_id" => snap.get_region().get_id(),
-        "downstream_id" => downstream_id);
-    // spawn the task to a thread pool.
-    let region_id = snap.get_region().get_id();
-    workers
-        .spawn(lazy(move || {
-            // Time range: (checkpoint_ts, current]
-            let current = std::u64::MAX;
-            let mut scanner = ScannerBuilder::new(snap, current, false)
-                .range(None, None)
-                .isolation_level(IsolationLevel::Si)
-                .build_delta(checkpoint_ts, false)
-                .unwrap();
-            let mut done = false;
-            while !done {
-                let mut entries = Vec::with_capacity(batch_size);
-                while entries.len() < entries.capacity() {
-                    match scanner.next_entry() {
-                        Ok(Some(entry)) => {
-                            entries.push(Some(entry));
+
+    build_resolver: bool,
+}
+
+impl Initializer {
+    fn on_change_cmd(&self, mut resp: ReadResponse) {
+        if let Some(region_snapshot) = resp.snapshot {
+            assert_eq!(self.region_id, region_snapshot.get_region().get_id());
+            if self.build_resolver {
+                self.async_build_resolver(region_snapshot.clone());
+            }
+            self.async_incremental_scan(region_snapshot);
+        } else {
+            assert!(
+                resp.response.get_header().has_error(),
+                "no snapshot and no error? {:?}",
+                resp.response
+            );
+            let err = resp.response.take_header().take_error();
+            let deregister = Task::Deregister {
+                region_id: self.region_id,
+                id: Some(self.downstream_id),
+                err: Some(Error::Request(err)),
+            };
+            self.sched.schedule(deregister).unwrap();
+        }
+    }
+
+    fn async_build_resolver(&self, snap: RegionSnapshot) {
+        info!("async build resolver"; "region_id" => snap.get_region().get_id());
+        // spawn the task to a thread pool.
+        let region_id = snap.get_region().get_id();
+        let region = snap.get_region().clone();
+        let sched = self.sched.clone();
+        self.workers
+            .spawn(
+                lazy(move || {
+                    let mut lock_scanner = LockScanner::new(snap)?;
+                    lock_scanner.build_resolver()
+                })
+                .then(move |res| match res {
+                    Ok(resolver) => {
+                        info!("schedule resolver ready";
+                    "region_id" => region_id);
+                        if let Err(e) = sched.schedule(Task::ResolverReady {
+                            region_id,
+                            resolver,
+                            region,
+                        }) {
+                            error!("schedule task failed"; "error" => ?e);
                         }
-                        Ok(None) => {
-                            entries.push(None);
-                            done = true;
-                            break;
+                        Ok(())
+                    }
+                    Err(e) => {
+                        error!("builder resolver failed"; "error" => ?e);
+                        // Unregister all downstreams.
+                        // TODO: record in metrics.
+                        if let Err(e) = sched.schedule(Task::Deregister {
+                            region_id,
+                            id: None,
+                            err: Some(e),
+                        }) {
+                            error!("schedule task failed"; "error" => ?e);
                         }
-                        Err(e) => {
-                            error!("cdc scan entries failed"; "error" => ?e);
-                            // TODO: record in metrics.
-                            if let Err(e) = sched.schedule(Task::Deregister {
-                                region_id,
-                                id: Some(downstream_id),
-                                err: Some(e.into()),
-                            }) {
-                                error!("schedule task failed"; "error" => ?e);
+                        Ok(())
+                    }
+                }),
+            )
+            .unwrap();
+    }
+
+    fn async_incremental_scan(&self, snap: RegionSnapshot) {
+        let downstream_id = self.downstream_id;
+        let sched = self.sched.clone();
+        let batch_size = self.batch_size;
+        let checkpoint_ts = self.checkpoint_ts;
+        info!("async incremental scan";
+            "region_id" => snap.get_region().get_id(),
+            "downstream_id" => downstream_id);
+
+        // spawn the task to a thread pool.
+        let region_id = snap.get_region().get_id();
+        self.workers
+            .spawn(lazy(move || {
+                // Time range: (checkpoint_ts, current]
+                let current = std::u64::MAX;
+                let mut scanner = ScannerBuilder::new(snap, current, false)
+                    .range(None, None)
+                    .isolation_level(IsolationLevel::Si)
+                    .build_delta(checkpoint_ts, false)
+                    .unwrap();
+                let mut done = false;
+                while !done {
+                    let mut entries = Vec::with_capacity(batch_size);
+                    while entries.len() < entries.capacity() {
+                        match scanner.next_entry() {
+                            Ok(Some(entry)) => {
+                                entries.push(Some(entry));
                             }
-                            return Ok(());
+                            Ok(None) => {
+                                entries.push(None);
+                                done = true;
+                                break;
+                            }
+                            Err(e) => {
+                                error!("cdc scan entries failed"; "error" => ?e);
+                                // TODO: record in metrics.
+                                if let Err(e) = sched.schedule(Task::Deregister {
+                                    region_id,
+                                    id: Some(downstream_id),
+                                    err: Some(e.into()),
+                                }) {
+                                    error!("schedule task failed"; "error" => ?e);
+                                }
+                                return Ok(());
+                            }
                         }
                     }
+                    debug!("cdc scan entries"; "len" => entries.len());
+                    let scanned = Task::IncrementalScan {
+                        region_id,
+                        downstream_id,
+                        entries,
+                    };
+                    if let Err(e) = sched.schedule(scanned) {
+                        error!("schedule task failed"; "error" => ?e);
+                        return Ok(());
+                    }
                 }
-                debug!("cdc scan entries"; "len" => entries.len());
-                let scanned = Task::IncrementalScan {
-                    region_id,
-                    downstream_id,
-                    entries,
-                };
-                if let Err(e) = sched.schedule(scanned) {
-                    error!("schedule task failed"; "error" => ?e);
-                    return Ok(());
-                }
-            }
-            Ok(())
-        }))
-        .unwrap();
+                Ok(())
+            }))
+            .unwrap();
+    }
 }
 
 impl Runnable<Task> for Endpoint {

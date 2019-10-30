@@ -2299,6 +2299,20 @@ impl Debug for GenSnapTask {
     }
 }
 
+pub enum ChangeCmd {
+    RegisterObserver {
+        region_id: u64,
+        region_epoch: RegionEpoch,
+        enabled: Arc<AtomicBool>,
+        cb: Callback,
+    },
+    Snapshot {
+        region_id: u64,
+        region_epoch: RegionEpoch,
+        cb: Callback,
+    },
+}
+
 pub enum Msg {
     Apply {
         start: Instant,
@@ -2310,12 +2324,7 @@ pub enum Msg {
     LogsUpToDate(u64),
     Destroy(Destroy),
     Snapshot(GenSnapTask),
-    RegisterCmdObserver {
-        region_id: u64,
-        region_epoch: RegionEpoch,
-        enabled: Arc<AtomicBool>,
-        cb: Callback,
-    },
+    Change(ChangeCmd),
     #[cfg(test)]
     Validate(u64, Box<dyn FnOnce(&ApplyDelegate) + Send>),
 }
@@ -2351,8 +2360,11 @@ impl Debug for Msg {
             Msg::Snapshot(GenSnapTask { region_id, .. }) => {
                 write!(f, "[region {}] requests a snapshot", region_id)
             }
-            Msg::RegisterCmdObserver { region_id, .. } => {
+            Msg::Change(ChangeCmd::RegisterObserver { region_id, .. }) => {
                 write!(f, "[region {}] registers cmd observer", region_id)
+            }
+            Msg::Change(ChangeCmd::Snapshot { region_id, .. }) => {
+                write!(f, "[region {}] cmd snapshot", region_id)
             }
             #[cfg(test)]
             Msg::Validate(region_id, _) => write!(f, "[region {}] validate", region_id),
@@ -2687,19 +2699,31 @@ impl ApplyFsm {
         );
     }
 
-    fn handle_register_cmd_observer(
-        &mut self,
-        apply_ctx: &mut ApplyContext,
-        region_epoch: RegionEpoch,
-        enabled: Arc<AtomicBool>,
-        cb: Callback,
-    ) {
-        assert!(!self
-            .delegate
-            .cmd_observer_enabled
-            .as_ref()
-            .map_or(false, |e| e.load(Ordering::Relaxed)));
-        self.delegate.cmd_observer_enabled = Some(enabled);
+    fn handle_change(&mut self, apply_ctx: &mut ApplyContext, change: ChangeCmd) {
+        let (region_id, region_epoch, cb) = match change {
+            ChangeCmd::RegisterObserver {
+                region_id,
+                region_epoch,
+                enabled,
+                cb,
+            } => {
+                assert!(!self
+                    .delegate
+                    .cmd_observer_enabled
+                    .as_ref()
+                    .map_or(false, |e| e.load(Ordering::Relaxed)));
+                // TODO(cdc): take cmd_observer_enabled when enabled is false.
+                self.delegate.cmd_observer_enabled = Some(enabled);
+                (region_id, region_epoch, cb)
+            }
+            ChangeCmd::Snapshot {
+                region_id,
+                region_epoch,
+                cb,
+            } => (region_id, region_epoch, cb),
+        };
+
+        assert_eq!(self.delegate.region_id(), region_id);
         let resp = match compare_region_epoch(
             &region_epoch,
             &self.delegate.region,
@@ -2720,8 +2744,6 @@ impl ApplyFsm {
             },
         };
         cb.invoke_read(resp);
-
-        // TODO(cdc): take cmd_observer_enabled when enabled is false.
     }
 
     fn handle_tasks(&mut self, apply_ctx: &mut ApplyContext, msgs: &mut Vec<Msg>) {
@@ -2745,14 +2767,8 @@ impl ApplyFsm {
                 Some(Msg::CatchUpLogs(cul)) => self.catch_up_logs_for_merge(apply_ctx, cul),
                 Some(Msg::LogsUpToDate(_)) => {}
                 Some(Msg::Snapshot(snap_task)) => self.handle_snapshot(apply_ctx, snap_task),
-                Some(Msg::RegisterCmdObserver {
-                    region_id,
-                    region_epoch,
-                    enabled,
-                    cb,
-                }) => {
-                    assert_eq!(self.delegate.region_id(), region_id);
-                    self.handle_register_cmd_observer(apply_ctx, region_epoch, enabled, cb);
+                Some(Msg::Change(change_cmd)) => {
+                    self.handle_change(apply_ctx, change_cmd);
                 }
                 #[cfg(test)]
                 Some(Msg::Validate(_, f)) => f(&self.delegate),
@@ -2964,7 +2980,8 @@ impl ApplyRouter {
                     );
                     return;
                 }
-                Msg::RegisterCmdObserver { region_id, cb, .. } => {
+                Msg::Change(ChangeCmd::RegisterObserver { region_id, cb, .. })
+                | Msg::Change(ChangeCmd::Snapshot { region_id, cb, .. }) => {
                     warn!("target region is not found";
                             "region_id" => region_id);
                     let resp = ReadResponse {
@@ -3812,7 +3829,7 @@ mod tests {
         let enabled = Arc::new(AtomicBool::new(true));
         router.schedule_task(
             1,
-            Msg::RegisterCmdObserver {
+            Msg::Change(ChangeCmd::RegisterObserver {
                 region_id: 1,
                 region_epoch: region_epoch.clone(),
                 enabled: enabled.clone(),
@@ -3820,7 +3837,7 @@ mod tests {
                     assert!(!resp.response.get_header().has_error());
                     assert!(resp.snapshot.is_some());
                 })),
-            },
+            }),
         );
 
         let (capture_tx, capture_rx) = mpsc::channel();
@@ -3867,7 +3884,7 @@ mod tests {
         // Must response a RegionNotFound error.
         router.schedule_task(
             2,
-            Msg::RegisterCmdObserver {
+            Msg::Change(ChangeCmd::RegisterObserver {
                 region_id: 2,
                 region_epoch,
                 enabled: enabled.clone(),
@@ -3879,7 +3896,7 @@ mod tests {
                         .has_region_not_found());
                     assert!(resp.snapshot.is_none());
                 })),
-            },
+            }),
         );
 
         system.shutdown();
@@ -4026,7 +4043,7 @@ mod tests {
         let enabled = Arc::new(AtomicBool::new(true));
         router.schedule_task(
             1,
-            Msg::RegisterCmdObserver {
+            Msg::Change(ChangeCmd::RegisterObserver {
                 region_id: 1,
                 region_epoch: region_epoch.clone(),
                 enabled: enabled.clone(),
@@ -4034,7 +4051,7 @@ mod tests {
                     assert!(!resp.response.get_header().has_error(), "{:?}", resp);
                     assert!(resp.snapshot.is_some());
                 })),
-            },
+            }),
         );
 
         let mut index_id = 1;
@@ -4174,7 +4191,7 @@ mod tests {
         enabled.store(false, Ordering::SeqCst);
         router.schedule_task(
             1,
-            Msg::RegisterCmdObserver {
+            Msg::Change(ChangeCmd::RegisterObserver {
                 region_id: 1,
                 region_epoch: region_epoch.clone(),
                 enabled: Arc::new(AtomicBool::new(true)),
@@ -4187,7 +4204,7 @@ mod tests {
                     assert!(resp.snapshot.is_none());
                     tx.send(()).unwrap();
                 })),
-            },
+            }),
         );
         rx.recv_timeout(Duration::from_millis(500)).unwrap();
     }

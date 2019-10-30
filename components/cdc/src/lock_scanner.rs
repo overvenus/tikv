@@ -100,7 +100,11 @@ mod tests {
         ];
         for (key, start_ts) in locked_key {
             // lock key
-            must_prewrite_put(&engine, key, key, key, start_ts);
+            if start_ts % 2 == 0 {
+                must_prewrite_put(&engine, key, key, key, start_ts);
+            } else {
+                must_prewrite_delete(&engine, key, key, start_ts);
+            }
         }
 
         let cases = vec![

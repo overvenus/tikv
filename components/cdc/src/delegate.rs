@@ -44,10 +44,8 @@ impl Downstream {
     }
 
     fn sink(&self, change_data: ChangeDataEvent) {
-        if let Err(e) = self.sink.unbounded_send(change_data) {
-            info!("send event failed";
-                "downstream" => %self.peer,
-                "change_data" => ?e.into_inner());
+        if self.sink.unbounded_send(change_data).is_err() {
+            info!("send event failed"; "downstream" => %self.peer);
         }
     }
 }
