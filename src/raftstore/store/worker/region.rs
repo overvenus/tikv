@@ -453,6 +453,12 @@ impl SnapContext {
             region_id,
             timer.elapsed()
         );
+        {
+            // hacked by solotzg: clean up range and trying to delete files
+            self.cleanup_range(
+                region_id, &start_key, &end_key, true, /* use_delete_files */
+            );
+        }
         Ok(())
     }
 
