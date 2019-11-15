@@ -12,8 +12,7 @@
 // limitations under the License.
 
 use std::cell::RefCell;
-use std::collections::Bound::{Excluded, Unbounded};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::{atomic, Arc};
 use std::time::{Duration, Instant};
@@ -25,9 +24,7 @@ use kvproto::raft_cmdpb::{
     self, AdminCmdType, AdminResponse, CmdType, RaftCmdRequest, RaftCmdResponse, ReadIndexResponse,
     Request, Response, TransferLeaderRequest, TransferLeaderResponse,
 };
-use kvproto::raft_serverpb::{
-    MergeState, PeerState, RaftApplyState, RaftMessage, RaftSnapshotData,
-};
+use kvproto::raft_serverpb::{MergeState, PeerState, RaftApplyState, RaftMessage};
 use protobuf::{self, Message};
 use raft::eraftpb::{self, ConfChangeType, EntryType, MessageType};
 use rocksdb::rocksdb_options::WriteOptions;
@@ -35,8 +32,6 @@ use rocksdb::{WriteBatch, DB};
 use time::Timespec;
 
 use pd::{PdTask, INVALID_ID};
-use raftstore::store::keys::{enc_end_key, enc_start_key};
-
 use raft::{
     self, Progress, ProgressState, RawNode, Ready, SnapshotStatus, StateRole, INVALID_INDEX,
     NO_LIMIT,
@@ -607,7 +602,7 @@ impl Peer {
         self.mut_store().set_region(region.clone());
         let progress = ReadProgress::region(region);
         // Always update read delegate's region to avoid stale region info after a follower
-        // becoming a leader.
+        // becomeing a leader.
         self.maybe_update_read_progress(progress);
 
         if !self.pending_remove {
@@ -649,11 +644,7 @@ impl Peer {
 
     #[inline]
     pub fn has_pending_snapshot(&self) -> bool {
-        self.get_pending_snapshot().is_some()
-    }
-
-    pub fn get_pending_snapshot(&self) -> Option<&eraftpb::Snapshot> {
-        self.raft_group.get_snap()
+        self.raft_group.get_snap().is_some()
     }
 
     fn add_ready_metric(&self, ready: &Ready, metrics: &mut RaftReadyMetrics) {
@@ -953,8 +944,6 @@ impl Peer {
         &mut self,
         ctx: &mut ReadyContext<T>,
         worker: &FutureWorker<PdTask>,
-        region_ranges: &BTreeMap<Vec<u8>, u64>,
-        region_peers: &HashMap<u64, Peer>,
     ) {
         self.marked_to_be_checked = false;
         if self.pending_remove {
@@ -980,42 +969,15 @@ impl Peer {
                 });
         }
 
-        if let Some(snap) = self.get_pending_snapshot() {
-            if !self.ready_to_handle_pending_snap() {
-                debug!(
-                    "{} [apply_idx: {}, last_applying_idx: {}] is not ready to apply snapshot.",
-                    self.tag,
-                    self.get_store().applied_index(),
-                    self.last_applying_idx,
-                );
-                return;
-            }
-
-            let mut snap_data = RaftSnapshotData::new();
-            snap_data
-                .merge_from_bytes(snap.get_data())
-                .unwrap_or_else(|e| {
-                    warn!("{} snap data err {:?}", self.tag, e);
-                });
-            let region = snap_data.take_region();
-            // For merge process, when applying snapshot or create new peer the stale source peer is destroyed asynchronously.
-            // So here checks whether there is any overlap, if so, wait and do not handle raft ready.
-            if let Some(r) = region_ranges
-                .range((Excluded(enc_start_key(&region)), Unbounded::<Vec<u8>>))
-                .filter(|(_, &region_id)| region_id != region.get_id())
-                .map(|(_, &region_id)| region_peers[&region_id].region())
-                .take_while(|r| enc_start_key(r) < enc_end_key(&region))
-                .next()
-            {
-                info!(
-                    "{} [apply_idx: {}, last_applying_idx: {}] snapshot range overlaps {:?}, wait source destroy finish",
-                    self.tag,
-                    self.get_store().applied_index(),
-                    self.last_applying_idx,
-                    r,
-                );
-                return;
-            }
+        if self.has_pending_snapshot() && !self.ready_to_handle_pending_snap() {
+            info!(
+                "{} [apply_idx: {}, last_applying_idx: {}] is not ready to apply snapshot.",
+                self.tag,
+                self.get_store().applied_index(),
+                self.last_applying_idx
+            );
+            ctx.pending_sync_region.push(self.region_id);
+            return;
         }
 
         if !self
