@@ -14,7 +14,6 @@ use tikv::storage::txn::Error as TxnError;
 use crate::metrics::*;
 
 impl Into<ErrorPb> for Error {
-    // TODO: test error conversion.
     fn into(self) -> ErrorPb {
         let mut err = ErrorPb::new();
         match self {

@@ -2,50 +2,20 @@
 
 use std::cell::RefCell;
 use std::cmp;
-use std::fmt;
-use std::sync::atomic::*;
 use std::sync::*;
 use std::time::*;
 
-use engine::rocks::util::io_limiter::IOLimiter;
 use engine::DB;
-use external_storage::*;
-use futures::lazy;
-use futures::prelude::Future;
-use futures::sync::mpsc::*;
-use kvproto::backup::*;
-use kvproto::metapb::*;
-use raft::StateRole;
-use tidb_query::codec::table::decode_table_id;
-use tikv::raftstore::store::util::find_peer;
 use tikv::storage::kv::{Engine, RegionInfoProvider};
-use tikv::storage::txn::{EntryBatch, SnapshotStore, TxnEntryScanner, TxnEntryStore};
-use tikv::storage::{Key, Statistics};
 use tikv_util::timer::Timer;
 use tikv_util::worker::{Runnable, RunnableWithTimer};
 use tokio_threadpool::{Builder as ThreadPoolBuilder, ThreadPool};
 
-use crate::backup_range::BackupRange;
 use crate::metrics::*;
-use crate::task::{LimitedStorage, Progress, Task, TaskID};
-use crate::*;
+use crate::task::Task;
 
 // if thread pool has been idle for such long time, we will shutdown it.
 const IDLE_THREADPOOL_DURATION: u64 = 30 * 60 * 1000; // 30 mins
-
-/// The endpoint of backup.
-///
-/// It coordinates backup tasks and dispatches them to different workers.
-pub struct Endpoint<E: Engine, R: RegionInfoProvider> {
-    store_id: u64,
-    pool: RefCell<ControlThreadPool>,
-    pool_idle_threshold: u64,
-    db: Arc<DB>,
-
-    // pending_tasks: HashMap<TaskID, Task>,
-    pub(crate) engine: E,
-    pub(crate) region_info: R,
-}
 
 struct ControlThreadPool {
     size: usize,
@@ -98,6 +68,19 @@ impl ControlThreadPool {
     }
 }
 
+/// The endpoint of backup.
+///
+/// It coordinates backup tasks and dispatches them to different workers.
+pub struct Endpoint<E: Engine, R: RegionInfoProvider> {
+    store_id: u64,
+    pool: RefCell<ControlThreadPool>,
+    pool_idle_threshold: u64,
+    db: Arc<DB>,
+
+    pub(crate) engine: E,
+    pub(crate) region_info: R,
+}
+
 impl<E: Engine, R: RegionInfoProvider> Endpoint<E, R> {
     pub fn new(store_id: u64, engine: E, region_info: R, db: Arc<DB>) -> Endpoint<E, R> {
         Endpoint {
@@ -117,9 +100,7 @@ impl<E: Engine, R: RegionInfoProvider> Endpoint<E, R> {
     }
 
     pub fn handle_backup_task(&self, task: Task) {
-        let start = Instant::now();
-
-        let (res_tx, res_rx) = mpsc::channel();
+        let task_id = task.id;
         let concurrency = cmp::max(1, task.concurrency) as usize;
         self.pool.borrow_mut().adjust_with(concurrency);
         if let Err(e) = task.spawn_backup_worker(
@@ -128,60 +109,9 @@ impl<E: Engine, R: RegionInfoProvider> Endpoint<E, R> {
             self.db.clone(),
             &self.engine,
             &self.region_info,
-            res_tx,
         ) {
-            // TOOD: handle error
-            panic!("{:?}", e);
+            error!("handle backup task failed"; "error" => ?e, "task" => ?task_id);
         }
-
-        let mut summary = Statistics::default();
-        let resp = task.resp;
-        for (brange, res) in res_rx {
-            let start_key = brange
-                .start_key
-                .map_or_else(|| vec![], |k| k.into_raw().unwrap());
-            let end_key = brange
-                .end_key
-                .map_or_else(|| vec![], |k| k.into_raw().unwrap());
-            let mut response = BackupResponse::new();
-            match res {
-                Ok((mut files, stat)) => {
-                    debug!("backup region finish";
-                        "region" => ?brange.region,
-                        "start_key" => hex::encode_upper(&start_key),
-                        "end_key" => hex::encode_upper(&end_key),
-                        "details" => ?stat);
-                    summary.add(&stat);
-                    // Fill key range and ts.
-                    for file in files.iter_mut() {
-                        file.set_start_key(start_key.clone());
-                        file.set_end_key(end_key.clone());
-                        file.set_start_version(task.start_ts);
-                        file.set_end_version(task.end_ts);
-                    }
-                    response.set_files(files.into());
-                }
-                Err(e) => {
-                    error!("backup region failed";
-                        "region" => ?brange.region,
-                        "start_key" => hex::encode_upper(response.get_start_key()),
-                        "end_key" => hex::encode_upper(response.get_end_key()),
-                        "error" => ?e);
-                    response.set_error(e.into());
-                }
-            }
-            response.set_start_key(start_key);
-            response.set_end_key(end_key);
-            if let Err(e) = resp.unbounded_send(response) {
-                error!("backup failed to send response"; "error" => ?e);
-                break;
-            }
-        }
-        let duration = start.elapsed();
-        BACKUP_REQUEST_HISTOGRAM.observe(duration.as_secs_f64());
-        info!("backup finished";
-            "take" => ?duration,
-            "summary" => ?summary);
     }
 }
 
@@ -217,20 +147,29 @@ impl<E: Engine, R: RegionInfoProvider> RunnableWithTimer<Task, ()> for Endpoint<
 
 #[cfg(test)]
 pub mod tests {
-    use super::*;
-    use futures::{self, Future, Stream};
-    use kvproto::metapb;
-    use rand;
+    use std::sync::atomic::*;
     use std::thread;
+
+    use futures::sync::mpsc::*;
+    use futures::{self, Future, Stream};
+    use kvproto::backup::*;
+    use kvproto::metapb;
+    use raft::StateRole;
+    use rand;
     use tempfile::TempDir;
     use tikv::raftstore::coprocessor::RegionCollector;
     use tikv::raftstore::coprocessor::SeekRegionCallback;
     use tikv::raftstore::store::util::new_peer;
     use tikv::storage::kv::Result as EngineResult;
     use tikv::storage::mvcc::tests::*;
+    use tikv::storage::Key;
     use tikv::storage::SHORT_VALUE_MAX_LEN;
     use tikv::storage::{RocksEngine, TestEngineBuilder};
     use tikv_util::time::Instant;
+
+    use crate::task::{Progress, TaskID};
+
+    use super::*;
 
     #[derive(Clone)]
     pub struct MockRegionInfoProvider {
@@ -326,6 +265,7 @@ pub mod tests {
                     Some(Key::from_raw(end_key))
                 };
                 let mut prs = Progress::new(
+                    TaskID::default(),
                     endpoint.store_id,
                     start_key,
                     end_key,

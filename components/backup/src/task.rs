@@ -2,8 +2,8 @@
 
 use std::fmt;
 use std::sync::atomic::*;
-// use std::sync::mpsc::Sender as StdSender;
 use std::sync::*;
+use std::time::Instant;
 
 use engine::rocks::util::io_limiter::IOLimiter;
 use engine::DB;
@@ -21,11 +21,10 @@ use tokio_threadpool::ThreadPool;
 
 use crate::backup_range::BackupRange;
 use crate::errors::{Error as BError, Result};
+use crate::metrics::*;
 use crate::writer::BackupWriter;
 
 const WORKER_TAKE_RANGE: usize = 6;
-
-type BackupRes = (Vec<File>, Statistics);
 
 #[derive(Clone)]
 pub struct LimitedStorage {
@@ -35,30 +34,40 @@ pub struct LimitedStorage {
 
 static ID_ALLOC: AtomicUsize = AtomicUsize::new(0);
 
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
 pub struct TaskID(usize);
+
+impl Default for TaskID {
+    fn default() -> TaskID {
+        TaskID(ID_ALLOC.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 /// The progress of a backup task
 pub struct Progress<R: RegionInfoProvider> {
+    task_id: TaskID,
     store_id: u64,
     next_start: Option<Key>,
     end_key: Option<Key>,
     region_info: R,
     finished: bool,
-    // complete_tx: StdSender<()>,
+
+    start: Instant,
 }
 
 impl<R: RegionInfoProvider> Drop for Progress<R> {
     fn drop(&mut self) {
-        // TODO notify completion.
-        // if let Err(_) = self.complete_tx.send(()) {
-        //     warn!("fail to send completeness"; "id" => ?self.id);
-        // }
+        let duration = self.start.elapsed();
+        BACKUP_REQUEST_HISTOGRAM.observe(duration.as_secs_f64());
+        info!("backup finished";
+            "task_id" => ?self.task_id,
+            "take" => ?duration);
     }
 }
 
 impl<R: RegionInfoProvider> Progress<R> {
     pub fn new(
+        task_id: TaskID,
         store_id: u64,
         next_start: Option<Key>,
         end_key: Option<Key>,
@@ -70,6 +79,8 @@ impl<R: RegionInfoProvider> Progress<R> {
             end_key,
             region_info,
             finished: false,
+            start: Instant::now(),
+            task_id,
         }
     }
 
@@ -145,7 +156,7 @@ impl<R: RegionInfoProvider> Progress<R> {
 
 /// Backup task.
 pub struct Task {
-    id: TaskID,
+    pub(crate) id: TaskID,
     start_key: Option<Key>,
     end_key: Option<Key>,
     pub(crate) start_ts: u64,
@@ -166,6 +177,7 @@ impl fmt::Display for Task {
 impl fmt::Debug for Task {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BackupTask")
+            .field("task_id", &self.id)
             .field("start_ts", &self.start_ts)
             .field("end_ts", &self.end_ts)
             .field("start_key", &self.start_key)
@@ -180,9 +192,11 @@ impl Task {
         mut req: BackupRequest,
         resp: UnboundedSender<BackupResponse>,
     ) -> Result<(Task, Arc<AtomicBool>)> {
-        let id = TaskID(ID_ALLOC.fetch_add(1, Ordering::Relaxed));
+        if req.get_end_version() == 0 || req.get_path().is_empty() || req.get_concurrency() == 0 {
+            return Err(BError::Other(format!("invalid request {:?}", req).into()));
+        }
+        let id = TaskID::default();
         let cancel = Arc::new(AtomicBool::new(false));
-
         let start_key = if req.start_key.is_empty() {
             None
         } else {
@@ -193,10 +207,6 @@ impl Task {
         } else {
             Some(Key::from_raw(&req.end_key))
         };
-
-        if req.get_end_version() == 0 || req.get_path().is_empty() || req.get_concurrency() == 0 {
-            return Err(BError::Other(format!("invalid request {:?}", req).into()));
-        }
 
         Ok((
             Task {
@@ -221,19 +231,20 @@ impl Task {
     }
 
     pub fn spawn_backup_worker<E, R>(
-        &self,
+        self,
         pool: &ThreadPool,
         store_id: u64,
         db: Arc<DB>,
         engine: &E,
         region_info: &R,
-        tx: mpsc::Sender<(BackupRange, Result<BackupRes>)>,
     ) -> Result<()>
     where
         E: Engine,
         R: RegionInfoProvider,
     {
+        let task_id = self.id;
         let progress = Arc::new(Mutex::new(Progress::new(
+            task_id,
             store_id,
             self.start_key.clone(),
             self.end_key.clone(),
@@ -251,8 +262,7 @@ impl Task {
         };
 
         // TODO: support incremental backup
-        let _ = self.start_ts;
-
+        let start_ts = self.start_ts;
         let backup_ts = self.end_ts;
         let store_id = store_id;
         for _ in 0..self.concurrency {
@@ -261,7 +271,7 @@ impl Task {
             let engine = engine.clone();
             let db = db.clone();
             let storage = storage.clone();
-            let tx = tx.clone();
+            let tx = self.resp.clone();
             // TODO: make it async.
             pool.spawn(lazy(move || loop {
                 let branges = prs.lock().unwrap().forward(WORKER_TAKE_RANGE);
@@ -271,40 +281,82 @@ impl Task {
                 }
                 for brange in branges {
                     if cancel.load(Ordering::SeqCst) {
-                        warn!("backup task has canceled"; "range" => ?brange);
+                        warn!("backup task has canceled";
+                            "task_id" => ?task_id,
+                            "range" => ?brange);
                         return Ok(());
                     }
-                    let table_id = brange
+
+                    // Set response key range.
+                    let start_key = brange
                         .start_key
                         .clone()
-                        .and_then(|k| decode_table_id(&k.into_raw().unwrap()).ok());
+                        .map_or_else(|| vec![], |k| k.into_raw().unwrap());
+                    let end_key = brange
+                        .end_key
+                        .clone()
+                        .map_or_else(|| vec![], |k| k.into_raw().unwrap());
+                    let mut response = BackupResponse::new();
+                    response.set_start_key(start_key.clone());
+                    response.set_end_key(end_key.clone());
+
+                    let table_id = decode_table_id(&start_key).ok();
                     let name = backup_file_name(store_id, &brange.region, table_id);
-                    let mut writer =
-                        match BackupWriter::new(db.clone(), &name, storage.limiter.clone()) {
-                            Ok(w) => w,
-                            Err(e) => {
-                                error!("backup writer failed"; "error" => ?e);
-                                return tx.send((brange, Err(e))).map_err(|_| ());
+                    let res = do_backup(&brange, db.clone(), &engine, &storage, &name, backup_ts);
+                    match res {
+                        Ok((mut files, stat)) => {
+                            debug!("backup region finish";
+                                "task_id" => ?task_id,
+                                "region" => ?brange.region,
+                                "start_key" => hex::encode_upper(&start_key),
+                                "end_key" => hex::encode_upper(&end_key),
+                                "details" => ?stat);
+                            // Set file key range and ts.
+                            for file in &mut files {
+                                file.set_start_key(start_key.clone());
+                                file.set_end_key(end_key.clone());
+                                file.set_start_version(start_ts);
+                                file.set_end_version(backup_ts);
                             }
-                        };
-                    let stat = match brange.backup(&mut writer, &engine, backup_ts) {
-                        Ok(s) => s,
-                        Err(e) => return tx.send((brange, Err(e))).map_err(|_| ()),
-                    };
-                    // Save sst files to storage.
-                    let files = match writer.save(&storage.storage) {
-                        Ok(files) => files,
-                        Err(e) => {
-                            error!("backup save file failed"; "error" => ?e);
-                            return tx.send((brange, Err(e))).map_err(|_| ());
+                            response.set_files(files.into())
                         }
-                    };
-                    let _ = tx.send((brange, Ok((files, stat)))).map_err(|_| ());
+                        Err(e) => {
+                            error!("backup region failed";
+                                "task_id" => ?task_id,
+                                "region" => ?brange.region,
+                                "start_key" => hex::encode_upper(&start_key),
+                                "end_key" => hex::encode_upper(&end_key),
+                                "error" => ?e);
+                            response.set_error(e.into());
+                        }
+                    }
+                    if let Err(e) = tx.unbounded_send(response) {
+                        warn!("send backup response failed";
+                            "task_id" => ?task_id,
+                            "error" => ?e);
+                    }
                 }
             }));
         }
         Ok(())
     }
+}
+
+fn do_backup<E>(
+    brange: &BackupRange,
+    db: Arc<DB>,
+    engine: &E,
+    storage: &LimitedStorage,
+    name: &str,
+    backup_ts: u64,
+) -> Result<(Vec<File>, Statistics)>
+where
+    E: Engine,
+{
+    let mut writer = BackupWriter::new(db, name, storage.limiter.clone())?;
+    let stat = brange.backup(&mut writer, engine, backup_ts)?;
+    // Save sst files to storage.
+    writer.save(&storage.storage).map(|fs| (fs, stat))
 }
 
 /// Get the min end key from the given `end_key` and `Region`'s end key.
