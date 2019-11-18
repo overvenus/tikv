@@ -9,13 +9,16 @@ extern crate failure;
 #[allow(unused_extern_crates)]
 extern crate tikv_alloc;
 
+mod backup_range;
 mod endpoint;
 mod errors;
 mod metrics;
 mod service;
+mod task;
 mod writer;
 
-pub use endpoint::{Endpoint, Task};
+pub use endpoint::Endpoint;
 pub use errors::{Error, Result};
 pub use service::Service;
+pub use task::Task;
 pub use writer::BackupWriter;

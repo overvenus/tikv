@@ -180,8 +180,9 @@ impl TestSuite {
         let mut req = BackupRequest::new();
         req.set_start_key(start_key);
         req.set_end_key(end_key);
-        req.start_version = backup_ts;
-        req.end_version = backup_ts;
+        req.set_start_version(backup_ts);
+        req.set_end_version(backup_ts);
+        req.set_concurrency(2);
         req.set_path(path);
         let (tx, rx) = future_mpsc::unbounded();
         for end in self.endpoints.values() {

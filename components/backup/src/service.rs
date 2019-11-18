@@ -8,7 +8,7 @@ use kvproto::backup::{BackupRequest, BackupResponse};
 use kvproto::backup_grpc::*;
 use tikv_util::worker::*;
 
-use super::Task;
+use crate::task::Task;
 
 /// Service handles the RPC messages for the `Backup` service.
 #[derive(Clone)]
@@ -139,6 +139,7 @@ mod tests {
         req.set_end_key(vec![b'5']);
         req.set_start_version(now);
         req.set_end_version(now);
+        req.set_concurrency(2);
         // Set an unique path to avoid AlreadyExists error.
         req.set_path(format!(
             "local://{}",
