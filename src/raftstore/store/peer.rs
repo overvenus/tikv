@@ -988,6 +988,7 @@ impl Peer {
                     self.get_store().applied_index(),
                     self.last_applying_idx,
                 );
+                ctx.pending_sync_region.push(self.region_id);
                 return;
             }
 

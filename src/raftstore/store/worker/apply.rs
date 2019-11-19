@@ -236,6 +236,7 @@ struct Stash {
     last_applied_index: u64,
 }
 
+#[allow(dead_code)]
 struct ApplyContextCore<'a> {
     host: &'a CoprocessorHost,
     importer: &'a SSTImporter,
