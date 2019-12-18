@@ -4,10 +4,9 @@
 use std::cmp::Ordering;
 
 use engine::CF_DEFAULT;
+use txn_types::{Lock, LockType, Write, WriteType};
 
 use crate::storage::kv::SEEK_BOUND;
-use crate::storage::mvcc::lock::{Lock, LockType};
-use crate::storage::mvcc::write::{Write, WriteType};
 use crate::storage::mvcc::Result;
 use crate::storage::txn::{Result as TxnResult, TxnEntry, TxnEntryScanner};
 use crate::storage::{Cursor, Key, KvPair, Snapshot, Statistics};
@@ -253,7 +252,7 @@ impl<S: Snapshot> DeltaScanner<S> {
         // Value is in the default CF.
         self.ensure_default_cursor()?;
         let mut default_cf = self.default_cursor.as_mut().unwrap();
-        let value = super::super::util::near_load_data_by_write(
+        let value = super::near_load_data_by_write(
             &mut default_cf,
             user_key,
             write,
@@ -334,7 +333,8 @@ mod tests {
     use super::super::ScannerBuilder;
     use super::*;
     use crate::storage::mvcc::tests::*;
-    use crate::storage::{Engine, TestEngineBuilder, SHORT_VALUE_MAX_LEN};
+    use crate::storage::{Engine, TestEngineBuilder};
+    use txn_types::SHORT_VALUE_MAX_LEN;
 
     use kvproto::kvrpcpb::{Context, IsolationLevel};
 

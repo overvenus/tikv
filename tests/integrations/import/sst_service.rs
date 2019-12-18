@@ -134,7 +134,7 @@ fn test_download_sst() {
     // Checks that downloading a non-existing storage returns error.
     let mut download = DownloadRequest::default();
     download.set_sst(meta.clone());
-    download.set_url(format!("local://{}", temp_dir.path().display()));
+    download.set_storage_backend(external_storage::make_local_backend(temp_dir.path()));
     download.set_name("missing.sst".to_owned());
 
     let result = import.download(&download);
@@ -161,7 +161,7 @@ fn test_download_sst() {
     let result = import.download(&download).unwrap();
     assert!(!result.get_is_empty());
     assert_eq!(result.get_range().get_start(), &[sst_range.0]);
-    assert_eq!(result.get_range().get_end(), &[sst_range.1]);
+    assert_eq!(result.get_range().get_end(), &[sst_range.1 - 1]);
 
     // Do an ingest and verify the result is correct.
 

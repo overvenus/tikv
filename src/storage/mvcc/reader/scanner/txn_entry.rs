@@ -5,20 +5,18 @@
 use std::cmp::Ordering;
 
 use kvproto::kvrpcpb::IsolationLevel;
-
-use crate::storage::kv::SEEK_BOUND;
-use crate::storage::mvcc::write::{Write, WriteType};
-use crate::storage::mvcc::Result;
-use crate::storage::txn::{Result as TxnResult, TxnEntry, TxnEntryScanner};
-use crate::storage::{Cursor, Key, Lock, Snapshot, Statistics};
+use txn_types::{Key, Lock, TimeStamp, Write, WriteRef, WriteType};
 
 use super::ScannerConfig;
+use crate::storage::kv::{Cursor, Snapshot, Statistics, SEEK_BOUND};
+use crate::storage::mvcc::{Error, Result};
+use crate::storage::txn::{Result as TxnResult, TxnEntry, TxnEntryScanner};
 
 /// A dedicate scanner that outputs content in each CF.
 ///
 /// Use `ScannerBuilder` to build `EntryScanner`.
 ///
-/// Note: The implementation is almost the same as `ForwardScanner`, made a few
+/// Note: The implementation is almost the same as `ForwardKvScanner`, made a few
 ///       adjustments to output content in each cf.
 pub struct Scanner<S: Snapshot> {
     cfg: ScannerConfig<S>,
@@ -163,8 +161,10 @@ impl<S: Snapshot> Scanner<S> {
                         };
                         // TODO: We need to scan locks into batch
                         //       in the future.
-                        result = super::super::util::check_lock(&current_user_key, ts, &lock)
-                            .map(|_| None);
+                        result = lock
+                            .check_ts_conflict(&current_user_key, ts, &self.cfg.bypass_locks)
+                            .map(|_| None)
+                            .map_err(Into::into);
                     }
                     IsolationLevel::Rc => {}
                 }
@@ -199,7 +199,7 @@ impl<S: Snapshot> Scanner<S> {
     fn get(
         &mut self,
         user_key: &Key,
-        ts: u64,
+        ts: TimeStamp,
         met_next_user_key: &mut bool,
     ) -> Result<Option<TxnEntry>> {
         assert!(self.write_cursor.valid()?);
@@ -255,11 +255,15 @@ impl<S: Snapshot> Scanner<S> {
         // Now we must have reached the first key >= `${user_key}_${ts}`. However, we may
         // meet `Lock` or `Rollback`. In this case, more versions needs to be looked up.
         loop {
-            let write = Write::parse(self.write_cursor.value(&mut self.statistics.write))?;
+            let write = WriteRef::parse(self.write_cursor.value(&mut self.statistics.write))
+                .map_err(Error::from)?;
             self.statistics.write.processed += 1;
 
             match write.write_type {
-                WriteType::Put => return Ok(Some(self.load_data_and_write(write, user_key)?)),
+                WriteType::Put => {
+                    let write = write.to_owned();
+                    return Ok(Some(self.load_data_and_write(write, user_key)?));
+                }
                 // TODO: we may want to output delete later.
                 WriteType::Delete => return Ok(None),
                 WriteType::Lock | WriteType::Rollback => {
@@ -301,10 +305,10 @@ impl<S: Snapshot> Scanner<S> {
         } else {
             // Value is in the default CF.
             let default_cursor = &mut self.default_cursor;
-            let value = super::super::util::near_load_data_by_write(
+            let value = super::near_load_data_by_write(
                 default_cursor,
                 user_key,
-                write,
+                write.start_ts,
                 &mut self.statistics,
             )?;
             Ok(TxnEntry::Commit {
@@ -348,7 +352,7 @@ impl<S: Snapshot> Scanner<S> {
         // `current_user_key` must have reserved space here, so its clone has reserved space too.
         // So no reallocation happens in `append_ts`.
         self.write_cursor.internal_seek(
-            &current_user_key.clone().append_ts(0),
+            &current_user_key.clone().append_ts(TimeStamp::zero()),
             &mut self.statistics.write,
         )?;
 
@@ -360,9 +364,9 @@ impl<S: Snapshot> Scanner<S> {
 pub mod tests {
     use super::super::ScannerBuilder;
     use super::*;
+    use crate::storage::kv::{Engine, TestEngineBuilder};
     use crate::storage::mvcc::lock::{Lock, LockType};
     use crate::storage::mvcc::tests::*;
-    use crate::storage::{Engine, Key, TestEngineBuilder};
 
     use kvproto::kvrpcpb::Context;
 
@@ -370,8 +374,8 @@ pub mod tests {
     pub struct EntryBuilder {
         pub key: Vec<u8>,
         pub value: Vec<u8>,
-        pub start_ts: u64,
-        pub commit_ts: u64,
+        pub start_ts: TimeStamp,
+        pub commit_ts: TimeStamp,
     }
 
     impl EntryBuilder {
@@ -383,11 +387,11 @@ pub mod tests {
             self.value = val.to_owned();
             self
         }
-        pub fn start_ts(&mut self, start_ts: u64) -> &mut Self {
+        pub fn start_ts(&mut self, start_ts: TimeStamp) -> &mut Self {
             self.start_ts = start_ts;
             self
         }
-        pub fn commit_ts(&mut self, commit_ts: u64) -> &mut Self {
+        pub fn commit_ts(&mut self, commit_ts: TimeStamp) -> &mut Self {
             self.commit_ts = commit_ts;
             self
         }
@@ -410,7 +414,7 @@ pub mod tests {
             let write_value = Write::new(wt, self.start_ts, short);
             TxnEntry::Commit {
                 default: (key, value),
-                write: (write_key.into_encoded(), write_value.to_bytes()),
+                write: (write_key.into_encoded(), write_value.as_ref().to_bytes()),
             }
         }
         pub fn build_prewrite(&self, lt: LockType, is_short_value: bool) -> TxnEntry {
@@ -452,7 +456,7 @@ pub mod tests {
         }
 
         let snapshot = engine.snapshot(&Context::default()).unwrap();
-        let mut scanner = ScannerBuilder::new(snapshot, 10, false)
+        let mut scanner = ScannerBuilder::new(snapshot, 10.into(), false)
             .range(None, None)
             .build_entry_scanner()
             .unwrap();
@@ -468,8 +472,8 @@ pub mod tests {
         let entry = builder
             .key(b"a")
             .value(b"value")
-            .start_ts(7)
-            .commit_ts(7)
+            .start_ts(7.into())
+            .commit_ts(7.into())
             .build_commit(WriteType::Put, true);
         assert_eq!(scanner.next_entry().unwrap(), Some(entry),);
         let statistics = scanner.take_statistics();
@@ -511,7 +515,7 @@ pub mod tests {
         must_commit(&engine, b"b", SEEK_BOUND / 2, SEEK_BOUND / 2);
 
         let snapshot = engine.snapshot(&Context::default()).unwrap();
-        let mut scanner = ScannerBuilder::new(snapshot, SEEK_BOUND * 2, false)
+        let mut scanner = ScannerBuilder::new(snapshot, (SEEK_BOUND * 2).into(), false)
             .range(None, None)
             .build_entry_scanner()
             .unwrap();
@@ -527,8 +531,8 @@ pub mod tests {
         let entry = EntryBuilder::default()
             .key(b"a")
             .value(b"a_value")
-            .start_ts(16)
-            .commit_ts(16)
+            .start_ts(16.into())
+            .commit_ts(16.into())
             .build_commit(WriteType::Put, true);
         assert_eq!(scanner.next_entry().unwrap(), Some(entry),);
         let statistics = scanner.take_statistics();
@@ -545,8 +549,8 @@ pub mod tests {
         let entry = EntryBuilder::default()
             .key(b"b")
             .value(b"b_value")
-            .start_ts(4)
-            .commit_ts(4)
+            .start_ts(4.into())
+            .commit_ts(4.into())
             .build_commit(WriteType::Put, true);
         assert_eq!(scanner.next_entry().unwrap(), Some(entry),);
         let statistics = scanner.take_statistics();
@@ -580,7 +584,7 @@ pub mod tests {
         must_commit(&engine, b"b", SEEK_BOUND, SEEK_BOUND);
 
         let snapshot = engine.snapshot(&Context::default()).unwrap();
-        let mut scanner = ScannerBuilder::new(snapshot, SEEK_BOUND * 2, false)
+        let mut scanner = ScannerBuilder::new(snapshot, (SEEK_BOUND * 2).into(), false)
             .range(None, None)
             .build_entry_scanner()
             .unwrap();
@@ -596,8 +600,8 @@ pub mod tests {
         let entry = EntryBuilder::default()
             .key(b"a")
             .value(b"a_value")
-            .start_ts(16)
-            .commit_ts(16)
+            .start_ts(16.into())
+            .commit_ts(16.into())
             .build_commit(WriteType::Put, true);
         assert_eq!(scanner.next_entry().unwrap(), Some(entry));
         let statistics = scanner.take_statistics();
@@ -617,8 +621,8 @@ pub mod tests {
         let entry = EntryBuilder::default()
             .key(b"b")
             .value(b"b_value")
-            .start_ts(8)
-            .commit_ts(8)
+            .start_ts(8.into())
+            .commit_ts(8.into())
             .build_commit(WriteType::Put, true);
         assert_eq!(scanner.next_entry().unwrap(), Some(entry),);
         let statistics = scanner.take_statistics();
@@ -655,7 +659,7 @@ pub mod tests {
         let snapshot = engine.snapshot(&Context::default()).unwrap();
 
         // Test both bound specified.
-        let mut scanner = ScannerBuilder::new(snapshot.clone(), 10, false)
+        let mut scanner = ScannerBuilder::new(snapshot.clone(), 10.into(), false)
             .range(Some(Key::from_raw(&[3u8])), Some(Key::from_raw(&[5u8])))
             .build_entry_scanner()
             .unwrap();
@@ -669,39 +673,39 @@ pub mod tests {
                 .build_commit(WriteType::Put, true)
         };
 
-        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[3u8], 7)));
-        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[4u8], 7)));
+        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[3u8], 7.into())));
+        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[4u8], 7.into())));
         assert_eq!(scanner.next_entry().unwrap(), None);
 
         // Test left bound not specified.
-        let mut scanner = ScannerBuilder::new(snapshot.clone(), 10, false)
+        let mut scanner = ScannerBuilder::new(snapshot.clone(), 10.into(), false)
             .range(None, Some(Key::from_raw(&[3u8])))
             .build_entry_scanner()
             .unwrap();
-        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[1u8], 7)));
-        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[2u8], 7)));
+        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[1u8], 7.into())));
+        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[2u8], 7.into())));
         assert_eq!(scanner.next_entry().unwrap(), None);
 
         // Test right bound not specified.
-        let mut scanner = ScannerBuilder::new(snapshot.clone(), 10, false)
+        let mut scanner = ScannerBuilder::new(snapshot.clone(), 10.into(), false)
             .range(Some(Key::from_raw(&[5u8])), None)
             .build_entry_scanner()
             .unwrap();
-        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[5u8], 7)));
-        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[6u8], 7)));
+        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[5u8], 7.into())));
+        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[6u8], 7.into())));
         assert_eq!(scanner.next_entry().unwrap(), None);
 
         // Test both bound not specified.
-        let mut scanner = ScannerBuilder::new(snapshot.clone(), 10, false)
+        let mut scanner = ScannerBuilder::new(snapshot.clone(), 10.into(), false)
             .range(None, None)
             .build_entry_scanner()
             .unwrap();
-        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[1u8], 7)));
-        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[2u8], 7)));
-        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[3u8], 7)));
-        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[4u8], 7)));
-        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[5u8], 7)));
-        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[6u8], 7)));
+        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[1u8], 7.into())));
+        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[2u8], 7.into())));
+        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[3u8], 7.into())));
+        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[4u8], 7.into())));
+        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[5u8], 7.into())));
+        assert_eq!(scanner.next_entry().unwrap(), Some(entry(&[6u8], 7.into())));
         assert_eq!(scanner.next_entry().unwrap(), None);
     }
 }

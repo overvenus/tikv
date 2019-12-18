@@ -9,6 +9,7 @@ use futures::sync::mpsc;
 use futures::sync::oneshot;
 use futures::{future, Future, Sink, Stream};
 use grpcio::{CallOption, EnvBuilder, WriteFlags};
+use kvproto::configpb;
 use kvproto::metapb;
 use kvproto::pdpb::{self, Member};
 
@@ -16,14 +17,15 @@ use super::metrics::*;
 use super::util::{
     check_resp_header, compose_ts, sync_request, validate_endpoints, Inner, LeaderClient,
 };
-use super::{Config, PdFuture};
+use super::{Config, PdFuture, UnixSecs};
 use super::{Error, PdClient, RegionInfo, RegionStat, Result, REQUEST_TIMEOUT};
 use tikv_util::security::SecurityManager;
-use tikv_util::time::{duration_to_sec, time_now_sec};
+use tikv_util::time::duration_to_sec;
 use tikv_util::{Either, HandyRwLock};
 
 const CQ_COUNT: usize = 1;
 const CLIENT_PREFIX: &str = "pd";
+const CONFIG_COMPONENT: &str = "tikv";
 
 pub struct RpcClient {
     cluster_id: u64,
@@ -70,6 +72,12 @@ impl RpcClient {
         header
     }
 
+    fn get_config_header(&self) -> configpb::Header {
+        let mut header = configpb::Header::default();
+        header.set_cluster_id(self.cluster_id);
+        header
+    }
+
     /// Gets the leader of PD.
     pub fn get_leader(&self) -> Member {
         self.leader_client.get_leader()
@@ -82,10 +90,7 @@ impl RpcClient {
     }
 
     /// Gets given key's Region and Region's leader from PD.
-    pub fn get_region_and_leader(
-        &self,
-        key: &[u8],
-    ) -> Result<(metapb::Region, Option<metapb::Peer>)> {
+    fn get_region_and_leader(&self, key: &[u8]) -> Result<(metapb::Region, Option<metapb::Peer>)> {
         let _timer = PD_REQUEST_HISTOGRAM_VEC
             .with_label_values(&["get_region"])
             .start_coarse_timer();
@@ -313,8 +318,8 @@ impl PdClient for RpcClient {
         req.set_approximate_size(region_stat.approximate_size);
         req.set_approximate_keys(region_stat.approximate_keys);
         let mut interval = pdpb::TimeInterval::default();
-        interval.set_start_timestamp(region_stat.last_report_ts);
-        interval.set_end_timestamp(time_now_sec());
+        interval.set_start_timestamp(region_stat.last_report_ts.into_inner());
+        interval.set_end_timestamp(UnixSecs::now().into_inner());
         req.set_interval(interval);
 
         let executor = |client: &RwLock<Inner>, req: pdpb::RegionHeartbeatRequest| {
@@ -429,7 +434,9 @@ impl PdClient for RpcClient {
 
         let mut req = pdpb::StoreHeartbeatRequest::default();
         req.set_header(self.header());
-        stats.mut_interval().set_end_timestamp(time_now_sec());
+        stats
+            .mut_interval()
+            .set_end_timestamp(UnixSecs::now().into_inner());
         req.set_stats(stats);
         let executor = move |client: &RwLock<Inner>, req: pdpb::StoreHeartbeatRequest| {
             let handler = client
@@ -619,4 +626,68 @@ impl PdClient for RpcClient {
             .client_stub
             .spawn(future.map_err(|_| ()));
     }
+    fn register_config(
+        &self,
+        id: String,
+        version: configpb::Version,
+        cfg: String,
+    ) -> Result<configpb::CreateResponse> {
+        let mut req = configpb::CreateRequest::default();
+        req.set_header(self.get_config_header());
+        req.set_component(CONFIG_COMPONENT.to_owned());
+        req.set_component_id(id);
+        req.set_version(version);
+        req.set_config(cfg);
+        let resp = sync_request(&self.leader_client, LEADER_CHANGE_RETRY, |client| {
+            client.config().create_opt(&req, Self::call_option())
+        })?;
+
+        Ok(resp)
+    }
+
+    fn get_config(&self, id: String, version: configpb::Version) -> Result<configpb::GetResponse> {
+        let mut req = configpb::GetRequest::default();
+        req.set_header(self.get_config_header());
+        req.set_component(CONFIG_COMPONENT.to_owned());
+        req.set_component_id(id);
+        req.set_version(version);
+        let resp = sync_request(&self.leader_client, LEADER_CHANGE_RETRY, |client| {
+            client.config().get_opt(&req, Self::call_option())
+        })?;
+
+        Ok(resp)
+    }
+
+    fn update_config(
+        &self,
+        id: String,
+        version: configpb::Version,
+        entries: Vec<configpb::ConfigEntry>,
+    ) -> Result<configpb::UpdateResponse> {
+        let mut local = configpb::Local::default();
+        local.set_component_id(id);
+        let mut kind = configpb::ConfigKind::default();
+        kind.kind = Some(config_kind::Kind::Local(local));
+        let mut req = configpb::UpdateRequest::default();
+        req.set_header(self.get_config_header());
+        req.set_kind(kind);
+        req.set_version(version);
+        req.set_entries(entries.into());
+
+        let resp = sync_request(&self.leader_client, LEADER_CHANGE_RETRY, |client| {
+            client.config().update_opt(&req, Self::call_option())
+        })?;
+
+        Ok(resp)
+    }
+}
+
+#[cfg(feature = "protobuf-codec")]
+mod config_kind {
+    pub type Kind = kvproto::configpb::ConfigKind_oneof_kind;
+}
+
+#[cfg(feature = "prost-codec")]
+mod config_kind {
+    pub type Kind = kvproto::configpb::config_kind::Kind;
 }
