@@ -55,22 +55,24 @@ impl Resolver {
         }
 
         let entry = self.locks.get_mut(&start_ts);
+        // It's possible that rollback happens on a not existing transaction.
         assert!(
-            entry.is_some(),
+            entry.is_some() || commit_ts.is_none(),
             "{}@{} is not tracked",
             hex::encode_upper(key),
             start_ts
         );
-        let locked_keys = entry.unwrap();
-        assert!(
-            locked_keys.remove(&key),
-            "{}@{} is not tracked, {:?}",
-            hex::encode_upper(key),
-            start_ts,
-            locked_keys,
-        );
-        if locked_keys.is_empty() {
-            self.locks.remove(&start_ts);
+        if let Some(locked_keys) = entry {
+            assert!(
+                locked_keys.remove(&key),
+                "{}@{} is not tracked, {:?}",
+                hex::encode_upper(key),
+                start_ts,
+                locked_keys,
+            );
+            if locked_keys.is_empty() {
+                self.locks.remove(&start_ts);
+            }
         }
     }
 
@@ -136,6 +138,13 @@ mod tests {
                 Event::Lock(1, Key::from_raw(b"a")),
                 Event::Resolve(2, 2),
                 Event::Unlock(1, Some(4), Key::from_raw(b"a")),
+                Event::Resolve(3, 3),
+            ],
+            vec![
+                Event::Unlock(1, None, Key::from_raw(b"a")),
+                Event::Lock(2, Key::from_raw(b"a")),
+                Event::Unlock(2, None, Key::from_raw(b"a")),
+                Event::Unlock(2, None, Key::from_raw(b"a")),
                 Event::Resolve(3, 3),
             ],
         ];

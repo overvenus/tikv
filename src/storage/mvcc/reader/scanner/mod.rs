@@ -17,7 +17,7 @@ use crate::storage::{
 use self::backward::BackwardScanner;
 pub use self::delta::DeltaScanner;
 use self::forward::ForwardScanner;
-pub use self::txn_entry::{tests, Scanner as EntryScanner};
+pub use self::txn_entry::{tests as txn_entry_tests, Scanner as EntryScanner};
 
 /// `Scanner` factory.
 pub struct ScannerBuilder<S: Snapshot>(ScannerConfig<S>);
