@@ -114,7 +114,7 @@ struct Servers {
     server: Server<ServerRaftStoreRouter, resolve::PdStoreAddrResolver>,
     node: Node<RpcClient>,
     importer: Arc<SSTImporter>,
-    cdc_service: cdc::Service,
+    cdc_scheduler: tikv_util::worker::Scheduler<cdc::Task>,
 }
 
 impl TiKVServer {
@@ -330,16 +330,9 @@ impl TiKVServer {
         );
 
         // Create and register cdc.
-        let mut cdc_worker = tikv_util::worker::Worker::new("cdc");
+        let mut cdc_worker = Box::new(tikv_util::worker::Worker::new("cdc"));
         let cdc_scheduler = cdc_worker.scheduler();
-        let cdc_service = cdc::Service::new(cdc_scheduler.clone());
-        if server
-            .register_service(create_change_data(cdc_service))
-            .is_some()
-        {
-            fatal!("failed to register cdc service");
-        }
-        let cdc_ob = cdc::CdcObserver::new(cdc_scheduler);
+        let cdc_ob = cdc::CdcObserver::new(cdc_scheduler.clone());
         coprocessor_host
             .registry
             .register_cmd_observer(100, Box::new(cdc_ob.clone()) as _);
@@ -398,7 +391,7 @@ impl TiKVServer {
 
         // Start CDC.
         let cdc_endpoint = cdc::Endpoint::new(
-            pd_client.clone(),
+            self.pd_client.clone(),
             cdc_worker.scheduler(),
             apply_router,
             cdc_ob,
@@ -406,18 +399,15 @@ impl TiKVServer {
         cdc_worker
             .start(cdc_endpoint)
             .unwrap_or_else(|e| fatal!("failed to start cdc: {}", e));
+        self.to_stop.push(cdc_worker);
 
-        let mut metrics_flusher = MetricsFlusher::new(
-            engines.clone(),
-            Duration::from_millis(DEFAULT_FLUSHER_INTERVAL),
-        );
         self.servers = Some(Servers {
             lock_mgr,
             region_info_accessor,
             server,
             node,
             importer,
-            cdc_service,
+            cdc_scheduler,
         });
 
         server_config
@@ -504,6 +494,15 @@ impl TiKVServer {
             .is_some()
         {
             fatal!("failed to register backup service");
+        }
+
+        let cdc_service = cdc::Service::new(servers.cdc_scheduler.clone());
+        if servers
+            .server
+            .register_service(create_change_data(cdc_service))
+            .is_some()
+        {
+            fatal!("failed to register cdc service");
         }
 
         let backup_endpoint = backup::Endpoint::new(

@@ -365,8 +365,9 @@ pub mod tests {
     use super::super::ScannerBuilder;
     use super::*;
     use crate::storage::kv::{Engine, TestEngineBuilder};
-    use crate::storage::mvcc::lock::{Lock, LockType};
     use crate::storage::mvcc::tests::*;
+
+    use txn_types::{Lock, LockType};
 
     use kvproto::kvrpcpb::Context;
 
@@ -430,9 +431,9 @@ pub mod tests {
                 self.start_ts,
                 1000, // ttl
                 short,
-                0, // for_update_ts
-                0, // txn_size
-                0, // min_commit_ts
+                TimeStamp::zero(), // for_update_ts
+                0,                 // txn_size
+                TimeStamp::zero(), // min_commit_ts
             );
             TxnEntry::Prewrite {
                 default: (key, value),

@@ -306,6 +306,8 @@ name = "cdc"
 version = "4.0.0-alpha"
 dependencies = [
  "engine",
+ "engine_rocks",
+ "engine_traits",
  "failure",
  "futures",
  "grpcio",
@@ -327,6 +329,7 @@ dependencies = [
  "tikv",
  "tikv_util",
  "tokio-threadpool",
+ "txn_types",
 ]
 
 [[package]]
@@ -2930,6 +2933,7 @@ dependencies = [
  "tikv",
  "tikv_alloc",
  "tikv_util",
+ "txn_types",
 ]
 
 [[package]]

@@ -4,7 +4,7 @@
 use std::cmp::Ordering;
 
 use engine::CF_DEFAULT;
-use txn_types::{Lock, LockType, Write, WriteType};
+use txn_types::{Lock, LockType, TimeStamp, Write, WriteRef, WriteType};
 
 use crate::storage::kv::SEEK_BOUND;
 use crate::storage::mvcc::Result;
@@ -38,7 +38,7 @@ pub struct DeltaScanner<S: Snapshot> {
     is_started: bool,
     statistics: Statistics,
     // the end ts is cfg.ts
-    begin_ts: u64,
+    begin_ts: TimeStamp,
     // check and return error if a lock exist
     err_lock_exist: bool,
     cache_lock: Option<LockEntry>,
@@ -59,7 +59,7 @@ impl<S: Snapshot> DeltaScanner<S> {
         cfg: ScannerConfig<S>,
         lock_cursor: Option<Cursor<S::Iter>>,
         write_cursor: Cursor<S::Iter>,
-        begin_ts: u64,
+        begin_ts: TimeStamp,
         err_lock_exist: bool,
     ) -> DeltaScanner<S> {
         DeltaScanner {
@@ -92,7 +92,8 @@ impl<S: Snapshot> DeltaScanner<S> {
         let lock_item = self.read_next_lock_item()?;
         if let Some(lock) = lock_item {
             let current_user_key = Key::from_encoded_slice(&lock.key);
-            super::super::util::check_lock(&current_user_key, self.cfg.ts, &lock.lock)?;
+            lock.lock
+                .check_ts_conflict(&current_user_key, self.cfg.ts, &self.cfg.bypass_locks)?;
         }
         let data = self.read_next_commit_item()?;
         Ok(data.map(|e| e.entry))
@@ -228,7 +229,8 @@ impl<S: Snapshot> DeltaScanner<S> {
     /// The implementation is the same as `PointGetter::load_data_and_write`.
     #[inline]
     fn load_data_and_write(&mut self, user_key: &Key) -> Result<(TxnEntry)> {
-        let write = Write::parse(self.write_cursor.value(&mut self.statistics.write))?;
+        let write =
+            WriteRef::parse(self.write_cursor.value(&mut self.statistics.write))?.to_owned();
         self.statistics.write.processed += 1;
         let w = (
             self.write_cursor.key(&mut self.statistics.write).to_vec(),
@@ -255,7 +257,7 @@ impl<S: Snapshot> DeltaScanner<S> {
         let value = super::near_load_data_by_write(
             &mut default_cf,
             user_key,
-            write,
+            write.start_ts,
             &mut self.statistics,
         )?;
         Ok((default_cf.key(&mut self.statistics.data).to_vec(), value))
@@ -319,7 +321,7 @@ impl<S: Snapshot> DeltaScanner<S> {
         // `current_user_key` must have reserved space here, so its clone has reserved space too.
         // So no reallocation happens in `append_ts`.
         self.write_cursor.internal_seek(
-            &current_user_key.clone().append_ts(0),
+            &current_user_key.clone().append_ts(TimeStamp::zero()),
             &mut self.statistics.write,
         )?;
 
@@ -356,8 +358,8 @@ mod tests {
         must_rollback(&engine, b"c", 1);
 
         let snapshot = engine.snapshot(&Context::default()).unwrap();
-        let begin_ts = 2;
-        let end_ts = 9;
+        let begin_ts = TimeStamp::new(2);
+        let end_ts = TimeStamp::new(9);
         let mut scanner = ScannerBuilder::new(snapshot, end_ts, false)
             .range(None, None)
             .isolation_level(IsolationLevel::Rc)
@@ -374,8 +376,8 @@ mod tests {
         let entry = builder
             .key(b"a")
             .value(b"value")
-            .start_ts(7)
-            .commit_ts(7)
+            .start_ts(7.into())
+            .commit_ts(7.into())
             .build_commit(WriteType::Put, true);
         assert_eq!(scanner.next_entry().unwrap(), Some(entry),);
         let statistics = scanner.take_statistics();
@@ -391,7 +393,7 @@ mod tests {
             assert_eq!(scanner.next_entry().unwrap(), Some(entry),);
             let statistics = scanner.take_statistics();
             assert_eq!(statistics.write.seek, 0);
-            rollback_ts -= 1;
+            rollback_ts.decr();
         }
         assert!(scanner.next_entry().unwrap().is_none());
     }
@@ -418,8 +420,8 @@ mod tests {
         must_rollback(&engine, b"c", 1);
 
         let snapshot = engine.snapshot(&Context::default()).unwrap();
-        let begin_ts = 2;
-        let end_ts = 9;
+        let begin_ts = TimeStamp::new(2);
+        let end_ts = TimeStamp::new(9);
         let mut scanner = ScannerBuilder::new(snapshot, end_ts, false)
             .range(None, None)
             .isolation_level(IsolationLevel::Si)
@@ -444,8 +446,8 @@ mod tests {
         let entry = builder
             .key(b"a")
             .value(b"value")
-            .start_ts(7)
-            .commit_ts(7)
+            .start_ts(7.into())
+            .commit_ts(7.into())
             .build_commit(WriteType::Put, true);
         assert_eq!(scanner.next_entry().unwrap(), Some(entry),);
         let statistics = scanner.take_statistics();
@@ -461,7 +463,7 @@ mod tests {
             assert_eq!(scanner.next_entry().unwrap(), Some(entry),);
             let statistics = scanner.take_statistics();
             assert_eq!(statistics.write.seek, 0);
-            rollback_ts -= 1;
+            rollback_ts.decr();
         }
         assert!(scanner.next_entry().unwrap().is_none());
     }
@@ -479,8 +481,8 @@ mod tests {
         must_prewrite_put(&engine, b"b1", b"value", b"b1", 100);
 
         let snapshot = engine.snapshot(&Context::default()).unwrap();
-        let begin_ts = 2;
-        let end_ts = 9;
+        let begin_ts = TimeStamp::new(2);
+        let end_ts = TimeStamp::new(9);
         let mut scanner = ScannerBuilder::new(snapshot, end_ts, false)
             .range(None, None)
             .isolation_level(IsolationLevel::Si)
@@ -510,8 +512,8 @@ mod tests {
         must_prewrite_put(&engine, b"b1", b"value", b"b1", 7);
 
         let snapshot = engine.snapshot(&Context::default()).unwrap();
-        let begin_ts = 2;
-        let end_ts = 9;
+        let begin_ts = TimeStamp::new(2);
+        let end_ts = TimeStamp::new(9);
         let mut scanner = ScannerBuilder::new(snapshot, end_ts, false)
             .range(None, None)
             .isolation_level(IsolationLevel::Si)
@@ -532,8 +534,8 @@ mod tests {
         must_prewrite_put(&engine, b"b1", b"value", b"b1", 100);
 
         let snapshot = engine.snapshot(&Context::default()).unwrap();
-        let begin_ts = 2;
-        let end_ts = 9;
+        let begin_ts = TimeStamp::new(2);
+        let end_ts = TimeStamp::new(9);
         let mut scanner = ScannerBuilder::new(snapshot, end_ts, false)
             .range(None, None)
             .isolation_level(IsolationLevel::Si)
@@ -542,8 +544,8 @@ mod tests {
         for key in txn_keys.iter() {
             let entry = EntryBuilder::default()
                 .key(key)
-                .start_ts(4)
-                .commit_ts(6)
+                .start_ts(4.into())
+                .commit_ts(6.into())
                 .value(b"value")
                 .build_commit(WriteType::Put, true);
             assert_eq!(scanner.next_entry().unwrap(), Some(entry));
@@ -563,8 +565,8 @@ mod tests {
         must_prewrite_put(&engine, b"b1", b"value", b"b1", 100);
 
         let snapshot = engine.snapshot(&Context::default()).unwrap();
-        let begin_ts = 2;
-        let end_ts = 9;
+        let begin_ts = TimeStamp::new(2);
+        let end_ts = TimeStamp::new(9);
         let mut scanner = ScannerBuilder::new(snapshot, end_ts, false)
             .range(None, None)
             .isolation_level(IsolationLevel::Si)
@@ -573,8 +575,8 @@ mod tests {
         for key in &txn_keys {
             let entry = EntryBuilder::default()
                 .key(key)
-                .start_ts(4)
-                .commit_ts(6)
+                .start_ts(4.into())
+                .commit_ts(6.into())
                 .value(&long_value)
                 .build_commit(WriteType::Put, false);
             assert_eq!(scanner.next_entry().unwrap(), Some(entry));

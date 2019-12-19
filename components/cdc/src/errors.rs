@@ -4,9 +4,10 @@ use std::io::Error as IoError;
 use std::{error, result};
 
 use kvproto::errorpb::Error as ErrorHeader;
-use tikv::storage::kv::Error as EngineError;
-use tikv::storage::mvcc::Error as MvccError;
-use tikv::storage::txn::Error as TxnError;
+use tikv::storage::kv::{Error as EngineError, ErrorInner as EngineErrorInner};
+use tikv::storage::mvcc::{Error as MvccError, ErrorInner as MvccErrorInner};
+use tikv::storage::txn::{Error as TxnError, ErrorInner as TxnErrorInner};
+use txn_types::Error as TxnTypesError;
 
 /// The error type for cdc.
 #[derive(Debug, Fail)]
@@ -32,7 +33,7 @@ macro_rules! impl_from {
         $(
             impl From<$inner> for Error {
                 fn from(inr: $inner) -> Error {
-                    Error::$container(inr)
+                    Error::$container(inr.into())
                 }
             }
         )+
@@ -46,6 +47,7 @@ impl_from! {
     EngineError => Engine,
     TxnError => Txn,
     MvccError => Mvcc,
+    TxnTypesError => Mvcc,
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -53,9 +55,13 @@ pub type Result<T> = result::Result<T, Error>;
 impl Error {
     pub fn extract_error_header(self) -> ErrorHeader {
         match self {
-            Error::Engine(EngineError::Request(e))
-            | Error::Txn(TxnError::Engine(EngineError::Request(e)))
-            | Error::Txn(TxnError::Mvcc(MvccError::Engine(EngineError::Request(e))))
+            Error::Engine(EngineError(box EngineErrorInner::Request(e)))
+            | Error::Txn(TxnError(box TxnErrorInner::Engine(EngineError(
+                box EngineErrorInner::Request(e),
+            ))))
+            | Error::Txn(TxnError(box TxnErrorInner::Mvcc(MvccError(
+                box MvccErrorInner::Engine(EngineError(box EngineErrorInner::Request(e))),
+            ))))
             | Error::Request(e) => e,
             other => {
                 let mut e = ErrorHeader::default();

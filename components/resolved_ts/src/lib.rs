@@ -100,7 +100,7 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tikv::storage::Key;
+    use txn_types::Key;
 
     #[derive(Clone)]
     enum Event {

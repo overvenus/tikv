@@ -251,7 +251,7 @@ impl ApplyCallback {
     }
 
     fn push(&mut self, cb: Option<Callback<RocksEngine>>, index: u64, resp: RaftCmdResponse) {
-        self.cbs.push((cb, resp));
+        self.cbs.push((cb, index, resp));
     }
 }
 
@@ -2749,7 +2749,7 @@ impl ApplyFsm {
         ) {
             Ok(()) => ReadResponse {
                 response: Default::default(),
-                snapshot: Some(RegionSnapshot::from_raw(
+                snapshot: Some(RegionSnapshot::<RocksEngine>::from_raw(
                     apply_ctx.engines.kv.clone(),
                     self.delegate.region.clone(),
                 )),
@@ -3847,7 +3847,7 @@ mod tests {
                 region_id: 1,
                 region_epoch: region_epoch.clone(),
                 enabled: enabled.clone(),
-                cb: Callback::Read(Box::new(|resp: ReadResponse| {
+                cb: Callback::Read(Box::new(|resp: ReadResponse<_>| {
                     assert!(!resp.response.get_header().has_error());
                     assert!(resp.snapshot.is_some());
                 })),
@@ -3902,7 +3902,7 @@ mod tests {
                 region_id: 2,
                 region_epoch,
                 enabled: enabled.clone(),
-                cb: Callback::Read(Box::new(|resp: ReadResponse| {
+                cb: Callback::Read(Box::new(|resp: ReadResponse<_>| {
                     assert!(resp
                         .response
                         .get_header()
@@ -4061,7 +4061,7 @@ mod tests {
                 region_id: 1,
                 region_epoch: region_epoch.clone(),
                 enabled: enabled.clone(),
-                cb: Callback::Read(Box::new(|resp: ReadResponse| {
+                cb: Callback::Read(Box::new(|resp: ReadResponse<_>| {
                     assert!(!resp.response.get_header().has_error(), "{:?}", resp);
                     assert!(resp.snapshot.is_some());
                 })),
@@ -4209,7 +4209,7 @@ mod tests {
                 region_id: 1,
                 region_epoch: region_epoch.clone(),
                 enabled: Arc::new(AtomicBool::new(true)),
-                cb: Callback::Read(Box::new(move |resp: ReadResponse| {
+                cb: Callback::Read(Box::new(move |resp: ReadResponse<_>| {
                     assert!(
                         resp.response.get_header().get_error().has_epoch_not_match(),
                         "{:?}",

@@ -1,20 +1,21 @@
 use engine::CF_LOCK;
+use engine_rocks::RocksEngine;
 use resolved_ts::Resolver;
 use tikv::raftstore::store::{RegionIterator, RegionSnapshot};
 use tikv::storage::mvcc::Lock;
-use tikv::storage::Key;
-use tikv::storage::{CFStatistics, Cursor, CursorBuilder};
+use tikv::storage::{CfStatistics, Cursor, CursorBuilder};
+use txn_types::Key;
 
 use crate::Result;
 
 pub struct LockScanner {
-    region_snapshot: RegionSnapshot,
-    statistics: CFStatistics,
-    lock_cursor: Cursor<RegionIterator>,
+    region_snapshot: RegionSnapshot<RocksEngine>,
+    statistics: CfStatistics,
+    lock_cursor: Cursor<RegionIterator<RocksEngine>>,
 }
 
 impl LockScanner {
-    pub fn new(region_snapshot: RegionSnapshot) -> Result<LockScanner> {
+    pub fn new(region_snapshot: RegionSnapshot<RocksEngine>) -> Result<LockScanner> {
         let lock_cursor = CursorBuilder::new(&region_snapshot, CF_LOCK)
             .range(None, None)
             .fill_cache(false)
@@ -23,7 +24,7 @@ impl LockScanner {
         Ok(LockScanner {
             region_snapshot,
             lock_cursor,
-            statistics: CFStatistics::default(),
+            statistics: CfStatistics::default(),
         })
     }
 
@@ -53,7 +54,7 @@ impl LockScanner {
                 Lock::parse(lock_value)?
             };
             resolver.track_lock(
-                lock.ts,
+                lock.ts.into_inner(),
                 Key::from_encoded_slice(locked_key).to_raw().unwrap(),
             );
 
@@ -62,7 +63,7 @@ impl LockScanner {
     }
 
     #[allow(dead_code)]
-    pub fn statistics(&self) -> &CFStatistics {
+    pub fn statistics(&self) -> &CfStatistics {
         &self.statistics
     }
 }
@@ -72,13 +73,13 @@ mod tests {
     use super::*;
     use kvproto::metapb::Region;
     use tikv::storage::mvcc::tests::*;
-    use tikv::storage::RocksEngine;
+    use tikv::storage::RocksEngine as StorageRocksEngine;
 
     #[test]
     fn test_build_resolver() {
         let tmp = tempfile::TempDir::new().unwrap();
 
-        let mut engine = RocksEngine::new(
+        let mut engine = StorageRocksEngine::new(
             tmp.path().to_str().unwrap(),
             engine::ALL_CFS,
             None,
@@ -129,7 +130,7 @@ mod tests {
             let mut r = region.clone();
             r.set_start_key(start_key);
             r.set_end_key(end_key);
-            let snap = RegionSnapshot::from_raw(engine.get_rocksdb(), r);
+            let snap = RegionSnapshot::<RocksEngine>::from_raw(engine.get_rocksdb(), r);
             let mut lock_scanner = LockScanner::new(snap).unwrap();
             let resolver = lock_scanner.build_resolver().unwrap();
             let locks = resolver.locks();
