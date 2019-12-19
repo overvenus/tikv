@@ -506,9 +506,3 @@ pub fn check_resp_header(header: &ResponseHeader) -> Result<()> {
         ErrorType::Ok => Ok(()),
     }
 }
-
-/// Creates a ts from physical and logical parts.
-pub fn compose_ts(physical: u64, logical: u64) -> u64 {
-    let physical_shift_bits = 18;
-    (physical << physical_shift_bits) + logical
-}

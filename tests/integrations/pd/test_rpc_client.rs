@@ -15,6 +15,7 @@ use pd_client::{validate_endpoints, Config, Error as PdError, PdClient, RegionSt
 use test_util;
 use tikv::raftstore::store;
 use tikv_util::security::{SecurityConfig, SecurityManager};
+use txn_types::TimeStamp;
 
 use super::mock::mocker::*;
 use super::mock::Server as MockServer;
@@ -102,7 +103,7 @@ fn test_rpc_client() {
     assert_eq!(tmp_region.get_id(), region.get_id());
 
     let ts = client.get_tso().wait().unwrap();
-    assert_ne!(ts, 0);
+    assert_ne!(ts, TimeStamp::zero());
 
     let mut prev_id = 0;
     for _ in 0..100 {

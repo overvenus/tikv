@@ -13,7 +13,7 @@ use tikv::raftstore::Error as RaftStoreError;
 use tikv::storage::mvcc::{Lock, LockType, WriteRef, WriteType};
 use tikv::storage::txn::TxnEntry;
 use tikv_util::collections::HashMap;
-use txn_types::Key;
+use txn_types::{Key, TimeStamp};
 
 use crate::Error;
 
@@ -201,7 +201,7 @@ impl Delegate {
         }
     }
 
-    pub fn on_min_ts(&mut self, min_ts: u64) {
+    pub fn on_min_ts(&mut self, min_ts: TimeStamp) {
         if self.resolver.is_none() {
             info!("region resolver not ready";
                 "region_id" => self.region_id, "min_ts" => min_ts);
@@ -217,7 +217,7 @@ impl Delegate {
             "region_id" => self.region_id, "resolved_ts" => resolved_ts);
         let mut change_data_event = Event::new();
         change_data_event.region_id = self.region_id;
-        change_data_event.event = Some(Event_oneof_event::ResolvedTs(resolved_ts));
+        change_data_event.event = Some(Event_oneof_event::ResolvedTs(resolved_ts.into_inner()));
         let mut change_data = ChangeDataEvent::new();
         change_data.mut_events().push(change_data_event);
         self.broadcast(change_data);
@@ -330,7 +330,11 @@ impl Delegate {
                         } else {
                             Some(row.commit_ts)
                         };
-                        resolver.untrack_lock(row.start_ts, commit_ts, row.key.clone());
+                        resolver.untrack_lock(
+                            row.start_ts.into(),
+                            commit_ts.map(Into::into),
+                            row.key.clone(),
+                        );
 
                         let r = rows.insert(row.key.clone(), row);
                         assert!(r.is_none());
@@ -354,7 +358,7 @@ impl Delegate {
                         // we must track inflight txns.
                         assert!(self.resolver.is_some(), "region resolver should be ready");
                         let resolver = self.resolver.as_mut().unwrap();
-                        resolver.track_lock(row.start_ts, row.key.clone());
+                        resolver.track_lock(row.start_ts.into(), row.key.clone());
 
                         *occupied = row;
                     }

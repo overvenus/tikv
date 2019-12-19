@@ -4,7 +4,7 @@ use resolved_ts::Resolver;
 use tikv::raftstore::store::{RegionIterator, RegionSnapshot};
 use tikv::storage::mvcc::Lock;
 use tikv::storage::{CfStatistics, Cursor, CursorBuilder};
-use txn_types::Key;
+use txn_types::{Key, TimeStamp};
 
 use crate::Result;
 
@@ -40,7 +40,7 @@ impl LockScanner {
         loop {
             if !self.lock_cursor.valid().unwrap() {
                 resolver.init();
-                let rts = resolver.resolve(0);
+                let rts = resolver.resolve(TimeStamp::zero());
                 info!("resolver initialized";
                     "region_id" => self.region_snapshot.get_region().get_id(),
                     "resolved_ts" => rts,
@@ -54,7 +54,7 @@ impl LockScanner {
                 Lock::parse(lock_value)?
             };
             resolver.track_lock(
-                lock.ts.into_inner(),
+                lock.ts,
                 Key::from_encoded_slice(locked_key).to_raw().unwrap(),
             );
 

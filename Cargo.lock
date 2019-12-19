@@ -2195,6 +2195,7 @@ dependencies = [
  "tikv_util",
  "tokio-core",
  "tokio-timer",
+ "txn_types",
 ]
 
 [[package]]
@@ -3564,6 +3565,7 @@ dependencies = [
  "tikv_util",
  "tokio-threadpool",
  "tokio-timer",
+ "txn_types",
 ]
 
 [[package]]

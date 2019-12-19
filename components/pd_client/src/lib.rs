@@ -36,6 +36,7 @@ use kvproto::configpb;
 use kvproto::metapb;
 use kvproto::pdpb;
 use tikv_util::time::UnixSecs;
+use txn_types::TimeStamp;
 
 pub type Key = Vec<u8>;
 pub type PdFuture<T> = Box<dyn Future<Item = T, Error = Error> + Send>;
@@ -233,7 +234,7 @@ pub trait PdClient: Send + Sync {
         unimplemented!();
     }
 
-    fn get_tso(&self) -> PdFuture<u64> {
+    fn get_tso(&self) -> PdFuture<TimeStamp> {
         unimplemented!()
     }
 

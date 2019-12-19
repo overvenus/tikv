@@ -14,14 +14,13 @@ use kvproto::metapb;
 use kvproto::pdpb::{self, Member};
 
 use super::metrics::*;
-use super::util::{
-    check_resp_header, compose_ts, sync_request, validate_endpoints, Inner, LeaderClient,
-};
+use super::util::{check_resp_header, sync_request, validate_endpoints, Inner, LeaderClient};
 use super::{Config, PdFuture, UnixSecs};
 use super::{Error, PdClient, RegionInfo, RegionStat, Result, REQUEST_TIMEOUT};
 use tikv_util::security::SecurityManager;
 use tikv_util::time::duration_to_sec;
 use tikv_util::{Either, HandyRwLock};
+use txn_types::TimeStamp;
 
 const CQ_COUNT: usize = 1;
 const CLIENT_PREFIX: &str = "pd";
@@ -574,7 +573,7 @@ impl PdClient for RpcClient {
         Ok(resp)
     }
 
-    fn get_tso(&self) -> PdFuture<u64> {
+    fn get_tso(&self) -> PdFuture<TimeStamp> {
         let timer = Instant::now();
 
         let mut req = pdpb::TsoRequest::default();
@@ -601,14 +600,14 @@ impl PdClient for RpcClient {
                         let _ = keep_req_rx.try_recv().unwrap();
                         let resp = match resp {
                             Some(r) => r,
-                            None => return Ok(0),
+                            None => return Ok(TimeStamp::zero()),
                         };
                         PD_REQUEST_HISTOGRAM_VEC
                             .with_label_values(&["tso"])
                             .observe(duration_to_sec(timer.elapsed()));
                         check_resp_header(resp.get_header())?;
                         let ts = resp.get_timestamp();
-                        let encoded = compose_ts(ts.physical as _, ts.logical as _);
+                        let encoded = TimeStamp::compose(ts.physical as _, ts.logical as _);
                         Ok(encoded)
                     }),
             ) as PdFuture<_>

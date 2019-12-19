@@ -1,12 +1,13 @@
 use std::cmp;
 use std::collections::BTreeMap;
 use tikv_util::collections::HashSet;
+use txn_types::TimeStamp;
 
 pub struct Resolver {
     // start_ts -> locked keys.
-    locks: BTreeMap<u64, HashSet<Vec<u8>>>,
-    resolved_ts: Option<u64>,
-    min_ts: Option<u64>,
+    locks: BTreeMap<TimeStamp, HashSet<Vec<u8>>>,
+    resolved_ts: Option<TimeStamp>,
+    min_ts: Option<TimeStamp>,
 }
 
 impl Resolver {
@@ -19,22 +20,27 @@ impl Resolver {
     }
 
     pub fn init(&mut self) {
-        self.resolved_ts = Some(0);
+        self.resolved_ts = Some(TimeStamp::zero());
     }
 
-    pub fn resolved_ts(&self) -> Option<u64> {
+    pub fn resolved_ts(&self) -> Option<TimeStamp> {
         self.resolved_ts
     }
 
-    pub fn locks(&self) -> &BTreeMap<u64, HashSet<Vec<u8>>> {
+    pub fn locks(&self) -> &BTreeMap<TimeStamp, HashSet<Vec<u8>>> {
         &self.locks
     }
 
-    pub fn track_lock(&mut self, start_ts: u64, key: Vec<u8>) {
+    pub fn track_lock(&mut self, start_ts: TimeStamp, key: Vec<u8>) {
         self.locks.entry(start_ts).or_default().insert(key);
     }
 
-    pub fn untrack_lock(&mut self, start_ts: u64, commit_ts: Option<u64>, key: Vec<u8>) {
+    pub fn untrack_lock(
+        &mut self,
+        start_ts: TimeStamp,
+        commit_ts: Option<TimeStamp>,
+        key: Vec<u8>,
+    ) {
         if let Some(commit_ts) = commit_ts {
             assert!(
                 self.resolved_ts.map_or(true, |rts| commit_ts > rts),
@@ -79,7 +85,7 @@ impl Resolver {
     /// Try to advance resolved ts.
     /// Requirement of min_ts:
     ///   1. later commit_ts must be great than the min_ts.
-    pub fn resolve(&mut self, min_ts: u64) -> Option<u64> {
+    pub fn resolve(&mut self, min_ts: TimeStamp) -> Option<TimeStamp> {
         self.resolved_ts?;
         let min_start_ts = *self.locks.keys().next().unwrap_or(&min_ts);
         let new_resolved_ts = cmp::min(min_start_ts, min_ts);
@@ -155,14 +161,19 @@ mod tests {
             for e in case.clone() {
                 match e {
                     Event::Lock(start_ts, key) => {
-                        resolver.track_lock(start_ts, key.into_raw().unwrap())
+                        resolver.track_lock(start_ts.into(), key.into_raw().unwrap())
                     }
-                    Event::Unlock(start_ts, commit_ts, key) => {
-                        resolver.untrack_lock(start_ts, commit_ts, key.into_raw().unwrap())
-                    }
-                    Event::Resolve(min_ts, expect) => {
-                        assert_eq!(resolver.resolve(min_ts).unwrap(), expect, "case {}", i)
-                    }
+                    Event::Unlock(start_ts, commit_ts, key) => resolver.untrack_lock(
+                        start_ts.into(),
+                        commit_ts.map(Into::into),
+                        key.into_raw().unwrap(),
+                    ),
+                    Event::Resolve(min_ts, expect) => assert_eq!(
+                        resolver.resolve(min_ts.into()).unwrap(),
+                        expect.into(),
+                        "case {}",
+                        i
+                    ),
                 }
             }
 
@@ -170,13 +181,15 @@ mod tests {
             for e in case {
                 match e {
                     Event::Lock(start_ts, key) => {
-                        resolver.track_lock(start_ts, key.into_raw().unwrap())
+                        resolver.track_lock(start_ts.into(), key.into_raw().unwrap())
                     }
-                    Event::Unlock(start_ts, commit_ts, key) => {
-                        resolver.untrack_lock(start_ts, commit_ts, key.into_raw().unwrap())
-                    }
+                    Event::Unlock(start_ts, commit_ts, key) => resolver.untrack_lock(
+                        start_ts.into(),
+                        commit_ts.map(Into::into),
+                        key.into_raw().unwrap(),
+                    ),
                     Event::Resolve(min_ts, _) => {
-                        assert_eq!(resolver.resolve(min_ts), None, "case {}", i)
+                        assert_eq!(resolver.resolve(min_ts.into()), None, "case {}", i)
                     }
                 }
             }

@@ -40,7 +40,7 @@ pub enum Task {
         multi: Vec<CmdBatch>,
     },
     MinTS {
-        min_ts: u64,
+        min_ts: TimeStamp,
     },
     ResolverReady {
         region_id: u64,
@@ -199,7 +199,7 @@ impl Endpoint {
             sched,
             region_id,
             downstream_id,
-            checkpoint_ts,
+            checkpoint_ts: checkpoint_ts.into(),
             batch_size,
             build_resolver: enabled.is_some(),
         };
@@ -261,7 +261,7 @@ impl Endpoint {
         delegate.on_region_ready(resolver, region);
     }
 
-    fn on_min_ts(&mut self, min_ts: u64) {
+    fn on_min_ts(&mut self, min_ts: TimeStamp) {
         for delegate in self.capture_regions.values_mut() {
             delegate.on_min_ts(min_ts);
         }
@@ -295,7 +295,7 @@ struct Initializer {
 
     region_id: u64,
     downstream_id: usize,
-    checkpoint_ts: u64,
+    checkpoint_ts: TimeStamp,
     batch_size: usize,
 
     build_resolver: bool,
@@ -386,7 +386,7 @@ impl Initializer {
                 let mut scanner = ScannerBuilder::new(snap, current, false)
                     .range(None, None)
                     .isolation_level(IsolationLevel::Si)
-                    .build_delta(checkpoint_ts.into(), false)
+                    .build_delta(checkpoint_ts, false)
                     .unwrap();
                 let mut done = false;
                 while !done {

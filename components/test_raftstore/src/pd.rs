@@ -25,6 +25,7 @@ use tikv_util::collections::{HashMap, HashMapEntry, HashSet};
 use tikv_util::time::UnixSecs;
 use tikv_util::timer::GLOBAL_TIMER_HANDLE;
 use tikv_util::{Either, HandyRwLock};
+use txn_types::TimeStamp;
 
 use super::*;
 
@@ -1214,9 +1215,9 @@ impl PdClient for TestPdClient {
         Ok(resp)
     }
 
-    fn get_tso(&self) -> PdFuture<u64> {
+    fn get_tso(&self) -> PdFuture<TimeStamp> {
         let tso = self.tso.fetch_add(1, Ordering::SeqCst);
-        Box::new(futures::future::result(Ok(tso as _)))
+        Box::new(futures::future::result(Ok(TimeStamp::new(tso as _))))
     }
 
     fn spawn(&self, fut: PdFuture<()>) {
