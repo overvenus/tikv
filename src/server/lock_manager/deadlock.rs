@@ -15,7 +15,7 @@ use grpcio::{
 };
 use kvproto::deadlock::*;
 use kvproto::metapb::Region;
-use pd_client::{RpcClient, INVALID_ID};
+use pd_client::{PdClient, INVALID_ID};
 use raft::StateRole;
 use std::cell::RefCell;
 use std::fmt::{self, Display, Formatter};
@@ -27,17 +27,18 @@ use tikv_util::security::SecurityManager;
 use tikv_util::time::{Duration, Instant};
 use tikv_util::worker::{FutureRunnable, FutureScheduler, Stopped};
 use tokio_core::reactor::Handle;
+use txn_types::TimeStamp;
 
 /// `Locks` is a set of locks belonging to one transaction.
 struct Locks {
-    ts: u64,
+    ts: TimeStamp,
     hashes: Vec<u64>,
     last_detect_time: Instant,
 }
 
 impl Locks {
     /// Creates a new `Locks`.
-    fn new(ts: u64, hash: u64, last_detect_time: Instant) -> Self {
+    fn new(ts: TimeStamp, hash: u64, last_detect_time: Instant) -> Self {
         Self {
             ts,
             hashes: vec![hash],
@@ -73,7 +74,7 @@ pub struct DetectTable {
     /// When checking the deadlock, if the ttl has elpased, the corresponding edge will be removed.
     /// `last_detect_time` is the start time of the edge. `Detect` requests will refresh it.
     // txn_ts => (lock_ts => Locks)
-    wait_for_map: HashMap<u64, HashMap<u64, Locks>>,
+    wait_for_map: HashMap<TimeStamp, HashMap<TimeStamp, Locks>>,
 
     /// The ttl of every edge.
     ttl: Duration,
@@ -96,9 +97,26 @@ impl DetectTable {
     }
 
     /// Returns the key hash which causes deadlock.
-    pub fn detect(&mut self, txn_ts: u64, lock_ts: u64, lock_hash: u64) -> Option<u64> {
-        let _timer = DETECTOR_HISTOGRAM_VEC.detect.start_coarse_timer();
-        TASK_COUNTER_VEC.detect.inc();
+    pub fn detect(&mut self, txn_ts: TimeStamp, lock_ts: TimeStamp, lock_hash: u64) -> Option<u64> {
+        DETECTOR_HISTOGRAM_METRICS.with(|m| {
+            let res = m
+                .detect
+                .observe_closure_duration(|| self.detect_inner(txn_ts, lock_ts, lock_hash));
+            m.may_flush_all();
+            res
+        })
+    }
+
+    fn detect_inner(
+        &mut self,
+        txn_ts: TimeStamp,
+        lock_ts: TimeStamp,
+        lock_hash: u64,
+    ) -> Option<u64> {
+        TASK_COUNTER_METRICS.with(|m| {
+            m.detect.inc();
+            m.may_flush_all()
+        });
 
         self.now = Instant::now_coarse();
         self.active_expire();
@@ -109,7 +127,10 @@ impl DetectTable {
         }
 
         if let Some(deadlock_key_hash) = self.do_detect(txn_ts, lock_ts) {
-            ERROR_COUNTER_VEC.deadlock.inc();
+            ERROR_COUNTER_METRICS.with(|m| {
+                m.deadlock.inc();
+                m.may_flush_all()
+            });
             return Some(deadlock_key_hash);
         }
         self.register(txn_ts, lock_ts, lock_hash);
@@ -117,13 +138,13 @@ impl DetectTable {
     }
 
     /// Checks if there is an edge from `wait_for_ts` to `txn_ts`.
-    fn do_detect(&mut self, txn_ts: u64, wait_for_ts: u64) -> Option<u64> {
+    fn do_detect(&mut self, txn_ts: TimeStamp, wait_for_ts: TimeStamp) -> Option<u64> {
         let now = self.now;
         let ttl = self.ttl;
 
         let mut stack = vec![wait_for_ts];
         // Memorize the pushed vertexes to avoid duplicate search.
-        let mut pushed: HashSet<u64> = HashSet::default();
+        let mut pushed: HashSet<TimeStamp> = HashSet::default();
         pushed.insert(wait_for_ts);
         while let Some(wait_for_ts) = stack.pop() {
             if let Some(wait_for) = self.wait_for_map.get_mut(&wait_for_ts) {
@@ -148,7 +169,12 @@ impl DetectTable {
     }
 
     /// Returns true and adds to the detect table if `txn_ts` is waiting for `lock_ts`.
-    fn register_if_existed(&mut self, txn_ts: u64, lock_ts: u64, lock_hash: u64) -> bool {
+    fn register_if_existed(
+        &mut self,
+        txn_ts: TimeStamp,
+        lock_ts: TimeStamp,
+        lock_hash: u64,
+    ) -> bool {
         if let Some(wait_for) = self.wait_for_map.get_mut(&txn_ts) {
             if let Some(locks) = wait_for.get_mut(&lock_ts) {
                 locks.push(lock_hash, self.now);
@@ -159,7 +185,7 @@ impl DetectTable {
     }
 
     /// Adds to the detect table. The edge from `txn_ts` to `lock_ts` must not exist.
-    fn register(&mut self, txn_ts: u64, lock_ts: u64, lock_hash: u64) {
+    fn register(&mut self, txn_ts: TimeStamp, lock_ts: TimeStamp, lock_hash: u64) {
         let wait_for = self.wait_for_map.entry(txn_ts).or_default();
         assert!(!wait_for.contains_key(&lock_ts));
         let locks = Locks::new(lock_ts, lock_hash, self.now);
@@ -167,7 +193,7 @@ impl DetectTable {
     }
 
     /// Removes the corresponding wait_for_entry.
-    fn clean_up_wait_for(&mut self, txn_ts: u64, lock_ts: u64, lock_hash: u64) {
+    fn clean_up_wait_for(&mut self, txn_ts: TimeStamp, lock_ts: TimeStamp, lock_hash: u64) {
         if let Some(wait_for) = self.wait_for_map.get_mut(&txn_ts) {
             if let Some(locks) = wait_for.get_mut(&lock_ts) {
                 if locks.remove(lock_hash) {
@@ -178,13 +204,19 @@ impl DetectTable {
                 }
             }
         }
-        TASK_COUNTER_VEC.clean_up_wait_for.inc();
+        TASK_COUNTER_METRICS.with(|m| {
+            m.clean_up_wait_for.inc();
+            m.may_flush_all()
+        });
     }
 
     /// Removes the entries of the transaction.
-    fn clean_up(&mut self, txn_ts: u64) {
+    fn clean_up(&mut self, txn_ts: TimeStamp) {
         self.wait_for_map.remove(&txn_ts);
-        TASK_COUNTER_VEC.clean_up.inc();
+        TASK_COUNTER_METRICS.with(|m| {
+            m.clean_up.inc();
+            m.may_flush_all()
+        });
     }
 
     /// Clears the whole detect table.
@@ -218,7 +250,12 @@ const LEADER_KEY: &[u8] = b"";
 
 /// Returns true if the region containing the LEADER_KEY.
 fn is_leader_region(region: &'_ Region) -> bool {
-    region.get_start_key() <= LEADER_KEY
+    // The key range of a new created region is empty which misleads the leader
+    // of the deadlock detector stepping down.
+    //
+    // If the peers of a region is not empty, the region info is complete.
+    !region.get_peers().is_empty()
+        && region.get_start_key() <= LEADER_KEY
         && (region.get_end_key().is_empty() || LEADER_KEY < region.get_end_key())
 }
 
@@ -257,7 +294,7 @@ pub enum Task {
     /// The detect request of itself.
     Detect {
         tp: DetectType,
-        txn_ts: u64,
+        txn_ts: TimeStamp,
         lock: Lock,
     },
     /// The detect request of other nodes.
@@ -304,7 +341,7 @@ impl Scheduler {
         }
     }
 
-    pub fn detect(&self, txn_ts: u64, lock: Lock) {
+    pub fn detect(&self, txn_ts: TimeStamp, lock: Lock) {
         self.notify_scheduler(Task::Detect {
             tp: DetectType::Detect,
             txn_ts,
@@ -312,7 +349,7 @@ impl Scheduler {
         });
     }
 
-    pub fn clean_up_wait_for(&self, txn_ts: u64, lock: Lock) {
+    pub fn clean_up_wait_for(&self, txn_ts: TimeStamp, lock: Lock) {
         self.notify_scheduler(Task::Detect {
             tp: DetectType::CleanUpWaitFor,
             txn_ts,
@@ -320,7 +357,7 @@ impl Scheduler {
         });
     }
 
-    pub fn clean_up(&self, txn_ts: u64) {
+    pub fn clean_up(&self, txn_ts: TimeStamp) {
         self.notify_scheduler(Task::Detect {
             tp: DetectType::CleanUp,
             txn_ts,
@@ -358,7 +395,11 @@ struct Inner {
 
 /// Detector is used to detect deadlocks between transactions. There is a leader
 /// in the cluster which collects all `wait_for_entry` from other followers.
-pub struct Detector<S: StoreAddrResolver + 'static> {
+pub struct Detector<S, P>
+where
+    S: StoreAddrResolver + 'static,
+    P: PdClient + 'static,
+{
     /// The store id of the node.
     store_id: u64,
     /// Used to create clients to the leader.
@@ -368,7 +409,7 @@ pub struct Detector<S: StoreAddrResolver + 'static> {
     /// The connection to the leader.
     leader_client: Option<Client>,
     /// Used to get the leader of leader region from PD.
-    pd_client: Arc<RpcClient>,
+    pd_client: Arc<P>,
     /// Used to resolve store address.
     resolver: S,
     /// Used to connect other nodes.
@@ -379,12 +420,21 @@ pub struct Detector<S: StoreAddrResolver + 'static> {
     inner: Rc<RefCell<Inner>>,
 }
 
-unsafe impl<S: StoreAddrResolver + 'static> Send for Detector<S> {}
+unsafe impl<S, P> Send for Detector<S, P>
+where
+    S: StoreAddrResolver + 'static,
+    P: PdClient + 'static,
+{
+}
 
-impl<S: StoreAddrResolver + 'static> Detector<S> {
+impl<S, P> Detector<S, P>
+where
+    S: StoreAddrResolver + 'static,
+    P: PdClient + 'static,
+{
     pub fn new(
         store_id: u64,
-        pd_client: Arc<RpcClient>,
+        pd_client: Arc<P>,
         resolver: S,
         security_mgr: Arc<SecurityManager>,
         waiter_mgr_scheduler: WaiterMgrScheduler,
@@ -442,7 +492,7 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
 
     /// Gets leader info from PD.
     fn get_leader_info(&self) -> Result<Option<(u64, String)>> {
-        let (_, leader) = self.pd_client.get_region_and_leader(LEADER_KEY)?;
+        let leader = self.pd_client.get_region_info(LEADER_KEY)?.leader;
         match leader {
             Some(leader) => {
                 let leader_id = leader.get_store_id();
@@ -451,7 +501,10 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
             }
 
             None => {
-                ERROR_COUNTER_VEC.leader_not_found.inc();
+                ERROR_COUNTER_METRICS.with(|m| {
+                    m.leader_not_found.inc();
+                    m.may_flush_all()
+                });
                 Ok(None)
             }
         }
@@ -504,8 +557,10 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
     /// Reconnects the leader. The leader info must exist.
     fn reconnect_leader(&mut self, handle: &Handle) {
         assert!(self.leader_client.is_none() && self.leader_info.is_some());
-        ERROR_COUNTER_VEC.reconnect_leader.inc();
-
+        ERROR_COUNTER_METRICS.with(|m| {
+            m.reconnect_leader.inc();
+            m.may_flush_all()
+        });
         let (leader_id, leader_addr) = self.leader_info.as_ref().unwrap();
         // Create the connection to the leader and registers the callback to receive
         // the deadlock response.
@@ -523,9 +578,9 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
                 ..
             } = resp.take_entry();
             waiter_mgr_scheduler.deadlock(
-                txn,
+                txn.into(),
                 Lock {
-                    ts: wait_for_txn,
+                    ts: wait_for_txn.into(),
                     hash: key_hash,
                 },
                 resp.get_deadlock_key_hash(),
@@ -547,7 +602,7 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
         &mut self,
         handle: &Handle,
         tp: DetectType,
-        txn_ts: u64,
+        txn_ts: TimeStamp,
         lock: Lock,
     ) -> bool {
         assert!(!self.is_leader() && self.leader_info.is_some());
@@ -561,11 +616,11 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
                 DetectType::CleanUpWaitFor => DeadlockRequestType::CleanUpWaitFor,
                 DetectType::CleanUp => DeadlockRequestType::CleanUp,
             };
-            let mut entry = WaitForEntry::new();
-            entry.set_txn(txn_ts);
-            entry.set_wait_for_txn(lock.ts);
+            let mut entry = WaitForEntry::default();
+            entry.set_txn(txn_ts.into_inner());
+            entry.set_wait_for_txn(lock.ts.into_inner());
             entry.set_key_hash(lock.hash);
-            let mut req = DeadlockRequest::new();
+            let mut req = DeadlockRequest::default();
             req.set_tp(tp);
             req.set_entry(entry);
             if leader_client.detect(req).is_ok() {
@@ -577,7 +632,7 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
         false
     }
 
-    fn handle_detect_locally(&self, tp: DetectType, txn_ts: u64, lock: Lock) {
+    fn handle_detect_locally(&self, tp: DetectType, txn_ts: TimeStamp, lock: Lock) {
         let detect_table = &mut self.inner.borrow_mut().detect_table;
         match tp {
             DetectType::Detect => {
@@ -594,7 +649,7 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
     }
 
     /// Handles detect requests of itself.
-    fn handle_detect(&mut self, handle: &Handle, tp: DetectType, txn_ts: u64, lock: Lock) {
+    fn handle_detect(&mut self, handle: &Handle, tp: DetectType, txn_ts: TimeStamp, lock: Lock) {
         if self.is_leader() {
             self.handle_detect_locally(tp, txn_ts, lock);
         } else {
@@ -615,7 +670,10 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
             // If a request which causes deadlock is dropped, it leads to the waiter timeout.
             // TiDB will retry to acquire the lock and detect deadlock again.
             warn!("detect request dropped"; "tp" => ?tp, "txn_ts" => txn_ts, "lock" => ?lock);
-            ERROR_COUNTER_VEC.dropped.inc();
+            ERROR_COUNTER_METRICS.with(|m| {
+                m.dropped.inc();
+                m.may_flush_all()
+            });
         }
     }
 
@@ -632,7 +690,10 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
                 Some("I'm not the leader of deadlock detector".to_string()),
             );
             handle.spawn(sink.fail(status).map_err(|_| ()));
-            ERROR_COUNTER_VEC.not_leader.inc();
+            ERROR_COUNTER_METRICS.with(|m| {
+                m.not_leader.inc();
+                m.may_flush_all()
+            });
             return;
         }
 
@@ -643,7 +704,10 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
                 // It's possible the leader changes after registering this handler.
                 let mut inner = inner.borrow_mut();
                 if inner.role != Role::Leader {
-                    ERROR_COUNTER_VEC.not_leader.inc();
+                    ERROR_COUNTER_METRICS.with(|m| {
+                        m.not_leader.inc();
+                        m.may_flush_all()
+                    });
                     return Err(Error::Other(box_err!("leader changed")));
                 }
 
@@ -658,7 +722,7 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
                 let res = match req.get_tp() {
                     DeadlockRequestType::Detect => {
                         if let Some(deadlock_key_hash) =
-                            detect_table.detect(*txn, *wait_for_txn, *key_hash)
+                            detect_table.detect(txn.into(), wait_for_txn.into(), *key_hash)
                         {
                             let mut resp = DeadlockResponse::default();
                             resp.set_entry(req.take_entry());
@@ -670,12 +734,12 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
                     }
 
                     DeadlockRequestType::CleanUpWaitFor => {
-                        detect_table.clean_up_wait_for(*txn, *wait_for_txn, *key_hash);
+                        detect_table.clean_up_wait_for(txn.into(), wait_for_txn.into(), *key_hash);
                         None
                     }
 
                     DeadlockRequestType::CleanUp => {
-                        detect_table.clean_up(*txn);
+                        detect_table.clean_up(txn.into());
                         None
                     }
                 };
@@ -696,7 +760,11 @@ impl<S: StoreAddrResolver + 'static> Detector<S> {
     }
 }
 
-impl<S: StoreAddrResolver + 'static> FutureRunnable<Task> for Detector<S> {
+impl<S, P> FutureRunnable<Task> for Detector<S, P>
+where
+    S: StoreAddrResolver + 'static,
+    P: PdClient + 'static,
+{
     fn run(&mut self, task: Task, handle: &Handle) {
         match task {
             Task::Detect { tp, txn_ts, lock } => {
@@ -783,23 +851,23 @@ mod tests {
         let mut detect_table = DetectTable::new(Duration::from_secs(10));
 
         // Deadlock: 1 -> 2 -> 1
-        assert_eq!(detect_table.detect(1, 2, 2), None);
-        assert_eq!(detect_table.detect(2, 1, 1).unwrap(), 2);
+        assert_eq!(detect_table.detect(1.into(), 2.into(), 2), None);
+        assert_eq!(detect_table.detect(2.into(), 1.into(), 1).unwrap(), 2);
         // Deadlock: 1 -> 2 -> 3 -> 1
-        assert_eq!(detect_table.detect(2, 3, 3), None);
-        assert_eq!(detect_table.detect(3, 1, 1).unwrap(), 3);
-        detect_table.clean_up(2);
-        assert_eq!(detect_table.wait_for_map.contains_key(&2), false);
+        assert_eq!(detect_table.detect(2.into(), 3.into(), 3), None);
+        assert_eq!(detect_table.detect(3.into(), 1.into(), 1).unwrap(), 3);
+        detect_table.clean_up(2.into());
+        assert_eq!(detect_table.wait_for_map.contains_key(&2.into()), false);
 
         // After cycle is broken, no deadlock.
-        assert_eq!(detect_table.detect(3, 1, 1), None);
-        assert_eq!(detect_table.wait_for_map.get(&3).unwrap().len(), 1);
+        assert_eq!(detect_table.detect(3.into(), 1.into(), 1), None);
+        assert_eq!(detect_table.wait_for_map.get(&3.into()).unwrap().len(), 1);
         assert_eq!(
             detect_table
                 .wait_for_map
-                .get(&3)
+                .get(&3.into())
                 .unwrap()
-                .get(&1)
+                .get(&1.into())
                 .unwrap()
                 .hashes
                 .len(),
@@ -807,13 +875,13 @@ mod tests {
         );
 
         // Different key_hash grows the list.
-        assert_eq!(detect_table.detect(3, 1, 2), None);
+        assert_eq!(detect_table.detect(3.into(), 1.into(), 2), None);
         assert_eq!(
             detect_table
                 .wait_for_map
-                .get(&3)
+                .get(&3.into())
                 .unwrap()
-                .get(&1)
+                .get(&1.into())
                 .unwrap()
                 .hashes
                 .len(),
@@ -821,13 +889,13 @@ mod tests {
         );
 
         // Same key_hash doesn't grow the list.
-        assert_eq!(detect_table.detect(3, 1, 2), None);
+        assert_eq!(detect_table.detect(3.into(), 1.into(), 2), None);
         assert_eq!(
             detect_table
                 .wait_for_map
-                .get(&3)
+                .get(&3.into())
                 .unwrap()
-                .get(&1)
+                .get(&1.into())
                 .unwrap()
                 .hashes
                 .len(),
@@ -835,14 +903,14 @@ mod tests {
         );
 
         // Different lock_ts grows the map.
-        assert_eq!(detect_table.detect(3, 2, 2), None);
-        assert_eq!(detect_table.wait_for_map.get(&3).unwrap().len(), 2);
+        assert_eq!(detect_table.detect(3.into(), 2.into(), 2), None);
+        assert_eq!(detect_table.wait_for_map.get(&3.into()).unwrap().len(), 2);
         assert_eq!(
             detect_table
                 .wait_for_map
-                .get(&3)
+                .get(&3.into())
                 .unwrap()
-                .get(&2)
+                .get(&2.into())
                 .unwrap()
                 .hashes
                 .len(),
@@ -850,26 +918,26 @@ mod tests {
         );
 
         // Clean up entries shrinking the map.
-        detect_table.clean_up_wait_for(3, 1, 1);
+        detect_table.clean_up_wait_for(3.into(), 1.into(), 1);
         assert_eq!(
             detect_table
                 .wait_for_map
-                .get(&3)
+                .get(&3.into())
                 .unwrap()
-                .get(&1)
+                .get(&1.into())
                 .unwrap()
                 .hashes
                 .len(),
             1
         );
-        detect_table.clean_up_wait_for(3, 1, 2);
-        assert_eq!(detect_table.wait_for_map.get(&3).unwrap().len(), 1);
-        detect_table.clean_up_wait_for(3, 2, 2);
-        assert_eq!(detect_table.wait_for_map.contains_key(&3), false);
+        detect_table.clean_up_wait_for(3.into(), 1.into(), 2);
+        assert_eq!(detect_table.wait_for_map.get(&3.into()).unwrap().len(), 1);
+        detect_table.clean_up_wait_for(3.into(), 2.into(), 2);
+        assert_eq!(detect_table.wait_for_map.contains_key(&3.into()), false);
 
         // Clean up non-exist entry
-        detect_table.clean_up(3);
-        detect_table.clean_up_wait_for(3, 1, 1);
+        detect_table.clean_up(3.into());
+        detect_table.clean_up_wait_for(3.into(), 1.into(), 1);
     }
 
     #[test]
@@ -877,45 +945,45 @@ mod tests {
         let mut detect_table = DetectTable::new(Duration::from_millis(100));
 
         // Deadlock
-        assert!(detect_table.detect(1, 2, 1).is_none());
-        assert!(detect_table.detect(2, 1, 2).is_some());
+        assert!(detect_table.detect(1.into(), 2.into(), 1).is_none());
+        assert!(detect_table.detect(2.into(), 1.into(), 2).is_some());
         // After sleep, the expired entry has been removed. So there is no deadlock.
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(detect_table.wait_for_map.len(), 1);
-        assert!(detect_table.detect(2, 1, 2).is_none());
+        assert!(detect_table.detect(2.into(), 1.into(), 2).is_none());
         assert_eq!(detect_table.wait_for_map.len(), 1);
 
         // `Detect` updates the last_detect_time, so the entry won't be removed.
         detect_table.clear();
-        assert!(detect_table.detect(1, 2, 1).is_none());
+        assert!(detect_table.detect(1.into(), 2.into(), 1).is_none());
         std::thread::sleep(Duration::from_millis(500));
-        assert!(detect_table.detect(1, 2, 1).is_none());
-        assert!(detect_table.detect(2, 1, 2).is_some());
+        assert!(detect_table.detect(1.into(), 2.into(), 1).is_none());
+        assert!(detect_table.detect(2.into(), 1.into(), 2).is_some());
 
         // Remove expired entry shrinking the map.
         detect_table.clear();
-        assert!(detect_table.detect(1, 2, 1).is_none());
-        assert!(detect_table.detect(1, 3, 1).is_none());
+        assert!(detect_table.detect(1.into(), 2.into(), 1).is_none());
+        assert!(detect_table.detect(1.into(), 3.into(), 1).is_none());
         assert_eq!(detect_table.wait_for_map.len(), 1);
         std::thread::sleep(Duration::from_millis(500));
-        assert!(detect_table.detect(1, 3, 2).is_none());
-        assert!(detect_table.detect(2, 1, 2).is_none());
-        assert_eq!(detect_table.wait_for_map.get(&1).unwrap().len(), 1);
+        assert!(detect_table.detect(1.into(), 3.into(), 2).is_none());
+        assert!(detect_table.detect(2.into(), 1.into(), 2).is_none());
+        assert_eq!(detect_table.wait_for_map.get(&1.into()).unwrap().len(), 1);
         assert_eq!(
             detect_table
                 .wait_for_map
-                .get(&1)
+                .get(&1.into())
                 .unwrap()
-                .get(&3)
+                .get(&3.into())
                 .unwrap()
                 .hashes
                 .len(),
             2
         );
         std::thread::sleep(Duration::from_millis(500));
-        assert!(detect_table.detect(3, 2, 3).is_none());
+        assert!(detect_table.detect(3.into(), 2.into(), 3).is_none());
         assert_eq!(detect_table.wait_for_map.len(), 2);
-        assert!(detect_table.detect(3, 1, 3).is_none());
+        assert!(detect_table.detect(3.into(), 1.into(), 3).is_none());
         assert_eq!(detect_table.wait_for_map.len(), 1);
     }
 }

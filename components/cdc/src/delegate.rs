@@ -10,10 +10,10 @@ use resolved_ts::Resolver;
 use tikv::raftstore::coprocessor::{Cmd, CmdBatch};
 use tikv::raftstore::store::util::compare_region_epoch;
 use tikv::raftstore::Error as RaftStoreError;
-use tikv::storage::mvcc::{Lock, LockType, Write, WriteType};
+use tikv::storage::mvcc::{Lock, LockType, WriteRef, WriteType};
 use tikv::storage::txn::TxnEntry;
-use tikv::storage::Key;
 use tikv_util::collections::HashMap;
+use txn_types::{Key, TimeStamp};
 
 use crate::Error;
 
@@ -201,7 +201,7 @@ impl Delegate {
         }
     }
 
-    pub fn on_min_ts(&mut self, min_ts: u64) {
+    pub fn on_min_ts(&mut self, min_ts: TimeStamp) {
         if self.resolver.is_none() {
             info!("region resolver not ready";
                 "region_id" => self.region_id, "min_ts" => min_ts);
@@ -217,7 +217,7 @@ impl Delegate {
             "region_id" => self.region_id, "resolved_ts" => resolved_ts);
         let mut change_data_event = Event::new();
         change_data_event.region_id = self.region_id;
-        change_data_event.event = Some(Event_oneof_event::ResolvedTs(resolved_ts));
+        change_data_event.event = Some(Event_oneof_event::ResolvedTs(resolved_ts.into_inner()));
         let mut change_data = ChangeDataEvent::new();
         change_data.mut_events().push(change_data_event);
         self.broadcast(change_data);
@@ -330,7 +330,11 @@ impl Delegate {
                         } else {
                             Some(row.commit_ts)
                         };
-                        resolver.untrack_lock(row.start_ts, commit_ts, row.key.clone());
+                        resolver.untrack_lock(
+                            row.start_ts.into(),
+                            commit_ts.map(Into::into),
+                            row.key.clone(),
+                        );
 
                         let r = rows.insert(row.key.clone(), row);
                         assert!(r.is_none());
@@ -354,7 +358,7 @@ impl Delegate {
                         // we must track inflight txns.
                         assert!(self.resolver.is_some(), "region resolver should be ready");
                         let resolver = self.resolver.as_mut().unwrap();
-                        resolver.track_lock(row.start_ts, row.key.clone());
+                        resolver.track_lock(row.start_ts.into(), row.key.clone());
 
                         *occupied = row;
                     }
@@ -416,7 +420,7 @@ impl Delegate {
 }
 
 fn decode_write(key: Vec<u8>, value: &[u8], row: &mut EventRow) -> bool {
-    let write = Write::parse(value).unwrap();
+    let write = WriteRef::parse(value).unwrap().to_owned();
     let (op_type, r_type) = match write.write_type {
         WriteType::Put => (EventRowOpType::Put, EventLogType::Commit),
         WriteType::Delete => (EventRowOpType::Delete, EventLogType::Commit),
@@ -430,9 +434,9 @@ fn decode_write(key: Vec<u8>, value: &[u8], row: &mut EventRow) -> bool {
     let commit_ts = if write.write_type == WriteType::Rollback {
         0
     } else {
-        key.decode_ts().unwrap()
+        key.decode_ts().unwrap().into_inner()
     };
-    row.start_ts = write.start_ts;
+    row.start_ts = write.start_ts.into_inner();
     row.commit_ts = commit_ts;
     row.key = key.truncate_ts().unwrap().to_raw().unwrap();
     row.op_type = op_type;
@@ -458,7 +462,7 @@ fn decode_lock(key: Vec<u8>, value: &[u8], row: &mut EventRow) -> bool {
         }
     };
     let key = Key::from_encoded(key);
-    row.start_ts = lock.ts;
+    row.start_ts = lock.ts.into_inner();
     row.key = key.to_raw().unwrap();
     row.op_type = op_type;
     row.r_type = EventLogType::Prewrite;
@@ -479,6 +483,8 @@ fn decode_default(value: Vec<u8>, row: &mut EventRow) {
 mod tests {
     use super::*;
     use engine::rocks::*;
+    use engine_rocks::{RocksEngine, RocksSnapshot};
+    use engine_traits::Snapshot;
     use futures::{Future, Stream};
     use kvproto::errorpb::Error as ErrorHeader;
     use kvproto::metapb::Region;
@@ -486,11 +492,11 @@ mod tests {
     use kvproto::raft_serverpb::RaftMessage;
     use std::cell::Cell;
     use std::sync::Arc;
+    use tikv::raftstore::router::RaftStoreRouter;
     use tikv::raftstore::store::{
-        keys, Callback, CasualMessage, ReadResponse, RegionSnapshot, SignificantMsg,
+        Callback, CasualMessage, ReadResponse, RegionSnapshot, SignificantMsg,
     };
     use tikv::raftstore::Result as RaftStoreResult;
-    use tikv::server::transport::RaftStoreRouter;
     use tikv::server::RaftKv;
     use tikv::storage::mvcc::reader::txn_entry_tests::*;
     use tikv::storage::mvcc::tests::*;
@@ -506,7 +512,11 @@ mod tests {
         fn send_raft_msg(&self, _: RaftMessage) -> RaftStoreResult<()> {
             Ok(())
         }
-        fn send_command(&self, req: RaftCmdRequest, cb: Callback) -> RaftStoreResult<()> {
+        fn send_command(
+            &self,
+            req: RaftCmdRequest,
+            cb: Callback<RocksEngine>,
+        ) -> RaftStoreResult<()> {
             let wb = WriteBatch::new();
             let mut snap = None;
             let mut responses = Vec::with_capacity(req.get_requests().len());
@@ -525,7 +535,7 @@ mod tests {
                         }
                     }
                     CmdType::Snap => {
-                        snap = Some(Snapshot::new(self.engine.clone()));
+                        snap = Some(RocksSnapshot::new(self.engine.clone()));
                     }
                     CmdType::Delete => {
                         if !req.get_put().get_cf().is_empty() {
@@ -837,7 +847,7 @@ mod tests {
         };
         let into_entry = |e: Option<EntryBuilder>| {
             e.map(|e| {
-                if e.commit_ts == 0 {
+                if e.commit_ts.is_zero() {
                     e.build_prewrite(LockType::Put, false)
                 } else {
                     e.build_commit(WriteType::Put, false)
@@ -850,14 +860,14 @@ mod tests {
             Some(EntryBuilder {
                 key: b"a".to_vec(),
                 value: b"b".to_vec(),
-                start_ts: 1,
-                commit_ts: 0,
+                start_ts: 1.into(),
+                commit_ts: 0.into(),
             }),
             Some(EntryBuilder {
                 key: b"a".to_vec(),
                 value: b"b".to_vec(),
-                start_ts: 1,
-                commit_ts: 2,
+                start_ts: 1.into(),
+                commit_ts: 2.into(),
             }),
             None,
         ];

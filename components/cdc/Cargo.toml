@@ -28,6 +28,9 @@ pd_client = { path = "../pd_client" }
 keys = { path = "../keys" }
 failure = "0.1"
 engine = { path = "../engine" }
+engine_rocks = { path = "../engine_rocks" }
+engine_traits = { path = "../engine_traits" }
+txn_types = { path = "../txn_types" }
 
 [dependencies.prometheus]
 version = "0.4.2"

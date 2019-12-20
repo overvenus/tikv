@@ -6,6 +6,8 @@
 extern crate derive_more;
 #[macro_use]
 extern crate failure;
+#[allow(unused_extern_crates)]
+extern crate tikv_alloc;
 
 use byteorder::{BigEndian, ByteOrder};
 
@@ -13,9 +15,6 @@ use kvproto::metapb::Region;
 use std::mem;
 
 pub mod rewrite;
-mod types;
-
-pub use types::{Key, KvPair, Value};
 
 pub const MIN_KEY: &[u8] = &[];
 pub const MAX_KEY: &[u8] = &[0xFF];
@@ -253,6 +252,7 @@ pub(crate) fn next_key_no_alloc(key: &[u8]) -> Option<(&[u8], u8)> {
 /// # Examples
 ///
 /// ```
+/// use keys::next_key;
 /// assert_eq!(next_key(b"123"), b"124");
 /// assert_eq!(next_key(b"12\xff"), b"13");
 /// assert_eq!(next_key(b"\xff\xff"), b"");

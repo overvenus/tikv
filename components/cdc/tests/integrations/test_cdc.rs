@@ -15,6 +15,7 @@ use tikv::raftstore::coprocessor::CoprocessorHost;
 use tikv_util::collections::HashMap;
 use tikv_util::worker::Worker;
 use tikv_util::HandyRwLock;
+use txn_types::TimeStamp;
 
 use cdc::{CdcObserver, Task};
 
@@ -101,12 +102,12 @@ impl TestSuite {
         self.cluster.shutdown();
     }
 
-    fn must_kv_prewrite(&mut self, muts: Vec<Mutation>, pk: Vec<u8>, ts: u64) {
+    fn must_kv_prewrite(&mut self, muts: Vec<Mutation>, pk: Vec<u8>, ts: TimeStamp) {
         let mut prewrite_req = PrewriteRequest::default();
         prewrite_req.set_context(self.get_context(1));
         prewrite_req.set_mutations(muts.into_iter().collect());
         prewrite_req.primary_lock = pk;
-        prewrite_req.start_version = ts;
+        prewrite_req.start_version = ts.into_inner();
         prewrite_req.lock_ttl = prewrite_req.start_version + 1;
         let prewrite_resp = self.tikv_cli.kv_prewrite(&prewrite_req).unwrap();
         assert!(
@@ -121,12 +122,12 @@ impl TestSuite {
         );
     }
 
-    fn must_kv_commit(&mut self, keys: Vec<Vec<u8>>, start_ts: u64, commit_ts: u64) {
+    fn must_kv_commit(&mut self, keys: Vec<Vec<u8>>, start_ts: TimeStamp, commit_ts: TimeStamp) {
         let mut commit_req = CommitRequest::default();
         commit_req.set_context(self.get_context(1));
-        commit_req.start_version = start_ts;
+        commit_req.start_version = start_ts.into_inner();
         commit_req.set_keys(keys.into_iter().collect());
-        commit_req.commit_version = commit_ts;
+        commit_req.commit_version = commit_ts.into_inner();
         let commit_resp = self.tikv_cli.kv_commit(&commit_req).unwrap();
         assert!(
             !commit_resp.has_region_error(),
@@ -579,7 +580,7 @@ fn test_cdc_scan() {
 
     let mut req = ChangeDataRequest::default();
     req.region_id = 1;
-    req.checkpoint_ts = checkpoint_ts;
+    req.checkpoint_ts = checkpoint_ts.into_inner();
     req.set_region_epoch(suite.get_context(1).take_region_epoch());
     let event_feed2 = suite.cdc_cli.event_feed(&req).unwrap();
     let event_feed1 = event_feed_wrap.replace(Some(event_feed2));

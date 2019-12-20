@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use engine_rocks::RocksEngine;
 use futures::future::{lazy, Future};
 use kvproto::cdcpb::*;
 use kvproto::kvrpcpb::IsolationLevel;
@@ -19,6 +20,7 @@ use tikv_util::collections::HashMap;
 use tikv_util::timer::SteadyTimer;
 use tikv_util::worker::{Runnable, Scheduler};
 use tokio_threadpool::{Builder, Sender as PoolSender, ThreadPool};
+use txn_types::TimeStamp;
 
 use crate::delegate::{Delegate, Downstream};
 use crate::lock_scanner::LockScanner;
@@ -38,7 +40,7 @@ pub enum Task {
         multi: Vec<CmdBatch>,
     },
     MinTS {
-        min_ts: u64,
+        min_ts: TimeStamp,
     },
     ResolverReady {
         region_id: u64,
@@ -197,7 +199,7 @@ impl Endpoint {
             sched,
             region_id,
             downstream_id,
-            checkpoint_ts,
+            checkpoint_ts: checkpoint_ts.into(),
             batch_size,
             build_resolver: enabled.is_some(),
         };
@@ -211,7 +213,7 @@ impl Endpoint {
                 region_id,
                 region_epoch: request.take_region_epoch(),
                 enabled,
-                cb: Callback::Read(Box::new(move |resp: ReadResponse| {
+                cb: Callback::Read(Box::new(move |resp: ReadResponse<_>| {
                     init.on_change_cmd(resp);
                 })),
             })
@@ -219,7 +221,7 @@ impl Endpoint {
             ApplyTask::Change(ChangeCmd::Snapshot {
                 region_id,
                 region_epoch: request.take_region_epoch(),
-                cb: Callback::Read(Box::new(move |resp: ReadResponse| {
+                cb: Callback::Read(Box::new(move |resp: ReadResponse<_>| {
                     init.on_change_cmd(resp);
                 })),
             })
@@ -259,7 +261,7 @@ impl Endpoint {
         delegate.on_region_ready(resolver, region);
     }
 
-    fn on_min_ts(&mut self, min_ts: u64) {
+    fn on_min_ts(&mut self, min_ts: TimeStamp) {
         for delegate in self.capture_regions.values_mut() {
             delegate.on_min_ts(min_ts);
         }
@@ -293,14 +295,14 @@ struct Initializer {
 
     region_id: u64,
     downstream_id: usize,
-    checkpoint_ts: u64,
+    checkpoint_ts: TimeStamp,
     batch_size: usize,
 
     build_resolver: bool,
 }
 
 impl Initializer {
-    fn on_change_cmd(&self, mut resp: ReadResponse) {
+    fn on_change_cmd(&self, mut resp: ReadResponse<RocksEngine>) {
         if let Some(region_snapshot) = resp.snapshot {
             assert_eq!(self.region_id, region_snapshot.get_region().get_id());
             if self.build_resolver {
@@ -323,7 +325,7 @@ impl Initializer {
         }
     }
 
-    fn async_build_resolver(&self, snap: RegionSnapshot) {
+    fn async_build_resolver(&self, snap: RegionSnapshot<RocksEngine>) {
         info!("async build resolver"; "region_id" => snap.get_region().get_id());
         // spawn the task to a thread pool.
         let region_id = snap.get_region().get_id();
@@ -366,7 +368,7 @@ impl Initializer {
             .unwrap();
     }
 
-    fn async_incremental_scan(&self, snap: RegionSnapshot) {
+    fn async_incremental_scan(&self, snap: RegionSnapshot<RocksEngine>) {
         let downstream_id = self.downstream_id;
         let sched = self.sched.clone();
         let batch_size = self.batch_size;
@@ -380,7 +382,7 @@ impl Initializer {
         self.workers
             .spawn(lazy(move || {
                 // Time range: (checkpoint_ts, current]
-                let current = std::u64::MAX;
+                let current = TimeStamp::max();
                 let mut scanner = ScannerBuilder::new(snap, current, false)
                     .range(None, None)
                     .isolation_level(IsolationLevel::Si)

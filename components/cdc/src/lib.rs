@@ -1,3 +1,5 @@
+#![feature(box_patterns)]
+
 #[macro_use]
 extern crate slog_global;
 #[macro_use]
