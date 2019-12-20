@@ -325,7 +325,12 @@ impl Delegate {
                         // we must untrack inflight txns if they are committed.
                         assert!(self.resolver.is_some(), "region resolver should be ready");
                         let resolver = self.resolver.as_mut().unwrap();
-                        resolver.untrack_lock(row.start_ts, Some(row.commit_ts), row.key.clone());
+                        let commit_ts = if row.commit_ts == 0 {
+                            None
+                        } else {
+                            Some(row.commit_ts)
+                        };
+                        resolver.untrack_lock(row.start_ts, commit_ts, row.key.clone());
 
                         let r = rows.insert(row.key.clone(), row);
                         assert!(r.is_none());
@@ -422,7 +427,11 @@ fn decode_write(key: Vec<u8>, value: &[u8], row: &mut EventRow) -> bool {
         }
     };
     let key = Key::from_encoded(key);
-    let commit_ts = key.decode_ts().unwrap();
+    let commit_ts = if write.write_type == WriteType::Rollback {
+        0
+    } else {
+        key.decode_ts().unwrap()
+    };
     row.start_ts = write.start_ts;
     row.commit_ts = commit_ts;
     row.key = key.truncate_ts().unwrap().to_raw().unwrap();
@@ -483,7 +492,7 @@ mod tests {
     use tikv::raftstore::Result as RaftStoreResult;
     use tikv::server::transport::RaftStoreRouter;
     use tikv::server::RaftKv;
-    use tikv::storage::mvcc::reader::tests::*;
+    use tikv::storage::mvcc::reader::txn_entry_tests::*;
     use tikv::storage::mvcc::tests::*;
     use tikv_util::mpsc::{bounded, Sender as UtilSender};
 
