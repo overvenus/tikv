@@ -222,6 +222,18 @@ fn test_cdc_basic() {
 
     // Commit
     let commit_ts = suite.cluster.pd_client.get_tso().wait().unwrap();
+    let mut counter = 0;
+    loop {
+        let event = receive_event(true);
+        // Even if there is no write,
+        // resolved ts should be advanced regularly.
+        if let Event_oneof_event::ResolvedTs(_) = event {
+            counter += 1;
+            if counter > 5 {
+                break;
+            }
+        }
+    }
     suite.must_kv_commit(vec![k.clone().into_bytes()], start_ts, commit_ts);
     let event = receive_event(false);
     match event {

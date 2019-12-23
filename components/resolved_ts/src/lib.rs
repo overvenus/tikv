@@ -87,17 +87,20 @@ impl Resolver {
     ///   1. later commit_ts must be great than the min_ts.
     pub fn resolve(&mut self, min_ts: TimeStamp) -> Option<TimeStamp> {
         self.resolved_ts?;
-        let min_start_ts = *self.locks.keys().next().unwrap_or(&min_ts);
+        let min_lock = self.locks.keys().next().cloned();
+        let has_lock = min_lock.is_some();
+        let min_start_ts = min_lock.unwrap_or(min_ts);
         let new_resolved_ts = cmp::min(min_start_ts, min_ts);
         if let Some(old_resolved_ts) = self.resolved_ts {
             self.resolved_ts = Some(cmp::max(old_resolved_ts, new_resolved_ts));
         } else {
             self.resolved_ts = Some(new_resolved_ts);
         }
-        if let Some(old_min_ts) = self.min_ts {
-            self.min_ts = Some(cmp::max(old_min_ts, min_ts));
+        let old_min_ts = self.min_ts.unwrap_or_else(TimeStamp::zero);
+        if has_lock {
+            self.min_ts = Some(cmp::max(old_min_ts, cmp::min(min_start_ts, min_ts)))
         } else {
-            self.min_ts = Some(min_ts);
+            self.min_ts = Some(cmp::max(old_min_ts, min_ts));
         }
         self.resolved_ts
     }
@@ -152,6 +155,12 @@ mod tests {
                 Event::Unlock(2, None, Key::from_raw(b"a")),
                 Event::Unlock(2, None, Key::from_raw(b"a")),
                 Event::Resolve(3, 3),
+            ],
+            vec![
+                Event::Lock(2, Key::from_raw(b"a")),
+                Event::Resolve(4, 2),
+                Event::Unlock(2, Some(3), Key::from_raw(b"a")),
+                Event::Resolve(5, 5),
             ],
         ];
 
