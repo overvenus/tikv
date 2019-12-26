@@ -285,6 +285,12 @@ impl Delegate {
                     //   2. commit_ts
                     //   3. key
                     //   4. value
+                    if row.r_type == EventLogType::Rollback {
+                        // We dont need to send rollbacks to downstream,
+                        // because downstream does not needs rollback to clean
+                        // prewrite as it drops all previous stashed data.
+                        continue;
+                    }
                     row.r_type = EventLogType::Committed;
                     rows.push(row);
                 }
@@ -845,33 +851,39 @@ mod tests {
                 _ => panic!("unknown event"),
             }
         };
-        let into_entry = |e: Option<EntryBuilder>| {
-            e.map(|e| {
-                if e.commit_ts.is_zero() {
-                    e.build_prewrite(LockType::Put, false)
-                } else {
-                    e.build_commit(WriteType::Put, false)
-                }
-            })
-        };
 
         // Stashed in pending before region ready.
         let entries = vec![
-            Some(EntryBuilder {
-                key: b"a".to_vec(),
-                value: b"b".to_vec(),
-                start_ts: 1.into(),
-                commit_ts: 0.into(),
-            }),
-            Some(EntryBuilder {
-                key: b"a".to_vec(),
-                value: b"b".to_vec(),
-                start_ts: 1.into(),
-                commit_ts: 2.into(),
-            }),
+            Some(
+                EntryBuilder {
+                    key: b"a".to_vec(),
+                    value: b"b".to_vec(),
+                    start_ts: 1.into(),
+                    commit_ts: 0.into(),
+                }
+                .build_prewrite(LockType::Put, false),
+            ),
+            Some(
+                EntryBuilder {
+                    key: b"a".to_vec(),
+                    value: b"b".to_vec(),
+                    start_ts: 1.into(),
+                    commit_ts: 2.into(),
+                }
+                .build_commit(WriteType::Put, false),
+            ),
+            Some(
+                EntryBuilder {
+                    key: b"a".to_vec(),
+                    value: b"b".to_vec(),
+                    start_ts: 3.into(),
+                    commit_ts: 0.into(),
+                }
+                .build_rollback(),
+            ),
             None,
         ];
-        delegate.on_scan(1, entries.into_iter().map(into_entry).collect());
+        delegate.on_scan(1, entries);
         assert_eq!(delegate.pending.as_ref().unwrap().scan.len(), 1);
 
         let mut resolver = Resolver::new();

@@ -440,6 +440,15 @@ pub mod tests {
                 lock: (lock_key.into_encoded(), lock_value.to_bytes()),
             }
         }
+        pub fn build_rollback(&self) -> TxnEntry {
+            let write_key = Key::from_raw(&self.key).append_ts(self.start_ts.into());
+            let write_value = Write::new(WriteType::Rollback, self.start_ts, None);
+            // For now, rollback is enclosed in Commit.
+            TxnEntry::Commit {
+                default: (vec![], vec![]),
+                write: (write_key.into_encoded(), write_value.as_ref().to_bytes()),
+            }
+        }
     }
 
     /// Check whether everything works as usual when `EntryScanner::get()` goes out of bound.
