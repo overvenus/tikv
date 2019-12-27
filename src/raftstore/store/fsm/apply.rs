@@ -1,6 +1,7 @@
 // Copyright 2017 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::borrow::Cow;
+use std::cmp::{Ord, Ordering as CmpOrdering};
 use std::collections::VecDeque;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -42,6 +43,7 @@ use crate::raftstore::store::util::{check_region_epoch, compare_region_epoch};
 use crate::raftstore::store::RegionSnapshot;
 use crate::raftstore::store::{cmd_resp, util, Config};
 use crate::raftstore::{Error, Result};
+use tikv_util::config::{Tracker, VersionTrack};
 use tikv_util::escape;
 use tikv_util::mpsc::{loose_bounded, LooseBoundedSender, Receiver};
 use tikv_util::time::{duration_to_sec, Instant, SlowTimer};
@@ -2335,7 +2337,7 @@ pub enum Msg {
     Snapshot(GenSnapTask),
     Change(ChangeCmd),
     #[cfg(test)]
-    Validate(u64, Box<dyn FnOnce(&ApplyDelegate) + Send>),
+    Validate(u64, Box<dyn FnOnce((&ApplyDelegate, bool)) + Send>),
 }
 
 impl Msg {
@@ -2787,7 +2789,7 @@ impl ApplyFsm {
                     self.handle_change(apply_ctx, change_cmd);
                 }
                 #[cfg(test)]
-                Some(Msg::Validate(_, f)) => f(&self.delegate),
+                Some(Msg::Validate(_, f)) => f((&self.delegate, apply_ctx.enable_sync_log)),
                 None => break,
             }
         }
@@ -2846,10 +2848,26 @@ pub struct ApplyPoller {
     msg_buf: Vec<Msg>,
     apply_ctx: ApplyContext,
     messages_per_tick: usize,
+    cfg_tracker: Tracker<Config>,
 }
 
 impl PollHandler<ApplyFsm, ControlFsm> for ApplyPoller {
-    fn begin(&mut self, _batch_size: usize) {}
+    fn begin(&mut self, _batch_size: usize) {
+        if let Some(incoming) = self.cfg_tracker.any_new() {
+            match Ord::cmp(&incoming.messages_per_tick, &self.messages_per_tick) {
+                CmpOrdering::Equal => {}
+                CmpOrdering::Greater => {
+                    self.msg_buf.reserve(incoming.messages_per_tick);
+                    self.messages_per_tick = incoming.messages_per_tick;
+                }
+                CmpOrdering::Less => {
+                    self.msg_buf.shrink_to(incoming.messages_per_tick);
+                    self.messages_per_tick = incoming.messages_per_tick;
+                }
+            }
+            self.apply_ctx.enable_sync_log = incoming.sync_log;
+        }
+    }
 
     /// There is no control fsm in apply poller.
     fn handle_control(&mut self, _: &mut ControlFsm) -> Option<usize> {
@@ -2902,7 +2920,7 @@ impl PollHandler<ApplyFsm, ControlFsm> for ApplyPoller {
 
 pub struct Builder {
     tag: String,
-    cfg: Arc<Config>,
+    cfg: Arc<VersionTrack<Config>>,
     coprocessor_host: Arc<CoprocessorHost>,
     importer: Arc<SSTImporter>,
     region_scheduler: Scheduler<RegionTask>,
@@ -2934,8 +2952,9 @@ impl HandlerBuilder<ApplyFsm, ControlFsm> for Builder {
     type Handler = ApplyPoller;
 
     fn build(&mut self) -> ApplyPoller {
+        let cfg = self.cfg.value();
         ApplyPoller {
-            msg_buf: Vec::with_capacity(self.cfg.messages_per_tick),
+            msg_buf: Vec::with_capacity(cfg.messages_per_tick),
             apply_ctx: ApplyContext::new(
                 self.tag.clone(),
                 self.coprocessor_host.clone(),
@@ -2944,9 +2963,10 @@ impl HandlerBuilder<ApplyFsm, ControlFsm> for Builder {
                 self.engines.clone(),
                 self.router.clone(),
                 self.sender.clone(),
-                &self.cfg,
+                &cfg,
             ),
-            messages_per_tick: self.cfg.messages_per_tick,
+            messages_per_tick: cfg.messages_per_tick,
+            cfg_tracker: self.cfg.clone().tracker(self.tag.clone()),
         }
     }
 }
@@ -3067,6 +3087,7 @@ mod tests {
 
     use crate::raftstore::store::{Config, RegionTask};
     use test_sst_importer::*;
+    use tikv_util::config::VersionTrack;
     use tikv_util::worker::dummy_scheduler;
 
     use super::*;
@@ -3152,7 +3173,7 @@ mod tests {
             region_id,
             Msg::Validate(
                 region_id,
-                Box::new(move |delegate: &ApplyDelegate| {
+                Box::new(move |(delegate, _): (&ApplyDelegate, _)| {
                     validate(delegate);
                     validate_tx.send(()).unwrap();
                 }),
@@ -3202,8 +3223,8 @@ mod tests {
         let host = Arc::new(CoprocessorHost::default());
         let (_dir, importer) = create_tmp_importer("apply-basic");
         let (region_scheduler, snapshot_rx) = dummy_scheduler();
-        let cfg = Arc::new(Config::default());
-        let (router, mut system) = create_apply_batch_system(&cfg);
+        let cfg = Arc::new(VersionTrack::new(Config::default()));
+        let (router, mut system) = create_apply_batch_system(&cfg.value());
         let builder = super::Builder {
             tag: "test-store".to_owned(),
             cfg,
@@ -3564,8 +3585,8 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let (region_scheduler, _) = dummy_scheduler();
         let sender = Notifier::Sender(tx);
-        let cfg = Arc::new(Config::default());
-        let (router, mut system) = create_apply_batch_system(&cfg);
+        let cfg = Arc::new(VersionTrack::new(Config::default()));
+        let (router, mut system) = create_apply_batch_system(&cfg.value());
         let builder = super::Builder {
             tag: "test-store".to_owned(),
             cfg,
@@ -4039,8 +4060,8 @@ mod tests {
         host.registry
             .register_cmd_observer(1, Box::new(obs.clone()));
         let (region_scheduler, _) = dummy_scheduler();
-        let cfg = Arc::new(Config::default());
-        let (router, mut system) = create_apply_batch_system(&cfg);
+        let cfg = Arc::new(VersionTrack::new(Config::default()));
+        let (router, mut system) = create_apply_batch_system(&cfg.value());
         let builder = super::Builder {
             tag: "test-store".to_owned(),
             cfg,
