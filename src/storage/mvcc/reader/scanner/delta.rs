@@ -331,9 +331,9 @@ impl<S: Snapshot> DeltaScanner<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::txn_entry::tests::EntryBuilder;
     use super::super::ScannerBuilder;
     use super::*;
+    use crate::storage::mvcc::reader::scanner::forward::latest_entry_tests::EntryBuilder;
     use crate::storage::mvcc::tests::*;
     use crate::storage::{Engine, TestEngineBuilder};
     use txn_types::SHORT_VALUE_MAX_LEN;

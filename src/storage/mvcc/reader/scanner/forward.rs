@@ -861,19 +861,19 @@ pub mod latest_entry_tests {
     }
 
     impl EntryBuilder {
-        fn key(&mut self, key: &[u8]) -> &mut Self {
+        pub fn key(&mut self, key: &[u8]) -> &mut Self {
             self.key = key.to_owned();
             self
         }
-        fn value(&mut self, val: &[u8]) -> &mut Self {
+        pub fn value(&mut self, val: &[u8]) -> &mut Self {
             self.value = val.to_owned();
             self
         }
-        fn start_ts(&mut self, start_ts: TimeStamp) -> &mut Self {
+        pub fn start_ts(&mut self, start_ts: TimeStamp) -> &mut Self {
             self.start_ts = start_ts;
             self
         }
-        fn commit_ts(&mut self, commit_ts: TimeStamp) -> &mut Self {
+        pub fn commit_ts(&mut self, commit_ts: TimeStamp) -> &mut Self {
             self.commit_ts = commit_ts;
             self
         }

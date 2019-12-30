@@ -3954,6 +3954,7 @@ dependencies = [
  "grpcio",
  "hex 0.3.2",
  "hyper 0.12.35",
+ "itertools",
  "keys",
  "kvproto 0.0.2 (git+https://github.com/pingcap/kvproto.git)",
  "lazy_static 1.4.0",

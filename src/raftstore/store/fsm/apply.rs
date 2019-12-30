@@ -3823,11 +3823,11 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let (region_scheduler, _) = dummy_scheduler();
         let sender = Notifier::Sender(tx);
-        let cfg = Arc::new(Config::default());
+        let cfg = Config::default();
         let (router, mut system) = create_apply_batch_system(&cfg);
         let builder = super::Builder {
             tag: "test-store".to_owned(),
-            cfg,
+            cfg: Arc::new(VersionTrack::new(cfg)),
             sender,
             region_scheduler,
             coprocessor_host: Arc::new(host),
@@ -4242,6 +4242,8 @@ mod tests {
             }),
         );
         rx.recv_timeout(Duration::from_millis(500)).unwrap();
+
+        system.shutdown();
     }
 
     #[test]
