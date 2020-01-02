@@ -184,12 +184,8 @@ impl Simulator for ServerCluster {
             .name_prefix(thd_name!("debugger"))
             .pool_size(1)
             .create();
-        let debug_service = DebugService::new(
-            engines.clone(),
-            pool,
-            raft_router.clone(),
-            gc_worker.clone(),
-        );
+        let debug_service =
+            DebugService::new(engines.clone(), pool, raft_router, gc_worker.clone());
 
         // Create deadlock service.
         let deadlock_service = lock_mgr.deadlock_service();
@@ -243,7 +239,7 @@ impl Simulator for ServerCluster {
         let addr = server.listening_addr();
         cfg.server.addr = format!("{}", addr);
         let trans = server.transport();
-        let simulate_trans = SimulateTransport::new(trans.clone());
+        let simulate_trans = SimulateTransport::new(trans);
         let server_cfg = Arc::new(cfg.server.clone());
         let apply_router = system.apply_router();
 
@@ -272,9 +268,9 @@ impl Simulator for ServerCluster {
 
         let cfg_controller = ConfigController::new(cfg);
         node.start(
-            engines.clone(),
+            engines,
             simulate_trans.clone(),
-            snap_mgr.clone(),
+            snap_mgr,
             pd_worker,
             store_meta,
             coprocessor_host,
