@@ -272,19 +272,21 @@ impl Endpoint {
         let timeout = self.timer.delay(self.min_ts_interval);
         let tso = self.pd_client.get_tso();
         let scheduler = self.scheduler.clone();
-        let fut = tso
-            .join(timeout.map_err(|_| unreachable!()))
-            .map(move |(min_ts, ())| {
+        let fut = tso.join(timeout.map_err(|_| unreachable!())).then(
+            move |tso: pd_client::Result<(TimeStamp, ())>| {
+                // Ignore get tso errors since we will retry every `min_ts_interval`.
+                let (min_ts, _) = tso.unwrap_or((TimeStamp::default(), ()));
                 if let Err(e) = scheduler.schedule(Task::MinTS { min_ts }) {
-                    error!("failed to schedule min_ts event";
-                        "error" => ?e,
-                        "min_ts" => min_ts);
+                    // Must schedule `MinTS` event otherwise resolved ts can not
+                    // advance normally.
+                    panic!(
+                        "failed to schedule min_ts event, min_ts: {}, error: {:?}",
+                        min_ts, e
+                    );
                 }
-            })
-            .map_err(|e| {
-                error!("get tso failed"; "error" => ?e);
-                e
-            });
+                Ok(())
+            },
+        );
         self.pd_client.spawn(Box::new(fut) as _);
     }
 }

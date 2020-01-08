@@ -3,7 +3,7 @@
 use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::Bound::{Excluded, Unbounded};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -672,6 +672,7 @@ pub struct TestPdClient {
     is_incompatible: bool,
     tso: AtomicUsize,
     poller: CpuPool,
+    trigger_tso_failure: AtomicBool,
 }
 
 impl TestPdClient {
@@ -683,6 +684,7 @@ impl TestPdClient {
             is_incompatible,
             tso: AtomicUsize::new(1),
             poller: Builder::new().pool_size(1).create(),
+            trigger_tso_failure: AtomicBool::new(false),
         }
     }
 
@@ -972,6 +974,10 @@ impl TestPdClient {
     pub fn set_gc_safe_point(&self, safe_point: u64) {
         self.cluster.wl().set_gc_safe_point(safe_point);
     }
+
+    pub fn trigger_tso_failure(&self) {
+        self.trigger_tso_failure.store(true, Ordering::SeqCst);
+    }
 }
 
 impl PdClient for TestPdClient {
@@ -1214,6 +1220,14 @@ impl PdClient for TestPdClient {
     }
 
     fn get_tso(&self) -> PdFuture<TimeStamp> {
+        if self.trigger_tso_failure.swap(false, Ordering::SeqCst) {
+            return Box::new(futures::future::result(Err(
+                pd_client::errors::Error::Grpc(grpcio::Error::RpcFailure(grpcio::RpcStatus::new(
+                    grpcio::RpcStatusCode::UNKNOWN,
+                    Some("tso error".to_owned()),
+                ))),
+            )));
+        }
         let tso = self.tso.fetch_add(1, Ordering::SeqCst);
         Box::new(futures::future::result(Ok(TimeStamp::new(tso as _))))
     }

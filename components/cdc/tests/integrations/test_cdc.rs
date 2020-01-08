@@ -639,3 +639,58 @@ fn test_cdc_scan() {
 
     suite.stop();
 }
+
+#[test]
+fn test_cdc_tso_failure() {
+    let mut suite = TestSuite::new(3);
+
+    let mut req = ChangeDataRequest::default();
+    req.region_id = 1;
+    req.set_region_epoch(suite.get_context(1).take_region_epoch());
+    let event_feed = suite.cdc_cli.event_feed(&req).unwrap();
+
+    let event_feed_wrap = Cell::new(Some(event_feed));
+    let receive_event = |keep_resolved_ts: bool| loop {
+        let (change_data, events) =
+            match event_feed_wrap.replace(None).unwrap().into_future().wait() {
+                Ok(res) => res,
+                Err(e) => panic!("receive failed {:?}", e.0),
+            };
+        event_feed_wrap.set(Some(events));
+        let mut change_data = change_data.unwrap();
+        assert_eq!(change_data.events.len(), 1);
+        let change_data_event = &mut change_data.events[0];
+        let event = change_data_event.event.take().unwrap();
+        match event {
+            Event_oneof_event::ResolvedTs(_) if !keep_resolved_ts => continue,
+            other => return other,
+        }
+    };
+
+    // Make sure region 1 is registered.
+    let event = receive_event(false);
+    match event {
+        // Even if there is no write,
+        // it should always outputs an Initialized event.
+        Event_oneof_event::Entries(es) => {
+            assert!(es.entries.len() == 1, "{:?}", es);
+            let e = &es.entries[0];
+            assert_eq!(e.r_type, EventLogType::Initialized, "{:?}", es);
+        }
+        _ => panic!("unknown event"),
+    }
+
+    suite.cluster.pd_client.trigger_tso_failure();
+
+    // Make sure resolved ts can be advanced normally even with few tso failures.
+    for _ in 0..10 {
+        let event = receive_event(true);
+        match event {
+            Event_oneof_event::ResolvedTs(ts) => assert_ne!(0, ts),
+            _ => panic!("unknown event"),
+        }
+    }
+
+    event_feed_wrap.replace(None);
+    suite.stop();
+}

@@ -228,7 +228,7 @@ impl<S: Snapshot> DeltaScanner<S> {
     ///
     /// The implementation is the same as `PointGetter::load_data_and_write`.
     #[inline]
-    fn load_data_and_write(&mut self, user_key: &Key) -> Result<(TxnEntry)> {
+    fn load_data_and_write(&mut self, user_key: &Key) -> Result<TxnEntry> {
         let write =
             WriteRef::parse(self.write_cursor.value(&mut self.statistics.write))?.to_owned();
         self.statistics.write.processed += 1;
