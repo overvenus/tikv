@@ -1,13 +1,20 @@
+// Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
+
 use std::cmp;
 use std::collections::BTreeMap;
 use tikv_util::collections::HashSet;
 use txn_types::TimeStamp;
 
+// Resolver resolves timestamps that guarantee no more commit will happen before
+// the timestamp.
 pub struct Resolver {
     // start_ts -> locked keys.
     locks: BTreeMap<TimeStamp, HashSet<Vec<u8>>>,
+    // The timestamps that guarantees no more commit will happen before.
+    // None if the resolver is not initialized.
     resolved_ts: Option<TimeStamp>,
-    min_ts: Option<TimeStamp>,
+    // The timestamps that advance the resolved_ts when there is no more write.
+    min_ts: TimeStamp,
 }
 
 impl Resolver {
@@ -15,7 +22,7 @@ impl Resolver {
         Resolver {
             locks: BTreeMap::new(),
             resolved_ts: None,
-            min_ts: None,
+            min_ts: TimeStamp::zero(),
         }
     }
 
@@ -51,7 +58,7 @@ impl Resolver {
                 self.resolved_ts
             );
             assert!(
-                self.min_ts.map_or(true, |mts| commit_ts > mts),
+                commit_ts > self.min_ts,
                 "{}@{}, commit@{} > {:?}",
                 hex::encode_upper(key),
                 start_ts,
@@ -83,25 +90,33 @@ impl Resolver {
     }
 
     /// Try to advance resolved ts.
-    /// Requirement of min_ts:
-    ///   1. later commit_ts must be great than the min_ts.
+    ///
+    /// `min_ts` advances the resolver even if there is no write.
+    /// Return None means the resolver is not initialized.
     pub fn resolve(&mut self, min_ts: TimeStamp) -> Option<TimeStamp> {
-        self.resolved_ts?;
+        let old_resolved_ts = self.resolved_ts?;
+
+        // Find the min start ts.
         let min_lock = self.locks.keys().next().cloned();
         let has_lock = min_lock.is_some();
         let min_start_ts = min_lock.unwrap_or(min_ts);
+
+        // No more commit happens before the ts.
         let new_resolved_ts = cmp::min(min_start_ts, min_ts);
-        if let Some(old_resolved_ts) = self.resolved_ts {
-            self.resolved_ts = Some(cmp::max(old_resolved_ts, new_resolved_ts));
+        // Resolved ts never decrease.
+        self.resolved_ts = Some(cmp::max(old_resolved_ts, new_resolved_ts));
+
+        let new_min_ts = if has_lock {
+            // If there are some lock, the min_ts must be smaller than
+            // the min start ts, so it guarantees to be smaller than
+            // any late arriving commit ts.
+            new_resolved_ts // cmp::min(min_start_ts, min_ts)
         } else {
-            self.resolved_ts = Some(new_resolved_ts);
-        }
-        let old_min_ts = self.min_ts.unwrap_or_else(TimeStamp::zero);
-        if has_lock {
-            self.min_ts = Some(cmp::max(old_min_ts, cmp::min(min_start_ts, min_ts)))
-        } else {
-            self.min_ts = Some(cmp::max(old_min_ts, min_ts));
-        }
+            min_ts
+        };
+        // Min ts never decrease.
+        self.min_ts = cmp::max(self.min_ts, new_min_ts);
+
         self.resolved_ts
     }
 }

@@ -573,6 +573,9 @@ impl PdClient for RpcClient {
         Ok(resp)
     }
 
+    // TODO: The current implementation is not efficient, because it creates
+    //       a RPC for every `PdFuture<TimeStamp>`. As a duplex streaming RPC,
+    //       we could use one RPC for many `PdFuture<TimeStamp>`.
     fn get_tso(&self) -> PdFuture<TimeStamp> {
         let timer = Instant::now();
 
@@ -583,12 +586,10 @@ impl PdClient for RpcClient {
             let cli = client.read().unwrap();
             let (req_sink, resp_stream) = cli.client_stub.tso().unwrap();
             let (keep_req_tx, mut keep_req_rx) = oneshot::channel();
-            let send_once = req_sink
-                .send((req.clone(), WriteFlags::default()))
-                .then(|s| {
-                    let _ = keep_req_tx.send(s);
-                    Ok(())
-                });
+            let send_once = req_sink.send((req, WriteFlags::default())).then(|s| {
+                let _ = keep_req_tx.send(s);
+                Ok(())
+            });
             cli.client_stub.spawn(send_once);
             Box::new(
                 resp_stream
@@ -596,7 +597,7 @@ impl PdClient for RpcClient {
                     .map_err(|(err, _)| Error::Grpc(err))
                     .and_then(move |(resp, _)| {
                         // Now we can safely drop sink without
-                        // casusing a Cancel error.
+                        // causing a Cancel error.
                         let _ = keep_req_rx.try_recv().unwrap();
                         let resp = match resp {
                             Some(r) => r,
