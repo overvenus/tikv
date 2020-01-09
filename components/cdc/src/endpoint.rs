@@ -18,7 +18,7 @@ use tikv::storage::txn::TxnEntry;
 use tikv::storage::txn::TxnEntryScanner;
 use tikv_util::collections::HashMap;
 use tikv_util::timer::SteadyTimer;
-use tikv_util::worker::{Runnable, Scheduler};
+use tikv_util::worker::{Runnable, ScheduleError, Scheduler};
 use tokio_threadpool::{Builder, Sender as PoolSender, ThreadPool};
 use txn_types::TimeStamp;
 
@@ -276,15 +276,15 @@ impl Endpoint {
             move |tso: pd_client::Result<(TimeStamp, ())>| {
                 // Ignore get tso errors since we will retry every `min_ts_interval`.
                 let (min_ts, _) = tso.unwrap_or((TimeStamp::default(), ()));
-                if let Err(e) = scheduler.schedule(Task::MinTS { min_ts }) {
+                match scheduler.schedule(Task::MinTS { min_ts }) {
+                    Ok(_) | Err(ScheduleError::Stopped(_)) => Ok(()),
                     // Must schedule `MinTS` event otherwise resolved ts can not
                     // advance normally.
-                    panic!(
+                    err => panic!(
                         "failed to schedule min_ts event, min_ts: {}, error: {:?}",
-                        min_ts, e
-                    );
+                        min_ts, err
+                    ),
                 }
-                Ok(())
             },
         );
         self.pd_client.spawn(Box::new(fut) as _);
