@@ -1,5 +1,7 @@
+// Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
+
 use std::mem;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use futures::sync::mpsc::*;
@@ -17,11 +19,23 @@ use txn_types::{Key, TimeStamp};
 
 use crate::Error;
 
+static DOWNSTREAM_ID_ALLOC: AtomicUsize = AtomicUsize::new(0);
+
+/// A unique identifier of a Downstream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct DownstreamID(usize);
+
+impl DownstreamID {
+    fn new() -> DownstreamID {
+        DownstreamID(DOWNSTREAM_ID_ALLOC.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 #[derive(Clone)]
 pub struct Downstream {
     // TODO: include cdc request.
-    // TODO: make ID a concrete type.
-    pub id: usize,
+    /// A unique identifier of the Downstream.
+    pub id: DownstreamID,
     // The IP address of downstream.
     peer: String,
     region_epoch: RegionEpoch,
@@ -29,14 +43,17 @@ pub struct Downstream {
 }
 
 impl Downstream {
+    /// Create a Downsteam.
+    ///
+    /// peer is the address of the downstream.
+    /// sink sends data to the downstream.
     pub fn new(
-        id: usize,
         peer: String,
         region_epoch: RegionEpoch,
         sink: UnboundedSender<ChangeDataEvent>,
     ) -> Downstream {
         Downstream {
-            id,
+            id: DownstreamID::new(),
             peer,
             sink,
             region_epoch,
@@ -45,7 +62,7 @@ impl Downstream {
 
     fn sink(&self, change_data: ChangeDataEvent) {
         if self.sink.unbounded_send(change_data).is_err() {
-            info!("send event failed"; "downstream" => %self.peer);
+            error!("send event failed"; "downstream" => %self.peer);
         }
     }
 }
@@ -54,7 +71,7 @@ impl Downstream {
 struct Pending {
     multi_batch: Vec<CmdBatch>,
     downstreams: Vec<Downstream>,
-    scan: Vec<(usize, Vec<Option<TxnEntry>>)>,
+    scan: Vec<(DownstreamID, Vec<Option<TxnEntry>>)>,
 }
 
 pub struct Delegate {
@@ -104,7 +121,7 @@ impl Delegate {
         }
     }
 
-    pub fn unsubscribe(&mut self, id: usize, err: Option<Error>) -> bool {
+    pub fn unsubscribe(&mut self, id: DownstreamID, err: Option<Error>) -> bool {
         let change_data_error = err.map(|err| self.error_event(err));
         let downstreams = if self.pending.is_some() {
             &mut self.pending.as_mut().unwrap().downstreams
@@ -248,7 +265,7 @@ impl Delegate {
         }
     }
 
-    pub fn on_scan(&mut self, downstream_id: usize, entries: Vec<Option<TxnEntry>>) {
+    pub fn on_scan(&mut self, downstream_id: DownstreamID, entries: Vec<Option<TxnEntry>>) {
         if let Some(pending) = self.pending.as_mut() {
             pending.scan.push((downstream_id, entries));
             return;
@@ -256,7 +273,7 @@ impl Delegate {
         let d = if let Some(d) = self.downstreams.iter_mut().find(|d| d.id == downstream_id) {
             d
         } else {
-            warn!("downstream not found"; "downstream_id" => downstream_id);
+            warn!("downstream not found"; "downstream_id" => ?downstream_id);
             return;
         };
 
@@ -607,12 +624,7 @@ mod tests {
 
         let (sink, events) = unbounded();
         let mut delegate = Delegate::new(region_id);
-        delegate.subscribe(Downstream::new(
-            1,
-            String::new(),
-            region_epoch.clone(),
-            sink,
-        ));
+        delegate.subscribe(Downstream::new(String::new(), region_epoch.clone(), sink));
         let mut resolver = Resolver::new();
         resolver.init();
         delegate.on_region_ready(resolver, region.clone());
@@ -700,12 +712,7 @@ mod tests {
 
         let (sink, events) = unbounded();
         let mut delegate = Delegate::new(region_id);
-        delegate.subscribe(Downstream::new(
-            1,
-            String::new(),
-            region_epoch.clone(),
-            sink,
-        ));
+        delegate.subscribe(Downstream::new(String::new(), region_epoch.clone(), sink));
         let enabled = delegate.enabled();
         assert!(enabled.load(Ordering::Relaxed));
         let mut resolver = Resolver::new();
@@ -820,12 +827,9 @@ mod tests {
 
         let (sink, events) = unbounded();
         let mut delegate = Delegate::new(region_id);
-        delegate.subscribe(Downstream::new(
-            1,
-            String::new(),
-            region_epoch.clone(),
-            sink,
-        ));
+        let downstream = Downstream::new(String::new(), region_epoch.clone(), sink);
+        let downstream_id = downstream.id;
+        delegate.subscribe(downstream);
         let enabled = delegate.enabled();
         assert!(enabled.load(Ordering::Relaxed));
 
@@ -860,6 +864,8 @@ mod tests {
                     value: b"b".to_vec(),
                     start_ts: 1.into(),
                     commit_ts: 0.into(),
+                    primary: vec![],
+                    for_update_ts: 0.into(),
                 }
                 .build_prewrite(LockType::Put, false),
             ),
@@ -869,6 +875,8 @@ mod tests {
                     value: b"b".to_vec(),
                     start_ts: 1.into(),
                     commit_ts: 2.into(),
+                    primary: vec![],
+                    for_update_ts: 0.into(),
                 }
                 .build_commit(WriteType::Put, false),
             ),
@@ -878,12 +886,14 @@ mod tests {
                     value: b"b".to_vec(),
                     start_ts: 3.into(),
                     commit_ts: 0.into(),
+                    primary: vec![],
+                    for_update_ts: 0.into(),
                 }
                 .build_rollback(),
             ),
             None,
         ];
-        delegate.on_scan(1, entries);
+        delegate.on_scan(downstream_id, entries);
         assert_eq!(delegate.pending.as_ref().unwrap().scan.len(), 1);
 
         let mut resolver = Resolver::new();

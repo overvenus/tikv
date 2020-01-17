@@ -9,7 +9,9 @@ use kvproto::kvrpcpb::IsolationLevel;
 use txn_types::{Key, TimeStamp, TsSet, Value};
 
 use self::backward::BackwardKvScanner;
-use self::forward::{ForwardKvScanner, ForwardScanner, LatestEntryPolicy, LatestKvPolicy};
+use self::forward::{
+    DeltaEntryPolicy, ForwardKvScanner, ForwardScanner, LatestEntryPolicy, LatestKvPolicy,
+};
 use crate::storage::kv::{
     CfStatistics, Cursor, CursorBuilder, Iterator, ScanMode, Snapshot, Statistics,
 };
@@ -230,6 +232,16 @@ impl<S: Snapshot> ScannerConfig<S> {
     /// Create the cursor.
     #[inline]
     fn create_cf_cursor(&mut self, cf: CfName) -> Result<Cursor<S::Iter>> {
+        self.create_cf_cursor_with_scan_mode(cf, self.scan_mode())
+    }
+
+    /// Create the cursor with specified scan_mode, instead of inferring scan_mode from the config.
+    #[inline]
+    fn create_cf_cursor_with_scan_mode(
+        &mut self,
+        cf: CfName,
+        scan_mode: ScanMode,
+    ) -> Result<Cursor<S::Iter>> {
         let (lower, upper) = if cf == CF_DEFAULT {
             (self.lower_bound.take(), self.upper_bound.take())
         } else {
@@ -244,7 +256,7 @@ impl<S: Snapshot> ScannerConfig<S> {
         let cursor = CursorBuilder::new(&self.snapshot, cf)
             .range(lower, upper)
             .fill_cache(self.fill_cache)
-            .scan_mode(self.scan_mode())
+            .scan_mode(scan_mode)
             .hint_min_ts(hint_min_ts)
             .hint_max_ts(hint_max_ts)
             .build()?;

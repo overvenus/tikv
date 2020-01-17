@@ -89,13 +89,12 @@ pub trait QueryObserver: Coprocessor {
     }
 
     /// Hook to call before applying write request.
-    fn pre_apply_query(&self, _: &mut ObserverContext<'_>, _: u64, _: &[Request]) {}
+    fn pre_apply_query(&self, _: &mut ObserverContext<'_>, _: &[Request]) {}
 
     /// Hook to call after applying write request.
     fn post_apply_query(
         &self,
         _: &mut ObserverContext<'_>,
-        _: u64,
         _: &RaftResponseHeader,
         _: &mut Vec<Response>,
     ) {

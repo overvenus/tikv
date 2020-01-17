@@ -178,7 +178,6 @@ impl CoprocessorHost {
                 region,
                 &self.registry.query_observers,
                 pre_apply_query,
-                index,
                 query,
             );
         } else {
@@ -201,7 +200,6 @@ impl CoprocessorHost {
                 region,
                 &self.registry.query_observers,
                 post_apply_query,
-                index,
                 header,
                 &mut vec_query,
             );
@@ -365,7 +363,7 @@ mod tests {
             Ok(())
         }
 
-        fn pre_apply_query(&self, ctx: &mut ObserverContext<'_>, _: u64, _: &[Request]) {
+        fn pre_apply_query(&self, ctx: &mut ObserverContext<'_>, _: &[Request]) {
             self.called.fetch_add(5, Ordering::SeqCst);
             ctx.bypass = self.bypass.load(Ordering::SeqCst);
         }
@@ -373,7 +371,6 @@ mod tests {
         fn post_apply_query(
             &self,
             ctx: &mut ObserverContext<'_>,
-            _: u64,
             _: &RaftResponseHeader,
             _: &mut Vec<Response>,
         ) {

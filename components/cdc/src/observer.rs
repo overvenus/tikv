@@ -1,3 +1,5 @@
+// Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
+
 use std::sync::{Arc, RwLock};
 
 use raft::StateRole;
@@ -9,41 +11,53 @@ use tikv_util::worker::Scheduler;
 use crate::endpoint::Task;
 use crate::Error as CdcError;
 
+/// An Observer for CDC.
+///
+/// It observes raftstore internal events, such as:
+///   1. Raft role change events,
+///   2. Apply command events.
 #[derive(Clone)]
 pub struct CdcObserver {
-    sink: Scheduler<Task>,
+    sched: Scheduler<Task>,
+    // A shared registry for managing observed regions.
+    // TODO: it may become a bottleneck, find a better way to manage the registry.
     observe_regions: Arc<RwLock<HashSet<u64>>>,
 }
 
 impl CdcObserver {
-    pub fn new(sink: Scheduler<Task>) -> CdcObserver {
+    /// Create a new `CdcObserver`.
+    ///
+    /// Events are strong ordered, so `sched` must be implemented as
+    /// a FIFO queue.
+    pub fn new(sched: Scheduler<Task>) -> CdcObserver {
         CdcObserver {
-            sink,
+            sched,
             observe_regions: Arc::default(),
         }
     }
 
+    /// Subscribe an region, the observer will sink events of the region into
+    /// its scheduler.
     pub fn subscribe_region(&self, region_id: u64) {
         self.observe_regions.write().unwrap().insert(region_id);
     }
 
+    /// Stops observe the region.
     pub fn unsubscribe_region(&self, region_id: u64) {
         self.observe_regions.write().unwrap().remove(&region_id);
     }
 
+    /// Check whether the region is subscribed or not.
     pub fn is_subscribed(&self, region_id: u64) -> bool {
         self.observe_regions.read().unwrap().contains(&region_id)
     }
 }
 
-impl Coprocessor for CdcObserver {
-    fn start(&self) {}
-    fn stop(&self) {}
-}
+impl Coprocessor for CdcObserver {}
 
 impl CmdObserver for CdcObserver {
     fn on_batch_executed(&self, batch: &[CmdBatch]) {
-        if let Err(e) = self.sink.schedule(Task::MultiBatch {
+        if let Err(e) = self.sched.schedule(Task::MultiBatch {
             multi: batch.to_vec(),
         }) {
             warn!("schedule cdc task failed"; "error" => ?e);
@@ -58,9 +72,9 @@ impl RoleObserver for CdcObserver {
             if self.is_subscribed(region_id) {
                 // Unregister all downstreams.
                 let store_err = RaftStoreError::NotLeader(region_id, None);
-                if let Err(e) = self.sink.schedule(Task::Deregister {
+                if let Err(e) = self.sched.schedule(Task::Deregister {
                     region_id,
-                    id: None,
+                    downstream_id: None,
                     err: Some(CdcError::Request(store_err.into())),
                 }) {
                     warn!("schedule cdc task failed"; "error" => ?e);
@@ -98,9 +112,13 @@ mod tests {
         let mut ctx = ObserverContext::new(&region);
         observer.on_role_change(&mut ctx, StateRole::Follower);
         match rx.recv_timeout(Duration::from_millis(10)).unwrap().unwrap() {
-            Task::Deregister { region_id, id, err } => {
+            Task::Deregister {
+                region_id,
+                downstream_id,
+                err,
+            } => {
                 assert_eq!(region_id, 1);
-                assert!(id.is_none(), "{:?}", id);
+                assert!(downstream_id.is_none(), "{:?}", downstream_id);
                 assert!(err.is_some(), "{:?}", err);
             }
             _ => panic!("unexpected task"),
