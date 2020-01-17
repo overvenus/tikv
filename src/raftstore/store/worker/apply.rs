@@ -33,7 +33,7 @@ use kvproto::raft_cmdpb::{
 use kvproto::raft_serverpb::{
     MergeState, PeerState, RaftApplyState, RaftTruncatedState, RegionLocalState,
 };
-use protobuf::{ProtobufEnum, RepeatedField};
+use protobuf::RepeatedField;
 use raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType};
 use rocksdb::rocksdb_options::WriteOptions;
 use rocksdb::{WriteBatch, DB};
@@ -961,7 +961,6 @@ impl ApplyDelegate {
                     self.metrics.delete_keys_hint = 0;
                 }
                 ExecResult::PrepareMerge { ref region, .. } => {
-                    info!("Prepare merge! {}", region.id);
                     self.region = region.clone();
                     self.is_merging = true;
                 }
@@ -969,13 +968,11 @@ impl ApplyDelegate {
                     ref region,
                     ref source,
                 } => {
-                    info!("Commit merge! {}", region.id);
                     self.region = region.clone();
                     self.last_merge_version = region.get_region_epoch().get_version();
                     ctx.merged_regions.push(source.get_id());
                 }
                 ExecResult::RollbackMerge { ref region, .. } => {
-                    info!("Rollback merge! {}", region.id);
                     self.region = region.clone();
                     self.is_merging = false;
                 }
@@ -1102,7 +1099,6 @@ impl ApplyDelegate {
         ctx: &mut ApplyContext,
         request: &AdminRequest,
     ) -> Result<(RaftCmdResponse, Option<ExecResult>)> {
-        info!("exec_admin_cmd");
         let cmd_type = request.get_cmd_type();
         if cmd_type != AdminCmdType::CompactLog {
             info!(
@@ -1114,7 +1110,6 @@ impl ApplyDelegate {
             );
         }
 
-        info!("output cmd type: {}", cmd_type.value());
         let (mut response, exec_result) = match cmd_type {
             AdminCmdType::ChangePeer => self.exec_change_peer(ctx, request),
             AdminCmdType::Split => self.exec_split(ctx, request),
@@ -1455,7 +1450,6 @@ impl ApplyDelegate {
             .with_label_values(&["prepare_merge", "all"])
             .inc();
 
-        info!("entering exec_prepare_merge!");
         let prepare_merge = req.get_prepare_merge();
         let index = prepare_merge.get_min_index();
         let exec_ctx = ctx.exec_ctx.as_ref().unwrap();
@@ -2356,11 +2350,11 @@ impl Runner {
             batch.set_requests(apply_cmds.into());
             self.cmds_sender
                 .unbounded_send((batch, WriteFlags::default()))
-                .unwrap_or_else(|e| warn!("send command error encountered {:?}", e));
+                .unwrap();
         }
 
         if !pending_destroy_tasks.is_empty() {
-            info!(
+            debug!(
                 "handle collected pending destroy tasks {:?}",
                 pending_destroy_tasks
             );
@@ -2399,7 +2393,6 @@ impl Runner {
     }
 
     fn handle_applied_command_batch(&mut self, mut resp_batch: CommandResponseBatch) {
-        info!("handle applied command batch");
         let resps = resp_batch.take_responses().into_vec();
         if resps.is_empty() {
             return;
@@ -2520,7 +2513,6 @@ impl Runner {
     }
 
     fn handle_proposals(&mut self, proposals: Vec<RegionProposal>) {
-        info!("handle proposal");
         let mut propose_num = 0;
         for region_proposal in proposals {
             propose_num += region_proposal.props.len();
@@ -2572,7 +2564,6 @@ impl Runner {
     }
 
     fn handle_destroy(&mut self, d: Destroy) {
-        info!("handle destroy");
         // Only respond when the meta exists. Otherwise if destroy is triggered
         // multiple times, the store may destroy wrong target peer.
         if let Some(ref mut meta) = self.delegates.get_mut(&d.region_id) {

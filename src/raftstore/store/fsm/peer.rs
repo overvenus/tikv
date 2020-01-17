@@ -817,9 +817,6 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             let res = {
                 let peer = self.region_peers.get_mut(&region_id).unwrap();
                 is_merging = peer.pending_merge_state.is_some();
-                if is_merging {
-                    info!("is_merging=true");
-                }
                 peer.post_raft_ready_append(
                     &mut self.raft_metrics,
                     &self.trans,
