@@ -9,22 +9,22 @@ use kvproto::kvrpcpb::IsolationLevel;
 use kvproto::metapb::Region;
 use pd_client::PdClient;
 use resolved_ts::Resolver;
-use tikv::raftstore::coprocessor::*;
+use tikv::raftstore::coprocessor::CmdBatch;
 use tikv::raftstore::store::fsm::{ApplyRouter, ApplyTask, ChangeCmd};
 use tikv::raftstore::store::msg::{Callback, ReadResponse};
 use tikv::raftstore::store::RegionSnapshot;
-use tikv::storage::mvcc::reader::ScannerBuilder;
+use tikv::storage::kv::Snapshot;
+use tikv::storage::mvcc::reader::{DeltaScanner, ScannerBuilder};
 use tikv::storage::txn::TxnEntry;
 use tikv::storage::txn::TxnEntryScanner;
 use tikv_util::collections::HashMap;
 use tikv_util::timer::SteadyTimer;
 use tikv_util::worker::{Runnable, Scheduler};
 use tokio_threadpool::{Builder, Sender as PoolSender, ThreadPool};
-use txn_types::TimeStamp;
+use txn_types::{Key, Lock, TimeStamp};
 
 use crate::delegate::{Delegate, Downstream};
-use crate::lock_scanner::LockScanner;
-use crate::{CdcObserver, Error};
+use crate::{CdcObserver, Error, Result};
 
 pub enum Task {
     Register {
@@ -307,9 +307,6 @@ impl Initializer {
     fn on_change_cmd(&self, mut resp: ReadResponse<RocksEngine>) {
         if let Some(region_snapshot) = resp.snapshot {
             assert_eq!(self.region_id, region_snapshot.get_region().get_id());
-            if self.build_resolver {
-                self.async_build_resolver(region_snapshot.clone());
-            }
             self.async_incremental_scan(region_snapshot);
         } else {
             assert!(
@@ -327,62 +324,27 @@ impl Initializer {
         }
     }
 
-    fn async_build_resolver(&self, snap: RegionSnapshot<RocksEngine>) {
-        info!("async build resolver"; "region_id" => snap.get_region().get_id());
-        // spawn the task to a thread pool.
-        let region_id = snap.get_region().get_id();
-        let region = snap.get_region().clone();
-        let sched = self.sched.clone();
-        self.workers
-            .spawn(
-                lazy(move || {
-                    let mut lock_scanner = LockScanner::new(snap)?;
-                    lock_scanner.build_resolver()
-                })
-                .then(move |res| match res {
-                    Ok(resolver) => {
-                        info!("schedule resolver ready";
-                    "region_id" => region_id);
-                        if let Err(e) = sched.schedule(Task::ResolverReady {
-                            region_id,
-                            resolver,
-                            region,
-                        }) {
-                            error!("schedule task failed"; "error" => ?e);
-                        }
-                        Ok(())
-                    }
-                    Err(e) => {
-                        error!("builder resolver failed"; "error" => ?e);
-                        // Unregister all downstreams.
-                        // TODO: record in metrics.
-                        if let Err(e) = sched.schedule(Task::Deregister {
-                            region_id,
-                            id: None,
-                            err: Some(e),
-                        }) {
-                            error!("schedule task failed"; "error" => ?e);
-                        }
-                        Ok(())
-                    }
-                }),
-            )
-            .unwrap();
-    }
-
     fn async_incremental_scan(&self, snap: RegionSnapshot<RocksEngine>) {
         let downstream_id = self.downstream_id;
         let sched = self.sched.clone();
         let batch_size = self.batch_size;
         let checkpoint_ts = self.checkpoint_ts;
+        let build_resolver = self.build_resolver;
         info!("async incremental scan";
             "region_id" => snap.get_region().get_id(),
             "downstream_id" => downstream_id);
 
         // spawn the task to a thread pool.
         let region_id = snap.get_region().get_id();
+        let region = snap.get_region().clone();
         self.workers
             .spawn(lazy(move || {
+                let mut resolver = if build_resolver {
+                    Some(Resolver::new())
+                } else {
+                    None
+                };
+
                 // Time range: (checkpoint_ts, current]
                 let current = TimeStamp::max();
                 let mut scanner = ScannerBuilder::new(snap, current, false)
@@ -392,30 +354,25 @@ impl Initializer {
                     .unwrap();
                 let mut done = false;
                 while !done {
-                    let mut entries = Vec::with_capacity(batch_size);
-                    while entries.len() < entries.capacity() {
-                        match scanner.next_entry() {
-                            Ok(Some(entry)) => {
-                                entries.push(Some(entry));
-                            }
-                            Ok(None) => {
-                                entries.push(None);
-                                done = true;
-                                break;
-                            }
+                    let entries =
+                        match Self::scan_batch(&mut scanner, batch_size, resolver.as_mut()) {
+                            Ok(res) => res,
                             Err(e) => {
                                 error!("cdc scan entries failed"; "error" => ?e);
                                 // TODO: record in metrics.
                                 if let Err(e) = sched.schedule(Task::Deregister {
                                     region_id,
                                     id: Some(downstream_id),
-                                    err: Some(e.into()),
+                                    err: Some(e),
                                 }) {
                                     error!("schedule task failed"; "error" => ?e);
                                 }
                                 return Ok(());
                             }
-                        }
+                        };
+                    // If the last element is None, it means scanning is finished.
+                    if let Some(None) = entries.last() {
+                        done = true;
                     }
                     debug!("cdc scan entries"; "len" => entries.len());
                     let scanned = Task::IncrementalScan {
@@ -428,9 +385,77 @@ impl Initializer {
                         return Ok(());
                     }
                 }
+
+                if let Some(resolver) = resolver {
+                    Self::finish_building_resolver(resolver, region, sched);
+                }
+
                 Ok(())
             }))
             .unwrap();
+    }
+
+    fn scan_batch<S: Snapshot>(
+        scanner: &mut DeltaScanner<S>,
+        batch_size: usize,
+        resolver: Option<&mut Resolver>,
+    ) -> Result<Vec<Option<TxnEntry>>> {
+        let mut entries = Vec::with_capacity(batch_size);
+        while entries.len() < entries.capacity() {
+            match scanner.next_entry()? {
+                Some(entry) => {
+                    entries.push(Some(entry));
+                }
+                None => {
+                    entries.push(None);
+                    break;
+                }
+            }
+        }
+
+        if let Some(resolver) = resolver {
+            // Track the locks.
+            for entry in &entries {
+                match entry {
+                    Some(TxnEntry::Prewrite { lock, .. }) => {
+                        let (encoded_key, value) = lock;
+                        let key = Key::from_encoded_slice(encoded_key).into_raw().unwrap();
+                        let lock = Lock::parse(value)?;
+                        resolver.track_lock(lock.ts, key);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(entries)
+    }
+
+    fn finish_building_resolver(mut resolver: Resolver, region: Region, sched: Scheduler<Task>) {
+        resolver.init();
+        if resolver.locks().is_empty() {
+            info!(
+                "no lock found";
+                "region_id" => region.get_id()
+            );
+        } else {
+            let rts = resolver.resolve(TimeStamp::zero());
+            info!(
+                "resolver initialized";
+                "region_id" => region.get_id(),
+                "resolved_ts" => rts,
+                "lock_count" => resolver.locks().len()
+            );
+        }
+
+        info!("schedule resolver ready"; "region_id" => region.get_id());
+        if let Err(e) = sched.schedule(Task::ResolverReady {
+            region_id: region.get_id(),
+            resolver,
+            region,
+        }) {
+            error!("schedule task failed"; "error" => ?e);
+        }
     }
 }
 
