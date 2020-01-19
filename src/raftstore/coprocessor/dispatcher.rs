@@ -471,7 +471,7 @@ mod tests {
         assert_all!(&[&ob.called], &[10]);
         host.pre_apply(&region, 0, &query_req);
         assert_all!(&[&ob.called], &[15]);
-        let mut query_resp = admin_resp.clone();
+        let mut query_resp = admin_resp;
         query_resp.clear_admin_response();
         host.post_apply(&region, 0, &mut query_resp);
         assert_all!(&[&ob.called], &[21]);

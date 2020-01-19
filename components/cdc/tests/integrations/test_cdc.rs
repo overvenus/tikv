@@ -209,7 +209,7 @@ fn test_cdc_basic() {
     let mut mutation = Mutation::default();
     mutation.op = Op::Put;
     mutation.key = k.clone().into_bytes();
-    mutation.value = v.clone().into_bytes();
+    mutation.value = v.into_bytes();
     suite.must_kv_prewrite(vec![mutation], k.clone().into_bytes(), start_ts);
     let event = receive_event(false);
     match event {
@@ -234,7 +234,7 @@ fn test_cdc_basic() {
             }
         }
     }
-    suite.must_kv_commit(vec![k.clone().into_bytes()], start_ts, commit_ts);
+    suite.must_kv_commit(vec![k.into_bytes()], start_ts, commit_ts);
     let event = receive_event(false);
     match event {
         Event_oneof_event::Entries(entries) => {

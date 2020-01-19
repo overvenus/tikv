@@ -3861,8 +3861,7 @@ mod tests {
         let mut obs = ApplyObserver::default();
         let (sink, cmdbatch_rx) = mpsc::channel();
         obs.cmd_sink = Some(Arc::new(Mutex::new(sink)));
-        host.registry
-            .register_cmd_observer(1, Box::new(obs.clone()));
+        host.registry.register_cmd_observer(1, Box::new(obs));
 
         let (tx, rx) = mpsc::channel();
         let (region_scheduler, _) = dummy_scheduler();
@@ -3875,8 +3874,8 @@ mod tests {
             sender,
             region_scheduler,
             coprocessor_host: Arc::new(host),
-            importer: importer.clone(),
-            engines: engines.clone(),
+            importer: importer,
+            engines: engines,
             router: router.clone(),
         };
         system.spawn("test-handle-raft".to_owned(), builder);
@@ -3923,7 +3922,7 @@ mod tests {
         let put_entry = EntryBuilder::new(2, 2)
             .put_cf(CF_LOCK, b"k1", b"v1")
             .epoch(1, 3)
-            .capture_resp(&router, 3, 1, capture_tx.clone())
+            .capture_resp(&router, 3, 1, capture_tx)
             .build();
         router.schedule_task(1, Msg::apply(Apply::new(1, 2, vec![put_entry])));
         fetch_apply_res(&rx);
@@ -3966,7 +3965,7 @@ mod tests {
             Msg::Change(ChangeCmd::RegisterObserver {
                 region_id: 2,
                 region_epoch,
-                enabled: enabled.clone(),
+                enabled: enabled,
                 cb: Callback::Read(Box::new(|resp: ReadResponse<_>| {
                     assert!(resp
                         .response
@@ -4101,8 +4100,7 @@ mod tests {
         let mut obs = ApplyObserver::default();
         let (sink, cmdbatch_rx) = mpsc::channel();
         obs.cmd_sink = Some(Arc::new(Mutex::new(sink)));
-        host.registry
-            .register_cmd_observer(1, Box::new(obs.clone()));
+        host.registry.register_cmd_observer(1, Box::new(obs));
         let (region_scheduler, _) = dummy_scheduler();
         let cfg = Arc::new(VersionTrack::new(Config::default()));
         let (router, mut system) = create_apply_batch_system(&cfg.value());
@@ -4272,7 +4270,7 @@ mod tests {
             1,
             Msg::Change(ChangeCmd::RegisterObserver {
                 region_id: 1,
-                region_epoch: region_epoch.clone(),
+                region_epoch: region_epoch,
                 enabled: Arc::new(AtomicBool::new(true)),
                 cb: Callback::Read(Box::new(move |resp: ReadResponse<_>| {
                     assert!(

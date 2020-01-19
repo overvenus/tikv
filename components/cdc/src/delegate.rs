@@ -624,7 +624,7 @@ mod tests {
 
         let (sink, events) = unbounded();
         let mut delegate = Delegate::new(region_id);
-        delegate.subscribe(Downstream::new(String::new(), region_epoch.clone(), sink));
+        delegate.subscribe(Downstream::new(String::new(), region_epoch, sink));
         let mut resolver = Resolver::new();
         resolver.init();
         delegate.on_region_ready(resolver, region.clone());
@@ -712,7 +712,7 @@ mod tests {
 
         let (sink, events) = unbounded();
         let mut delegate = Delegate::new(region_id);
-        delegate.subscribe(Downstream::new(String::new(), region_epoch.clone(), sink));
+        delegate.subscribe(Downstream::new(String::new(), region_epoch, sink));
         let enabled = delegate.enabled();
         assert!(enabled.load(Ordering::Relaxed));
         let mut resolver = Resolver::new();
@@ -777,9 +777,7 @@ mod tests {
         let mut request = AdminRequest::default();
         request.cmd_type = AdminCmdType::BatchSplit;
         let mut response = AdminResponse::default();
-        response
-            .mut_splits()
-            .set_regions(vec![region.clone()].into());
+        response.mut_splits().set_regions(vec![region].into());
         delegate.sink_admin(request, response);
         let mut err = receive_error();
         assert!(err.has_epoch_not_match());
@@ -827,7 +825,7 @@ mod tests {
 
         let (sink, events) = unbounded();
         let mut delegate = Delegate::new(region_id);
-        let downstream = Downstream::new(String::new(), region_epoch.clone(), sink);
+        let downstream = Downstream::new(String::new(), region_epoch, sink);
         let downstream_id = downstream.id;
         delegate.subscribe(downstream);
         let enabled = delegate.enabled();
