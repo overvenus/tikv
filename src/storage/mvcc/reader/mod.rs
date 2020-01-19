@@ -5,6 +5,6 @@ mod reader;
 mod scanner;
 
 pub use self::point_getter::{PointGetter, PointGetterBuilder};
-pub use self::reader::MvccReader;
-pub use self::scanner::{has_data_in_range, DeltaScanner, Scanner, ScannerBuilder};
-pub use self::scanner::{txn_entry_tests, EntryScanner};
+pub use self::reader::{check_need_gc, MvccReader};
+pub use self::scanner::{has_data_in_range, Scanner, ScannerBuilder, DeltaScanner};
+pub use self::scanner::{test_util, EntryScanner};

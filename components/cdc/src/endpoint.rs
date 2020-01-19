@@ -1,3 +1,5 @@
+// Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
+
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,11 +20,11 @@ use tikv::storage::txn::TxnEntry;
 use tikv::storage::txn::TxnEntryScanner;
 use tikv_util::collections::HashMap;
 use tikv_util::timer::SteadyTimer;
-use tikv_util::worker::{Runnable, Scheduler};
+use tikv_util::worker::{Runnable, ScheduleError, Scheduler};
 use tokio_threadpool::{Builder, Sender as PoolSender, ThreadPool};
 use txn_types::{Key, Lock, TimeStamp};
 
-use crate::delegate::{Delegate, Downstream};
+use crate::delegate::{Delegate, Downstream, DownstreamID};
 use crate::{CdcObserver, Error, Result};
 
 pub enum Task {
@@ -32,7 +34,7 @@ pub enum Task {
     },
     Deregister {
         region_id: u64,
-        id: Option<usize>,
+        downstream_id: Option<DownstreamID>,
         err: Option<Error>,
     },
     MultiBatch {
@@ -48,7 +50,7 @@ pub enum Task {
     },
     IncrementalScan {
         region_id: u64,
-        downstream_id: usize,
+        downstream_id: DownstreamID,
         entries: Vec<Option<TxnEntry>>,
     },
     #[cfg(not(validate))]
@@ -75,13 +77,13 @@ impl fmt::Debug for Task {
                 .finish(),
             Task::Deregister {
                 ref region_id,
-                ref id,
+                ref downstream_id,
                 ref err,
             } => de
                 .field("deregister", &"")
                 .field("region_id", region_id)
                 .field("err", err)
-                .field("id", id)
+                .field("downstream_id", downstream_id)
                 .finish(),
             Task::MinTS { ref min_ts } => de.field("min_ts", min_ts).finish(),
             Task::ResolverReady { ref region_id, .. } => de.field("region_id", region_id).finish(),
@@ -146,7 +148,7 @@ impl Endpoint {
         self.scan_batch_size = scan_batch_size;
     }
 
-    fn on_deregister(&mut self, region_id: u64, id: Option<usize>, err: Option<Error>) {
+    fn on_deregister(&mut self, region_id: u64, id: Option<DownstreamID>, err: Option<Error>) {
         info!("cdc deregister region";
             "region_id" => region_id,
             "id" => ?id,
@@ -245,7 +247,7 @@ impl Endpoint {
     pub fn on_incremental_scan(
         &mut self,
         region_id: u64,
-        downstream_id: usize,
+        downstream_id: DownstreamID,
         entries: Vec<Option<TxnEntry>>,
     ) {
         if let Some(delegate) = self.capture_regions.get_mut(&region_id) {
@@ -275,15 +277,15 @@ impl Endpoint {
             move |tso: pd_client::Result<(TimeStamp, ())>| {
                 // Ignore get tso errors since we will retry every `min_ts_interval`.
                 let (min_ts, _) = tso.unwrap_or((TimeStamp::default(), ()));
-                if let Err(e) = scheduler.schedule(Task::MinTS { min_ts }) {
+                match scheduler.schedule(Task::MinTS { min_ts }) {
+                    Ok(_) | Err(ScheduleError::Stopped(_)) => Ok(()),
                     // Must schedule `MinTS` event otherwise resolved ts can not
                     // advance normally.
-                    panic!(
+                    err => panic!(
                         "failed to schedule min_ts event, min_ts: {}, error: {:?}",
-                        min_ts, e
-                    );
+                        min_ts, err
+                    ),
                 }
-                Ok(())
             },
         );
         self.pd_client.spawn(Box::new(fut) as _);
@@ -295,7 +297,7 @@ struct Initializer {
     sched: Scheduler<Task>,
 
     region_id: u64,
-    downstream_id: usize,
+    downstream_id: DownstreamID,
     checkpoint_ts: TimeStamp,
     batch_size: usize,
 
@@ -317,7 +319,7 @@ impl Initializer {
             let err = resp.response.take_header().take_error();
             let deregister = Task::Deregister {
                 region_id: self.region_id,
-                id: Some(self.downstream_id),
+                downstream_id: Some(self.downstream_id),
                 err: Some(Error::Request(err)),
             };
             self.sched.schedule(deregister).unwrap();
@@ -332,7 +334,7 @@ impl Initializer {
         let build_resolver = self.build_resolver;
         info!("async incremental scan";
             "region_id" => region.get_id(),
-            "downstream_id" => downstream_id);
+            "downstream_id" => ?downstream_id);
 
         // spawn the task to a thread pool.
         let region_id = region.get_id();
@@ -348,8 +350,7 @@ impl Initializer {
                 let current = TimeStamp::max();
                 let mut scanner = ScannerBuilder::new(snap, current, false)
                     .range(None, None)
-                    .isolation_level(IsolationLevel::Si)
-                    .build_delta(checkpoint_ts, false)
+                    .build_delta_scanner(checkpoint_ts)
                     .unwrap();
                 let mut done = false;
                 while !done {
@@ -361,7 +362,7 @@ impl Initializer {
                                 // TODO: record in metrics.
                                 if let Err(e) = sched.schedule(Task::Deregister {
                                     region_id,
-                                    id: Some(downstream_id),
+                                    downstream_id: Some(downstream_id),
                                     err: Some(e),
                                 }) {
                                     error!("schedule task failed"; "error" => ?e);
@@ -469,7 +470,11 @@ impl Runnable<Task> for Endpoint {
                 resolver,
                 region,
             } => self.on_region_ready(region_id, resolver, region),
-            Task::Deregister { region_id, id, err } => self.on_deregister(region_id, id, err),
+            Task::Deregister {
+                region_id,
+                downstream_id,
+                err,
+            } => self.on_deregister(region_id, downstream_id, err),
             Task::MultiBatch { multi } => self.on_multi_batch(multi),
             Task::IncrementalScan {
                 region_id,
@@ -532,7 +537,7 @@ mod tests {
             sched: receiver_worker.scheduler(),
 
             region_id: 1,
-            downstream_id: 1,
+            downstream_id: DownstreamID::new(),
             checkpoint_ts: 1.into(),
             batch_size: 1,
 

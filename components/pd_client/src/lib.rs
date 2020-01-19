@@ -234,14 +234,19 @@ pub trait PdClient: Send + Sync {
         unimplemented!();
     }
 
+    /// Gets a timestamp from PD.
     fn get_tso(&self) -> PdFuture<TimeStamp> {
         unimplemented!()
     }
 
-    fn spawn(&self, _future: PdFuture<()>) {
+    /// Spawns a PD future on the client.
+    fn spawn(&self, _: PdFuture<()>) {
         unimplemented!()
     }
+}
 
+/// ConfigClient used for manage config
+pub trait ConfigClient: Send + Sync {
     fn register_config(
         &self,
         _id: String,

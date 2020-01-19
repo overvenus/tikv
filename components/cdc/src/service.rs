@@ -1,5 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+// Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
 use futures::sync::mpsc;
 use futures::{Future, Sink, Stream};
@@ -10,18 +9,20 @@ use tikv_util::worker::*;
 use crate::delegate::Downstream;
 use crate::endpoint::Task;
 
+/// Service implements the `ChangeData` service.
+///
+/// It's a front-end of the CDC service, schedules requests to the `Endpoint`.
 #[derive(Clone)]
 pub struct Service {
     scheduler: Scheduler<Task>,
-    stream_id: Arc<AtomicUsize>,
 }
 
 impl Service {
+    /// Create a ChangeData service.
+    ///
+    /// It requires a scheduler of an `Endpoint` in order to schedule tasks.
     pub fn new(scheduler: Scheduler<Task>) -> Service {
-        Service {
-            scheduler,
-            stream_id: Arc::default(),
-        }
+        Service { scheduler }
     }
 }
 
@@ -34,11 +35,11 @@ impl ChangeData for Service {
     ) {
         let region_id = request.region_id;
         let peer = ctx.peer();
-        let id = self.stream_id.fetch_add(1, Ordering::Relaxed);
         let region_epoch = request.get_region_epoch().clone();
         // TODO: make it a bounded channel.
         let (tx, rx) = mpsc::unbounded();
-        let downstream = Downstream::new(id, peer.clone(), region_epoch, tx);
+        let downstream = Downstream::new(peer, region_epoch, tx);
+        let downstream_id = Some(downstream.id);
         if let Err(status) = self
             .scheduler
             .schedule(Task::Register {
@@ -69,7 +70,7 @@ impl ChangeData for Service {
             // Unregister this downstream only.
             if let Err(e) = scheduler.schedule(Task::Deregister {
                 region_id,
-                id: Some(id),
+                downstream_id,
                 err: None,
             }) {
                 error!("cdc deregister failed"; "error" => ?e);
