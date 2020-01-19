@@ -7,7 +7,6 @@ use std::time::Duration;
 use engine_rocks::RocksEngine;
 use futures::future::{lazy, Future};
 use kvproto::cdcpb::*;
-use kvproto::kvrpcpb::IsolationLevel;
 use kvproto::metapb::Region;
 use pd_client::PdClient;
 use resolved_ts::Resolver;

@@ -1,7 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod backward;
-mod delta;
 mod forward;
 
 use engine::{CfName, IterOption, CF_DEFAULT, CF_LOCK, CF_WRITE};
@@ -18,8 +17,7 @@ use crate::storage::kv::{
 use crate::storage::mvcc::{default_not_found_error, Result};
 use crate::storage::txn::{Result as TxnResult, Scanner as StoreScanner};
 
-pub use self::delta::DeltaScanner;
-pub use self::forward::{latest_entry_tests as txn_entry_tests, EntryScanner};
+pub use self::forward::{test_util, DeltaScanner, EntryScanner};
 
 pub struct ScannerBuilder<S: Snapshot>(ScannerConfig<S>);
 
@@ -138,24 +136,20 @@ impl<S: Snapshot> ScannerBuilder<S> {
         ))
     }
 
-    pub fn build_delta(
-        mut self,
-        begin_ts: TimeStamp,
-        err_lock_exist: bool,
-    ) -> Result<DeltaScanner<S>> {
-        let lock_cursor = if self.0.isolation_level == IsolationLevel::Si {
-            Some(self.0.create_cf_cursor(CF_LOCK)?)
-        } else {
-            None
-        };
-
+    pub fn build_delta_scanner(mut self, from_ts: TimeStamp) -> Result<DeltaScanner<S>> {
+        let lock_cursor = self.0.create_cf_cursor(CF_LOCK)?;
         let write_cursor = self.0.create_cf_cursor(CF_WRITE)?;
-        Ok(DeltaScanner::new(
+        // Note: Create a default cf cursor will take key range, so we need to
+        //       ensure the default cursor is created after lock and write.
+        let default_cursor = self
+            .0
+            .create_cf_cursor_with_scan_mode(CF_DEFAULT, ScanMode::Mixed)?;
+        Ok(ForwardScanner::new(
             self.0,
             lock_cursor,
             write_cursor,
-            begin_ts,
-            err_lock_exist,
+            Some(default_cursor),
+            DeltaEntryPolicy::new(from_ts),
         ))
     }
 }

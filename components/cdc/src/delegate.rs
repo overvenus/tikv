@@ -26,7 +26,7 @@ static DOWNSTREAM_ID_ALLOC: AtomicUsize = AtomicUsize::new(0);
 pub struct DownstreamID(usize);
 
 impl DownstreamID {
-    fn new() -> DownstreamID {
+    pub fn new() -> DownstreamID {
         DownstreamID(DOWNSTREAM_ID_ALLOC.fetch_add(1, Ordering::Relaxed))
     }
 }
@@ -521,7 +521,7 @@ mod tests {
     };
     use tikv::raftstore::Result as RaftStoreResult;
     use tikv::server::RaftKv;
-    use tikv::storage::mvcc::reader::txn_entry_tests::*;
+    use tikv::storage::mvcc::reader::test_util::*;
     use tikv::storage::mvcc::tests::*;
     use tikv_util::mpsc::{bounded, Sender as UtilSender};
 
