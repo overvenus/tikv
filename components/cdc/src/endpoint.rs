@@ -12,7 +12,6 @@ use resolved_ts::Resolver;
 use tikv::raftstore::coprocessor::CmdBatch;
 use tikv::raftstore::store::fsm::{ApplyRouter, ApplyTask, ChangeCmd};
 use tikv::raftstore::store::msg::{Callback, ReadResponse};
-use tikv::raftstore::store::RegionSnapshot;
 use tikv::storage::kv::Snapshot;
 use tikv::storage::mvcc::reader::{DeltaScanner, ScannerBuilder};
 use tikv::storage::txn::TxnEntry;
@@ -307,7 +306,8 @@ impl Initializer {
     fn on_change_cmd(&self, mut resp: ReadResponse<RocksEngine>) {
         if let Some(region_snapshot) = resp.snapshot {
             assert_eq!(self.region_id, region_snapshot.get_region().get_id());
-            self.async_incremental_scan(region_snapshot);
+            let region = region_snapshot.get_region().clone();
+            self.async_incremental_scan(region_snapshot, region);
         } else {
             assert!(
                 resp.response.get_header().has_error(),
@@ -324,19 +324,18 @@ impl Initializer {
         }
     }
 
-    fn async_incremental_scan(&self, snap: RegionSnapshot<RocksEngine>) {
+    fn async_incremental_scan<S: Snapshot + 'static>(&self, snap: S, region: Region) {
         let downstream_id = self.downstream_id;
         let sched = self.sched.clone();
         let batch_size = self.batch_size;
         let checkpoint_ts = self.checkpoint_ts;
         let build_resolver = self.build_resolver;
         info!("async incremental scan";
-            "region_id" => snap.get_region().get_id(),
+            "region_id" => region.get_id(),
             "downstream_id" => downstream_id);
 
         // spawn the task to a thread pool.
-        let region_id = snap.get_region().get_id();
-        let region = snap.get_region().clone();
+        let region_id = region.get_id();
         self.workers
             .spawn(lazy(move || {
                 let mut resolver = if build_resolver {
@@ -416,14 +415,11 @@ impl Initializer {
         if let Some(resolver) = resolver {
             // Track the locks.
             for entry in &entries {
-                match entry {
-                    Some(TxnEntry::Prewrite { lock, .. }) => {
-                        let (encoded_key, value) = lock;
-                        let key = Key::from_encoded_slice(encoded_key).into_raw().unwrap();
-                        let lock = Lock::parse(value)?;
-                        resolver.track_lock(lock.ts, key);
-                    }
-                    _ => {}
+                if let Some(TxnEntry::Prewrite { lock, .. }) = entry {
+                    let (encoded_key, value) = lock;
+                    let key = Key::from_encoded_slice(encoded_key).into_raw().unwrap();
+                    let lock = Lock::parse(value)?;
+                    resolver.track_lock(lock.ts, key);
                 }
             }
         }
@@ -487,5 +483,127 @@ impl Runnable<Task> for Endpoint {
                 validate(self.capture_regions.get(&region_id));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_traits::DATA_CFS;
+    use kvproto::kvrpcpb::Context;
+    use std::collections::BTreeMap;
+    use std::fmt::Display;
+    use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+    use tempfile::TempDir;
+    use tikv::storage::kv::Engine;
+    use tikv::storage::mvcc::tests::*;
+    use tikv::storage::TestEngineBuilder;
+    use tikv_util::collections::HashSet;
+    use tikv_util::worker::{Builder as WorkerBuilder, Worker};
+
+    struct ReceiverRunnable<T> {
+        tx: Sender<T>,
+    }
+
+    impl<T: Display> Runnable<T> for ReceiverRunnable<T> {
+        fn run(&mut self, task: T) {
+            self.tx.send(task).unwrap();
+        }
+    }
+
+    fn new_receiver_worker<T: Display + Send + 'static>() -> (Worker<T>, Receiver<T>) {
+        let (tx, rx) = channel();
+        let runnable = ReceiverRunnable { tx };
+        let mut worker = WorkerBuilder::new("test-receiver-worker").create();
+        worker.start(runnable).unwrap();
+        (worker, rx)
+    }
+
+    fn mock_initializer() -> (Worker<Task>, ThreadPool, Initializer, Receiver<Task>) {
+        let (receiver_worker, rx) = new_receiver_worker();
+
+        let pool = Builder::new()
+            .name_prefix("test-initializer-worker")
+            .pool_size(4)
+            .build();
+
+        let initializer = Initializer {
+            workers: pool.sender().clone(),
+            sched: receiver_worker.scheduler(),
+
+            region_id: 1,
+            downstream_id: 1,
+            checkpoint_ts: 1.into(),
+            batch_size: 1,
+
+            build_resolver: true,
+        };
+
+        (receiver_worker, pool, initializer, rx)
+    }
+
+    #[test]
+    fn test_build_resolver() {
+        let (mut worker, _pool, mut initializer, rx) = mock_initializer();
+
+        let temp = TempDir::new().unwrap();
+        let engine = TestEngineBuilder::new()
+            .path(temp.path())
+            .cfs(DATA_CFS)
+            .build()
+            .unwrap();
+
+        let mut expected_locks = BTreeMap::<TimeStamp, HashSet<Vec<u8>>>::new();
+
+        for i in 10..100 {
+            let (k, v) = (&[b'k', i], &[b'v', i]);
+            let ts = TimeStamp::new(i as _);
+            must_prewrite_put(&engine, k, v, k, ts);
+            expected_locks.entry(ts).or_default().insert(k.to_vec());
+        }
+
+        let region = Region::default();
+        let snap = engine.snapshot(&Context::default()).unwrap();
+
+        let check_result = || loop {
+            let task = rx.recv().unwrap();
+            match task {
+                Task::ResolverReady { resolver, .. } => {
+                    assert_eq!(resolver.locks(), &expected_locks);
+                    return;
+                }
+                Task::IncrementalScan { .. } => continue,
+                t => panic!("unepxected task {} received", t),
+            }
+        };
+
+        initializer.async_incremental_scan(snap.clone(), region.clone());
+        check_result();
+        initializer.batch_size = 1000;
+        initializer.async_incremental_scan(snap.clone(), region.clone());
+        check_result();
+
+        initializer.batch_size = 10;
+        initializer.async_incremental_scan(snap.clone(), region.clone());
+        check_result();
+
+        initializer.batch_size = 11;
+        initializer.async_incremental_scan(snap.clone(), region.clone());
+        check_result();
+
+        initializer.build_resolver = false;
+        initializer.async_incremental_scan(snap, region);
+
+        loop {
+            let task = rx.recv_timeout(Duration::from_secs(1));
+            match task {
+                Ok(Task::IncrementalScan { .. }) => continue,
+                Ok(t) => panic!("unepxected task {} received", t),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(e) => panic!("unexpected err {:?}", e),
+            }
+        }
+
+        worker.stop().unwrap().join().unwrap();
     }
 }
