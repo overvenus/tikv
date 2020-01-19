@@ -3874,8 +3874,8 @@ mod tests {
             sender,
             region_scheduler,
             coprocessor_host: Arc::new(host),
-            importer: importer,
-            engines: engines,
+            importer,
+            engines,
             router: router.clone(),
         };
         system.spawn("test-handle-raft".to_owned(), builder);
@@ -3965,7 +3965,7 @@ mod tests {
             Msg::Change(ChangeCmd::RegisterObserver {
                 region_id: 2,
                 region_epoch,
-                enabled: enabled,
+                enabled,
                 cb: Callback::Read(Box::new(|resp: ReadResponse<_>| {
                     assert!(resp
                         .response
@@ -4270,7 +4270,7 @@ mod tests {
             1,
             Msg::Change(ChangeCmd::RegisterObserver {
                 region_id: 1,
-                region_epoch: region_epoch,
+                region_epoch,
                 enabled: Arc::new(AtomicBool::new(true)),
                 cb: Callback::Read(Box::new(move |resp: ReadResponse<_>| {
                     assert!(
