@@ -9,9 +9,7 @@ use kvproto::kvrpcpb::IsolationLevel;
 use txn_types::{Key, TimeStamp, TsSet, Value};
 
 use self::backward::BackwardKvScanner;
-use self::forward::{
-    DeltaEntryPolicy, ForwardKvScanner, ForwardScanner, LatestEntryPolicy, LatestKvPolicy,
-};
+use self::forward::{ForwardKvScanner, ForwardScanner, LatestEntryPolicy, LatestKvPolicy};
 use crate::storage::kv::{
     CfStatistics, Cursor, CursorBuilder, Iterator, ScanMode, Snapshot, Statistics,
 };
