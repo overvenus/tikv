@@ -539,6 +539,7 @@ pub struct DeltaEntryPolicy {
 }
 
 impl DeltaEntryPolicy {
+    #[allow(dead_code)]
     pub fn new(from_ts: TimeStamp) -> Self {
         Self { from_ts }
     }
@@ -674,6 +675,7 @@ pub type EntryScanner<S> = ForwardScanner<S, LatestEntryPolicy>;
 
 /// This scanner scans all entries whose commit_ts (or locks' start_ts) is in range
 /// (from_ts, cfg.ts].
+#[allow(dead_code)]
 pub type DeltaScanner<S> = ForwardScanner<S, DeltaEntryPolicy>;
 
 impl<S, P> TxnEntryScanner for ForwardScanner<S, P>
