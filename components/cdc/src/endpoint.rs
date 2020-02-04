@@ -7,26 +7,24 @@ use std::time::Duration;
 use engine_rocks::RocksEngine;
 use futures::future::{lazy, Future};
 use kvproto::cdcpb::*;
-use kvproto::kvrpcpb::IsolationLevel;
 use kvproto::metapb::Region;
 use pd_client::PdClient;
 use resolved_ts::Resolver;
-use tikv::raftstore::coprocessor::*;
+use tikv::raftstore::coprocessor::CmdBatch;
 use tikv::raftstore::store::fsm::{ApplyRouter, ApplyTask, ChangeCmd};
 use tikv::raftstore::store::msg::{Callback, ReadResponse};
-use tikv::raftstore::store::RegionSnapshot;
-use tikv::storage::mvcc::reader::ScannerBuilder;
+use tikv::storage::kv::Snapshot;
+use tikv::storage::mvcc::reader::{DeltaScanner, ScannerBuilder};
 use tikv::storage::txn::TxnEntry;
 use tikv::storage::txn::TxnEntryScanner;
 use tikv_util::collections::HashMap;
 use tikv_util::timer::SteadyTimer;
 use tikv_util::worker::{Runnable, ScheduleError, Scheduler};
 use tokio_threadpool::{Builder, Sender as PoolSender, ThreadPool};
-use txn_types::TimeStamp;
+use txn_types::{Key, Lock, TimeStamp};
 
 use crate::delegate::{Delegate, Downstream, DownstreamID};
-use crate::lock_scanner::LockScanner;
-use crate::{CdcObserver, Error};
+use crate::{CdcObserver, Error, Result};
 
 pub enum Task {
     Register {
@@ -309,10 +307,8 @@ impl Initializer {
     fn on_change_cmd(&self, mut resp: ReadResponse<RocksEngine>) {
         if let Some(region_snapshot) = resp.snapshot {
             assert_eq!(self.region_id, region_snapshot.get_region().get_id());
-            if self.build_resolver {
-                self.async_build_resolver(region_snapshot.clone());
-            }
-            self.async_incremental_scan(region_snapshot);
+            let region = region_snapshot.get_region().clone();
+            self.async_incremental_scan(region_snapshot, region);
         } else {
             assert!(
                 resp.response.get_header().has_error(),
@@ -329,95 +325,53 @@ impl Initializer {
         }
     }
 
-    fn async_build_resolver(&self, snap: RegionSnapshot<RocksEngine>) {
-        info!("async build resolver"; "region_id" => snap.get_region().get_id());
-        // spawn the task to a thread pool.
-        let region_id = snap.get_region().get_id();
-        let region = snap.get_region().clone();
-        let sched = self.sched.clone();
-        self.workers
-            .spawn(
-                lazy(move || {
-                    let mut lock_scanner = LockScanner::new(snap)?;
-                    lock_scanner.build_resolver()
-                })
-                .then(move |res| match res {
-                    Ok(resolver) => {
-                        info!("schedule resolver ready";
-                    "region_id" => region_id);
-                        if let Err(e) = sched.schedule(Task::ResolverReady {
-                            region_id,
-                            resolver,
-                            region,
-                        }) {
-                            error!("schedule task failed"; "error" => ?e);
-                        }
-                        Ok(())
-                    }
-                    Err(e) => {
-                        error!("builder resolver failed"; "error" => ?e);
-                        // Unregister all downstreams.
-                        // TODO: record in metrics.
-                        if let Err(e) = sched.schedule(Task::Deregister {
-                            region_id,
-                            downstream_id: None,
-                            err: Some(e),
-                        }) {
-                            error!("schedule task failed"; "error" => ?e);
-                        }
-                        Ok(())
-                    }
-                }),
-            )
-            .unwrap();
-    }
-
-    fn async_incremental_scan(&self, snap: RegionSnapshot<RocksEngine>) {
+    fn async_incremental_scan<S: Snapshot + 'static>(&self, snap: S, region: Region) {
         let downstream_id = self.downstream_id;
         let sched = self.sched.clone();
         let batch_size = self.batch_size;
         let checkpoint_ts = self.checkpoint_ts;
+        let build_resolver = self.build_resolver;
         info!("async incremental scan";
-            "region_id" => snap.get_region().get_id(),
+            "region_id" => region.get_id(),
             "downstream_id" => ?downstream_id);
 
         // spawn the task to a thread pool.
-        let region_id = snap.get_region().get_id();
+        let region_id = region.get_id();
         self.workers
             .spawn(lazy(move || {
+                let mut resolver = if build_resolver {
+                    Some(Resolver::new())
+                } else {
+                    None
+                };
+
                 // Time range: (checkpoint_ts, current]
                 let current = TimeStamp::max();
                 let mut scanner = ScannerBuilder::new(snap, current, false)
                     .range(None, None)
-                    .isolation_level(IsolationLevel::Si)
-                    .build_delta(checkpoint_ts, false)
+                    .build_delta_scanner(checkpoint_ts)
                     .unwrap();
                 let mut done = false;
                 while !done {
-                    let mut entries = Vec::with_capacity(batch_size);
-                    while entries.len() < entries.capacity() {
-                        match scanner.next_entry() {
-                            Ok(Some(entry)) => {
-                                entries.push(Some(entry));
-                            }
-                            Ok(None) => {
-                                entries.push(None);
-                                done = true;
-                                break;
-                            }
+                    let entries =
+                        match Self::scan_batch(&mut scanner, batch_size, resolver.as_mut()) {
+                            Ok(res) => res,
                             Err(e) => {
                                 error!("cdc scan entries failed"; "error" => ?e);
                                 // TODO: record in metrics.
                                 if let Err(e) = sched.schedule(Task::Deregister {
                                     region_id,
                                     downstream_id: Some(downstream_id),
-                                    err: Some(e.into()),
+                                    err: Some(e),
                                 }) {
                                     error!("schedule task failed"; "error" => ?e);
                                 }
                                 return Ok(());
                             }
-                        }
+                        };
+                    // If the last element is None, it means scanning is finished.
+                    if let Some(None) = entries.last() {
+                        done = true;
                     }
                     debug!("cdc scan entries"; "len" => entries.len());
                     let scanned = Task::IncrementalScan {
@@ -430,9 +384,74 @@ impl Initializer {
                         return Ok(());
                     }
                 }
+
+                if let Some(resolver) = resolver {
+                    Self::finish_building_resolver(resolver, region, sched);
+                }
+
                 Ok(())
             }))
             .unwrap();
+    }
+
+    fn scan_batch<S: Snapshot>(
+        scanner: &mut DeltaScanner<S>,
+        batch_size: usize,
+        resolver: Option<&mut Resolver>,
+    ) -> Result<Vec<Option<TxnEntry>>> {
+        let mut entries = Vec::with_capacity(batch_size);
+        while entries.len() < entries.capacity() {
+            match scanner.next_entry()? {
+                Some(entry) => {
+                    entries.push(Some(entry));
+                }
+                None => {
+                    entries.push(None);
+                    break;
+                }
+            }
+        }
+
+        if let Some(resolver) = resolver {
+            // Track the locks.
+            for entry in &entries {
+                if let Some(TxnEntry::Prewrite { lock, .. }) = entry {
+                    let (encoded_key, value) = lock;
+                    let key = Key::from_encoded_slice(encoded_key).into_raw().unwrap();
+                    let lock = Lock::parse(value)?;
+                    resolver.track_lock(lock.ts, key);
+                }
+            }
+        }
+
+        Ok(entries)
+    }
+
+    fn finish_building_resolver(mut resolver: Resolver, region: Region, sched: Scheduler<Task>) {
+        resolver.init();
+        if resolver.locks().is_empty() {
+            info!(
+                "no lock found";
+                "region_id" => region.get_id()
+            );
+        } else {
+            let rts = resolver.resolve(TimeStamp::zero());
+            info!(
+                "resolver initialized";
+                "region_id" => region.get_id(),
+                "resolved_ts" => rts,
+                "lock_count" => resolver.locks().len()
+            );
+        }
+
+        info!("schedule resolver ready"; "region_id" => region.get_id());
+        if let Err(e) = sched.schedule(Task::ResolverReady {
+            region_id: region.get_id(),
+            resolver,
+            region,
+        }) {
+            error!("schedule task failed"; "error" => ?e);
+        }
     }
 }
 
@@ -468,5 +487,127 @@ impl Runnable<Task> for Endpoint {
                 validate(self.capture_regions.get(&region_id));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_traits::DATA_CFS;
+    use kvproto::kvrpcpb::Context;
+    use std::collections::BTreeMap;
+    use std::fmt::Display;
+    use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+    use tempfile::TempDir;
+    use tikv::storage::kv::Engine;
+    use tikv::storage::mvcc::tests::*;
+    use tikv::storage::TestEngineBuilder;
+    use tikv_util::collections::HashSet;
+    use tikv_util::worker::{Builder as WorkerBuilder, Worker};
+
+    struct ReceiverRunnable<T> {
+        tx: Sender<T>,
+    }
+
+    impl<T: Display> Runnable<T> for ReceiverRunnable<T> {
+        fn run(&mut self, task: T) {
+            self.tx.send(task).unwrap();
+        }
+    }
+
+    fn new_receiver_worker<T: Display + Send + 'static>() -> (Worker<T>, Receiver<T>) {
+        let (tx, rx) = channel();
+        let runnable = ReceiverRunnable { tx };
+        let mut worker = WorkerBuilder::new("test-receiver-worker").create();
+        worker.start(runnable).unwrap();
+        (worker, rx)
+    }
+
+    fn mock_initializer() -> (Worker<Task>, ThreadPool, Initializer, Receiver<Task>) {
+        let (receiver_worker, rx) = new_receiver_worker();
+
+        let pool = Builder::new()
+            .name_prefix("test-initializer-worker")
+            .pool_size(4)
+            .build();
+
+        let initializer = Initializer {
+            workers: pool.sender().clone(),
+            sched: receiver_worker.scheduler(),
+
+            region_id: 1,
+            downstream_id: DownstreamID::new(),
+            checkpoint_ts: 1.into(),
+            batch_size: 1,
+
+            build_resolver: true,
+        };
+
+        (receiver_worker, pool, initializer, rx)
+    }
+
+    #[test]
+    fn test_build_resolver() {
+        let (mut worker, _pool, mut initializer, rx) = mock_initializer();
+
+        let temp = TempDir::new().unwrap();
+        let engine = TestEngineBuilder::new()
+            .path(temp.path())
+            .cfs(DATA_CFS)
+            .build()
+            .unwrap();
+
+        let mut expected_locks = BTreeMap::<TimeStamp, HashSet<Vec<u8>>>::new();
+
+        for i in 10..100 {
+            let (k, v) = (&[b'k', i], &[b'v', i]);
+            let ts = TimeStamp::new(i as _);
+            must_prewrite_put(&engine, k, v, k, ts);
+            expected_locks.entry(ts).or_default().insert(k.to_vec());
+        }
+
+        let region = Region::default();
+        let snap = engine.snapshot(&Context::default()).unwrap();
+
+        let check_result = || loop {
+            let task = rx.recv().unwrap();
+            match task {
+                Task::ResolverReady { resolver, .. } => {
+                    assert_eq!(resolver.locks(), &expected_locks);
+                    return;
+                }
+                Task::IncrementalScan { .. } => continue,
+                t => panic!("unepxected task {} received", t),
+            }
+        };
+
+        initializer.async_incremental_scan(snap.clone(), region.clone());
+        check_result();
+        initializer.batch_size = 1000;
+        initializer.async_incremental_scan(snap.clone(), region.clone());
+        check_result();
+
+        initializer.batch_size = 10;
+        initializer.async_incremental_scan(snap.clone(), region.clone());
+        check_result();
+
+        initializer.batch_size = 11;
+        initializer.async_incremental_scan(snap.clone(), region.clone());
+        check_result();
+
+        initializer.build_resolver = false;
+        initializer.async_incremental_scan(snap, region);
+
+        loop {
+            let task = rx.recv_timeout(Duration::from_secs(1));
+            match task {
+                Ok(Task::IncrementalScan { .. }) => continue,
+                Ok(t) => panic!("unepxected task {} received", t),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(e) => panic!("unexpected err {:?}", e),
+            }
+        }
+
+        worker.stop().unwrap().join().unwrap();
     }
 }

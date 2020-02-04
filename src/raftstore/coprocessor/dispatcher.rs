@@ -417,7 +417,7 @@ mod tests {
 
     impl CmdObserver for TestCoprocessor {
         fn on_batch_executed(&self, _: &[CmdBatch]) {
-            self.called.fetch_add(9, Ordering::SeqCst);
+            self.called.fetch_add(11, Ordering::SeqCst);
         }
     }
 
@@ -471,7 +471,7 @@ mod tests {
         assert_all!(&[&ob.called], &[10]);
         host.pre_apply(&region, 0, &query_req);
         assert_all!(&[&ob.called], &[15]);
-        let mut query_resp = admin_resp.clone();
+        let mut query_resp = admin_resp;
         query_resp.clear_admin_response();
         host.post_apply(&region, 0, &mut query_resp);
         assert_all!(&[&ob.called], &[21]);
@@ -482,13 +482,13 @@ mod tests {
         host.on_region_changed(&region, RegionChangeEvent::Create, StateRole::Follower);
         assert_all!(&[&ob.called], &[36]);
 
-        host.on_cmd_executed(&[]);
-        assert_all!(&[&ob.called], &[45]);
-
         host.pre_apply_plain_kvs_from_snapshot(&region, "default", &[]);
         assert_all!(&[&ob.called], &[45]);
         host.pre_apply_sst_from_snapshot(&region, "default", "");
         assert_all!(&[&ob.called], &[55]);
+
+        host.on_cmd_executed(&[]);
+        assert_all!(&[&ob.called], &[66]);
     }
 
     #[test]
@@ -511,8 +511,10 @@ mod tests {
         admin_req.set_admin_request(AdminRequest::default());
         let mut admin_resp = RaftCmdResponse::default();
         admin_resp.set_admin_response(AdminResponse::default());
+        admin_resp.set_header(RaftResponseHeader::default());
         let query_req = RaftCmdRequest::default();
-        let query_resp = RaftCmdResponse::default();
+        let mut query_resp = RaftCmdResponse::default();
+        query_resp.set_header(RaftResponseHeader::default());
 
         let cases = vec![(0, admin_req, admin_resp), (3, query_req, query_resp)];
 

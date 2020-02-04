@@ -8,7 +8,6 @@ extern crate failure;
 mod delegate;
 mod endpoint;
 mod errors;
-mod lock_scanner;
 mod observer;
 mod service;
 

@@ -1089,18 +1089,16 @@ mod latest_kv_tests {
     }
 }
 
-#[allow(unused)]
+#[cfg(test)]
 pub mod latest_entry_tests {
-    #[cfg(test)]
     use super::super::ScannerBuilder;
-    #[cfg(test)]
+    use super::*;
     use crate::storage::mvcc::tests::*;
-    #[cfg(test)]
     use crate::storage::{Engine, TestEngineBuilder};
-    #[cfg(test)]
+
     use kvproto::kvrpcpb::Context;
 
-    pub use super::test_util::EntryBuilder;
+    use super::test_util::EntryBuilder;
 
     /// Check whether everything works as usual when `EntryScanner::get()` goes out of bound.
     #[test]

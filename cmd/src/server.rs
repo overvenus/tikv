@@ -494,6 +494,7 @@ impl TiKVServer {
             self.pd_client.clone(),
         );
         let apply_router = node.get_apply_router();
+
         let cfg_controller = ConfigController::new(self.config.clone(), Default::default());
         node.start(
             engines.engines.clone(),
