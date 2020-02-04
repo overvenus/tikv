@@ -15,7 +15,7 @@ use crate::storage::kv::{
 use crate::storage::mvcc::{default_not_found_error, Result};
 use crate::storage::txn::{Result as TxnResult, Scanner as StoreScanner};
 
-pub use self::forward::{test_util, DeltaScanner, EntryScanner};
+pub use self::forward::{test_util, DeltaEntryPolicy, DeltaScanner, EntryScanner};
 
 pub struct ScannerBuilder<S: Snapshot>(ScannerConfig<S>);
 
