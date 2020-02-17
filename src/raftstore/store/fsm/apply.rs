@@ -2740,6 +2740,10 @@ impl ApplyFsm {
                     .cmd_observer_enabled
                     .as_ref()
                     .map_or(false, |e| e.load(Ordering::Relaxed)));
+                // Commit the writebatch for ensuring the following snapshot can get all previous writes.
+                if apply_ctx.kv_wb.is_some() && apply_ctx.kv_wb().count() > 0 {
+                    apply_ctx.commit(&mut self.delegate);
+                }
                 // TODO(cdc): take cmd_observer_enabled when enabled is false.
                 self.delegate.cmd_observer_enabled = Some(enabled);
                 (region_id, region_epoch, cb)
@@ -3902,7 +3906,22 @@ mod tests {
         cmdbatch_rx
             .recv_timeout(Duration::from_millis(100))
             .unwrap_err();
-
+        let (block_tx, block_rx) = mpsc::channel::<()>();
+        router.schedule_task(
+            1,
+            Msg::Validate(
+                1,
+                Box::new(move |_| {
+                    // Block the apply worker
+                    block_rx.recv().unwrap();
+                }),
+            ),
+        );
+        let put_entry = EntryBuilder::new(2, 2)
+            .put(b"k0", b"v0")
+            .epoch(1, 3)
+            .build();
+        router.schedule_task(1, Msg::apply(Apply::new(1, 2, vec![put_entry])));
         // Register cmd observer to region 1.
         let enabled = Arc::new(AtomicBool::new(true));
         router.schedule_task(
@@ -3914,12 +3933,16 @@ mod tests {
                 cb: Callback::Read(Box::new(|resp: ReadResponse<_>| {
                     assert!(!resp.response.get_header().has_error());
                     assert!(resp.snapshot.is_some());
+                    let snap = resp.snapshot.unwrap();
+                    assert_eq!(snap.get_value(b"k0").unwrap().unwrap(), b"v0");
                 })),
             }),
         );
-
+        // Unblock the apply worker
+        block_tx.send(()).unwrap();
+        fetch_apply_res(&rx);
         let (capture_tx, capture_rx) = mpsc::channel();
-        let put_entry = EntryBuilder::new(2, 2)
+        let put_entry = EntryBuilder::new(3, 2)
             .put_cf(CF_LOCK, b"k1", b"v1")
             .epoch(1, 3)
             .capture_resp(&router, 3, 1, capture_tx)
@@ -3932,11 +3955,11 @@ mod tests {
         let cmd_batch = cmdbatch_rx.recv_timeout(Duration::from_secs(3)).unwrap();
         assert_eq!(resp, cmd_batch.into_iter(1).next().unwrap().response);
 
-        let put_entry1 = EntryBuilder::new(3, 2)
+        let put_entry1 = EntryBuilder::new(4, 2)
             .put(b"k2", b"v2")
             .epoch(1, 3)
             .build();
-        let put_entry2 = EntryBuilder::new(4, 2)
+        let put_entry2 = EntryBuilder::new(5, 2)
             .put(b"k2", b"v2")
             .epoch(1, 3)
             .build();
@@ -3949,7 +3972,7 @@ mod tests {
 
         // Stop observer regoin 1.
         enabled.store(false, Ordering::SeqCst);
-        let put_entry = EntryBuilder::new(5, 2)
+        let put_entry = EntryBuilder::new(6, 2)
             .put(b"k2", b"v2")
             .epoch(1, 3)
             .build();
