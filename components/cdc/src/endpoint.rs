@@ -617,7 +617,4 @@ mod tests {
 
         worker.stop().unwrap().join().unwrap();
     }
-
-    #[test]
-    fn test_region_ready_after_deregistering() {}
 }
