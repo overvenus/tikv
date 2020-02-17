@@ -4,6 +4,8 @@
 extern crate slog_global;
 #[macro_use]
 extern crate failure;
+#[macro_use(fail_point)]
+extern crate fail;
 
 mod delegate;
 mod endpoint;

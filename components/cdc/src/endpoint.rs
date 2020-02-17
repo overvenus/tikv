@@ -257,8 +257,11 @@ impl Endpoint {
     }
 
     fn on_region_ready(&mut self, region_id: u64, resolver: Resolver, region: Region) {
-        let delegate = self.capture_regions.get_mut(&region_id).unwrap();
-        delegate.on_region_ready(resolver, region);
+        if let Some(delegate) = self.capture_regions.get_mut(&region_id) {
+            delegate.on_region_ready(resolver, region);
+        } else {
+            warn!("region not found on region ready (finish building resolver)"; "region_id" => region_id);
+        }
     }
 
     fn on_min_ts(&mut self, min_ts: TimeStamp) {
@@ -336,6 +339,8 @@ impl Initializer {
             "downstream_id" => ?downstream_id);
 
         // spawn the task to a thread pool.
+        // TODO: Add a cancellation mechanism so that the scanning can be canceled if it doesn't
+        // finish when the region is deregistered.
         let region_id = region.get_id();
         self.workers
             .spawn(lazy(move || {
@@ -344,6 +349,8 @@ impl Initializer {
                 } else {
                     None
                 };
+
+                fail_point!("cdc_incremental_scan_start");
 
                 // Time range: (checkpoint_ts, current]
                 let current = TimeStamp::max();
@@ -610,4 +617,7 @@ mod tests {
 
         worker.stop().unwrap().join().unwrap();
     }
+
+    #[test]
+    fn test_region_ready_after_deregistering() {}
 }

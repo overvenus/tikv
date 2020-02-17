@@ -97,7 +97,7 @@ impl TestSuite {
 
     fn stop(mut self) {
         for (_, mut worker) in self.endpoints {
-            worker.stop().unwrap();
+            worker.stop().unwrap().join().unwrap();
         }
         self.cluster.shutdown();
     }
@@ -494,6 +494,9 @@ fn test_cdc_stale_epoch_after_region_ready() {
     event_feed_wrap.replace(None);
     suite.stop();
 }
+
+#[test]
+fn test_region_ready_after_deregistering() {}
 
 #[test]
 fn test_cdc_scan() {
