@@ -97,7 +97,7 @@ impl TestSuite {
 
     fn stop(mut self) {
         for (_, mut worker) in self.endpoints {
-            worker.stop().unwrap();
+            worker.stop().unwrap().join().unwrap();
         }
         self.cluster.shutdown();
     }
