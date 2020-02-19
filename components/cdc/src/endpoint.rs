@@ -133,7 +133,7 @@ impl Endpoint {
             workers,
             apply_router,
             scan_batch_size: 1024,
-            min_ts_interval: Duration::from_secs(10),
+            min_ts_interval: Duration::from_secs(1),
         };
         ep.register_min_ts_event();
         ep
