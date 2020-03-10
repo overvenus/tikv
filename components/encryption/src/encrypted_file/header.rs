@@ -139,7 +139,7 @@ mod tests {
         let bytes = empty_header.to_bytes();
         let (header1, content1) = Header::parse(&bytes).unwrap();
         assert_eq!(empty_header, header1);
-        assert_eq!(content1, &[])
+        assert_eq!(content1, &[] as &[u8])
     }
 
     // TODO fuzz parse and to_bytes

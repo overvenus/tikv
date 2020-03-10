@@ -1002,6 +1002,8 @@ name = "encryption"
 version = "0.0.1"
 dependencies = [
  "byteorder",
+ "bytes 0.4.12",
+ "configuration",
  "crc32fast",
  "failure",
  "hex 0.3.2",
@@ -1010,6 +1012,12 @@ dependencies = [
  "protobuf 2.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand 0.7.2",
  "rocksdb 0.3.0 (git+https://github.com/tikv/rust-rocksdb.git)",
+ "rusoto_core",
+ "rusoto_credential",
+ "rusoto_kms",
+ "rusoto_mock",
+ "serde",
+ "serde_derive",
  "slog",
  "slog-global",
  "tempfile",
@@ -3470,6 +3478,20 @@ dependencies = [
  "shlex",
  "tokio-process",
  "tokio-timer",
+]
+
+[[package]]
+name = "rusoto_kms"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e4c954709e38b67b380e8eda8bf82fbf75c72569b328c0fd4da3b0ccc5487bd"
+dependencies = [
+ "bytes 0.4.12",
+ "futures 0.1.29",
+ "rusoto_core",
+ "serde",
+ "serde_derive",
+ "serde_json",
 ]
 
 [[package]]
