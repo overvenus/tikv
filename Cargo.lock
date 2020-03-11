@@ -1003,6 +1003,7 @@ version = "0.0.1"
 dependencies = [
  "byteorder",
  "bytes 0.4.12",
+ "clap",
  "configuration",
  "crc32fast",
  "failure",
@@ -1016,6 +1017,7 @@ dependencies = [
  "rusoto_credential",
  "rusoto_kms",
  "rusoto_mock",
+ "rust-ini",
  "serde",
  "serde_derive",
  "slog",
