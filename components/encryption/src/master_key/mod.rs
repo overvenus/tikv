@@ -19,6 +19,7 @@ mod file;
 pub use self::file::FileBackend;
 mod kms;
 pub use self::kms::KmsBackend;
+mod metadata;
 
 #[derive(Default)]
 pub(crate) struct PlainTextBackend {}
