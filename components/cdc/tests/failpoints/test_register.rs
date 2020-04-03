@@ -98,7 +98,7 @@ fn test_region_ready_after_deregister() {
     let (req_tx, event_feed_wrap, receive_event) = new_event_feed(suite.get_region_cdc_client(1));
     let _req_tx = req_tx.send((req, WriteFlags::default())).wait().unwrap();
     // Sleep for a while to make sure the region has been subscribed
-    std::thread::sleep(Duration::from_millis(300));
+    sleep_ms(200);
 
     // Simulate a role change event
     let region = suite.cluster.get_region(&[]);
