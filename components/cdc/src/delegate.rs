@@ -316,9 +316,10 @@ impl Delegate {
 
     pub fn on_batch(&mut self, batch: CmdBatch) -> Result<()> {
         if let Some(pending) = self.pending.as_mut() {
-            pending.cmd_bytes += batch.size();
-            CDC_PENDING_CMD_BYTES_GAUGE.add(batch.size() as i64);
+            let cmd_bytes = batch.size();
             pending.multi_batch.push(batch);
+            pending.cmd_bytes += cmd_bytes;
+            CDC_PENDING_CMD_BYTES_GAUGE.add(cmd_bytes as i64);
             return Ok(());
         }
         // Stale CmdBatch, drop it sliently.
