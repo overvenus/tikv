@@ -366,7 +366,6 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
                 self.fsm.peer.ping();
                 self.fsm.has_ready = true;
             }
-            CasualMessage::CaptureChange { cmd, callback } => self.on_capture_change(cmd, callback),
             CasualMessage::Test(cb) => cb(self.fsm),
         }
     }
@@ -496,7 +495,7 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
     }
 
     fn on_capture_change(&mut self, cmd: ChangeCmd, cb: Callback<RocksEngine>) {
-        if !self.fsm.peer.is_leader() {
+        if !self.fsm.peer.is_leader() || self.fsm.peer.ready_to_handle_read() {
             cb.invoke_with_response(new_error(Error::NotLeader(
                 self.region_id(),
                 self.fsm.peer.get_peer_from_cache(self.fsm.peer.leader_id()),
@@ -540,6 +539,9 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
             }
             SignificantMsg::CatchUpLogs(catch_up_logs) => {
                 self.on_catch_up_logs_for_merge(catch_up_logs);
+            }
+            SignificantMsg::CaptureChange { cmd, callback } => {
+                self.on_capture_change(cmd, callback)
             }
         }
     }

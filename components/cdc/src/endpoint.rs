@@ -10,9 +10,9 @@ use kvproto::cdcpb::*;
 use kvproto::metapb::Region;
 use pd_client::PdClient;
 use raftstore::coprocessor::CmdBatch;
+use raftstore::router::RaftStoreRouter;
 use raftstore::store::fsm::{ChangeCmd, ObserveID};
-use raftstore::store::msg::{Callback, CasualMessage, ReadResponse};
-use raftstore::store::transport::CasualRouter;
+use raftstore::store::msg::{Callback, ReadResponse, SignificantMsg};
 use resolved_ts::Resolver;
 use tikv::storage::kv::Snapshot;
 use tikv::storage::mvcc::{DeltaScanner, ScannerBuilder};
@@ -188,7 +188,7 @@ pub struct Endpoint<T> {
     workers: ThreadPool,
 }
 
-impl<T: CasualRouter<RocksEngine>> Endpoint<T> {
+impl<T: RaftStoreRouter> Endpoint<T> {
     pub fn new(
         pd_client: Arc<dyn PdClient>,
         scheduler: Scheduler<Task>,
@@ -351,9 +351,9 @@ impl<T: CasualRouter<RocksEngine>> Endpoint<T> {
                 region_epoch: request.take_region_epoch(),
             }
         };
-        if let Err(e) = self.raft_router.send(
+        if let Err(e) = self.raft_router.significant_send(
             region_id,
-            CasualMessage::CaptureChange {
+            SignificantMsg::CaptureChange {
                 cmd: change_cmd,
                 callback: Callback::Read(Box::new(move |resp: ReadResponse<_>| {
                     init.on_change_cmd(resp);
@@ -665,7 +665,7 @@ impl Initializer {
     }
 }
 
-impl<T: CasualRouter<RocksEngine>> Runnable<Task> for Endpoint<T> {
+impl<T: RaftStoreRouter> Runnable<Task> for Endpoint<T> {
     fn run(&mut self, task: Task) {
         debug!("run cdc task"; "task" => %task);
         match task {
@@ -836,7 +836,7 @@ mod tests {
     #[test]
     fn test_deregister() {
         let (task_sched, _task_rx) = dummy_scheduler();
-        let (raft_tx, _raft_rx) = sync_channel::<(u64, CasualMessage<RocksEngine>)>(16);
+        let (raft_tx, _raft_rx) = sync_channel::<(u64, SignificantMsg<RocksEngine>)>(16);
         let observer = CdcObserver::new(task_sched.clone());
         let pd_client = Arc::new(TestPdClient::new(0, true));
         let mut ep = Endpoint::new(pd_client, task_sched, raft_tx, observer);

@@ -2381,6 +2381,7 @@ impl Debug for ObserveCmd {
     }
 }
 
+#[derive(Debug)]
 pub enum ChangeCmd {
     RegisterObserver {
         observe_id: ObserveID,
