@@ -441,6 +441,7 @@ impl<T: RaftStoreRouter> Endpoint<T> {
             CDC_MIN_RESOLVED_TS_REGION.set(min_ts_region_id as i64);
             CDC_MIN_RESOLVED_TS.set(min_resolved_ts.physical() as i64);
         }
+        CDC_CAPTURED_REGION_COUNT.set(self.capture_regions.len() as i64);
         self.register_min_ts_event();
     }
 
