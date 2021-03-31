@@ -5,6 +5,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use collections::HashMap;
+use futures::channel::mpsc as future_mpsc;
 use futures::future::{self, TryFutureExt};
 use futures::sink::SinkExt;
 use futures::stream::{self, StreamExt, TryStreamExt};
@@ -17,7 +18,6 @@ use kvproto::cdcpb::{
 };
 use kvproto::kvrpcpb::ExtraOp as TxnExtraOp;
 use protobuf::Message;
-use tikv_util::mpsc::batch::{self, BatchReceiver, Sender as BatchSender, VecCollector};
 use tikv_util::worker::*;
 
 use crate::delegate::{Downstream, DownstreamID};
@@ -42,10 +42,11 @@ impl ConnID {
     }
 }
 
-#[derive(Clone)]
+// #[derive(Clone)]
 pub enum CdcEvent {
     ResolvedTs(ResolvedTs),
     Event(Event),
+    Barrier(Box<dyn FnOnce(()) + Send>),
 }
 
 impl CdcEvent {
@@ -53,12 +54,13 @@ impl CdcEvent {
         match self {
             CdcEvent::ResolvedTs(ref r) => r.compute_size(),
             CdcEvent::Event(ref e) => e.compute_size(),
+            CdcEvent::Barrier(_) => 0,
         }
     }
 
     pub fn event(&self) -> &Event {
         match self {
-            CdcEvent::ResolvedTs(_) => unreachable!(),
+            CdcEvent::ResolvedTs(_) | CdcEvent::Barrier(_) => unreachable!(),
             CdcEvent::Event(ref e) => e,
         }
     }
@@ -66,7 +68,7 @@ impl CdcEvent {
     pub fn resolved_ts(&self) -> &ResolvedTs {
         match self {
             CdcEvent::ResolvedTs(ref r) => r,
-            CdcEvent::Event(_) => unreachable!(),
+            CdcEvent::Event(_) | CdcEvent::Barrier(_) => unreachable!(),
         }
     }
 }
@@ -74,6 +76,10 @@ impl CdcEvent {
 impl fmt::Debug for CdcEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            CdcEvent::Barrier(_) => {
+                let mut d = f.debug_tuple("Barrier");
+                d.finish()
+            }
             CdcEvent::ResolvedTs(ref r) => {
                 let mut d = f.debug_struct("ResolvedTs");
                 d.field("resolved ts", &r.ts);
@@ -138,6 +144,11 @@ impl EventBatcher {
                 // Make sure the next message is not batched with ResolvedTs.
                 self.last_size = CDC_MAX_RESP_SIZE;
             }
+            CdcEvent::Barrier(fun) => {
+                fun(());
+                // Make sure the next message is not batched with ResolvedTs.
+                self.last_size = CDC_MAX_RESP_SIZE;
+            }
         }
     }
 
@@ -156,17 +167,24 @@ bitflags::bitflags! {
 
 pub struct Conn {
     id: ConnID,
-    sink: BatchSender<CdcEvent>,
+    sink: future_mpsc::UnboundedSender<CdcEvent>,
+    bounded_sink: future_mpsc::Sender<CdcEvent>,
     downstreams: HashMap<u64, DownstreamID>,
     peer: String,
     version: Option<(semver::Version, FeatureGate)>,
 }
 
 impl Conn {
-    pub fn new(sink: BatchSender<CdcEvent>, peer: String) -> Conn {
+    // pub fn new(sink: BatchSender<CdcEvent>, peer: String) -> Conn {
+    pub fn new(
+        sink: future_mpsc::UnboundedSender<CdcEvent>,
+        bounded_sink: future_mpsc::Sender<CdcEvent>,
+        peer: String,
+    ) -> Conn {
         Conn {
             id: ConnID::new(),
             sink,
+            bounded_sink,
             downstreams: HashMap::default(),
             version: None,
             peer,
@@ -224,8 +242,12 @@ impl Conn {
         self.downstreams
     }
 
-    pub fn get_sink(&self) -> BatchSender<CdcEvent> {
+    pub fn get_sink(&self) -> future_mpsc::UnboundedSender<CdcEvent> {
         self.sink.clone()
+    }
+
+    pub fn get_scan_sink(&self) -> future_mpsc::Sender<CdcEvent> {
+        self.bounded_sink.clone()
     }
 
     pub fn subscribe(&mut self, region_id: u64, downstream_id: DownstreamID) -> bool {
@@ -246,13 +268,13 @@ impl Conn {
         self.downstreams.get(&region_id).copied()
     }
 
-    pub fn flush(&self) {
-        if !self.sink.is_empty() {
-            if let Some(notifier) = self.sink.get_notifier() {
-                notifier.notify();
-            }
-        }
-    }
+    // pub fn flush(&self) {
+    //     if !self.sink.is_empty() {
+    //         if let Some(notifier) = self.sink.get_notifier() {
+    //             notifier.notify();
+    //         }
+    //     }
+    // }
 }
 
 /// Service implements the `ChangeData` service.
@@ -279,10 +301,10 @@ impl ChangeData for Service {
         stream: RequestStream<ChangeDataRequest>,
         mut sink: DuplexSink<ChangeDataEvent>,
     ) {
-        // TODO: make it a bounded channel.
-        let (tx, rx) = batch::unbounded(CDC_MSG_NOTIFY_COUNT);
+        let (tx, rx) = future_mpsc::unbounded();
+        let (bounded_tx, bounded_rx) = future_mpsc::channel(1024);
         let peer = ctx.peer();
-        let conn = Conn::new(tx, peer);
+        let conn = Conn::new(tx, bounded_tx, peer);
         let conn_id = conn.get_id();
 
         if let Err(status) = self
@@ -336,8 +358,8 @@ impl ChangeData for Service {
             future::ready(ret)
         });
 
-        let rx = BatchReceiver::new(rx, CDC_MSG_MAX_BATCH_SIZE, Vec::new, VecCollector);
-        let mut rx = rx
+        let mut rx = futures::stream::select(bounded_rx, rx)
+            .chunks(CDC_MSG_MAX_BATCH_SIZE)
             .map(|events| {
                 let mut batcher = EventBatcher::with_capacity(CDC_EVENT_MAX_BATCH_SIZE);
                 events.into_iter().for_each(|e| batcher.push(e));

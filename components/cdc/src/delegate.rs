@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use collections::HashMap;
 use crossbeam::atomic::AtomicCell;
+use futures::channel::mpsc::UnboundedSender as BatchSender;
 #[cfg(feature = "prost-codec")]
 use kvproto::cdcpb::{
     event::{
@@ -34,7 +35,6 @@ use raftstore::Error as RaftStoreError;
 use resolved_ts::Resolver;
 use tikv::storage::Statistics;
 use tikv::{server::raftkv::WriteBatchFlags, storage::txn::TxnEntry};
-use tikv_util::mpsc::batch::Sender as BatchSender;
 use tikv_util::time::Instant;
 use txn_types::{Key, Lock, LockType, TimeStamp, WriteRef, WriteType};
 
@@ -43,7 +43,7 @@ use crate::metrics::*;
 use crate::service::{CdcEvent, ConnID};
 use crate::{Error, Result};
 
-const EVENT_MAX_SIZE: usize = 6 * 1024 * 1024; // 6MB
+pub const EVENT_MAX_SIZE: usize = 6 * 1024 * 1024; // 6MB
 static DOWNSTREAM_ID_ALLOC: AtomicUsize = AtomicUsize::new(0);
 
 /// A unique identifier of a Downstream.
@@ -119,16 +119,16 @@ impl Downstream {
             return;
         }
         let sink = self.sink.as_ref().unwrap();
-        if let Err(e) = sink.try_send(CdcEvent::Event(event)) {
-            match e {
-                crossbeam::TrySendError::Disconnected(_) => {
-                    debug!("send event failed, disconnected";
-                        "conn_id" => ?self.conn_id, "downstream_id" => ?self.id);
-                }
-                crossbeam::TrySendError::Full(_) => {
-                    info!("send event failed, full";
-                        "conn_id" => ?self.conn_id, "downstream_id" => ?self.id);
-                }
+        if let Err(e) = sink.unbounded_send(CdcEvent::Event(event)) {
+            if e.is_disconnected() {
+                debug!("send event failed, disconnected";
+                    "conn_id" => ?self.conn_id, "downstream_id" => ?self.id);
+            } else if e.is_full() {
+                info!("send event failed, full";
+                    "conn_id" => ?self.conn_id, "downstream_id" => ?self.id);
+            } else {
+                error!("send event failed, unknown";
+                    "conn_id" => ?self.conn_id, "downstream_id" => ?self.id);
             }
         }
     }
@@ -635,7 +635,7 @@ impl Delegate {
                 }
 
                 let commit_ts = if is_one_pc {
-                    set_event_row_type(&mut row, EventLogType::Committed);
+                    crate::delegate::set_event_row_type(&mut row, EventLogType::Committed);
                     let commit_ts = TimeStamp::from(row.commit_ts);
                     read_old_value(&mut row, commit_ts.prev());
                     Some(commit_ts)
@@ -760,7 +760,7 @@ impl Delegate {
     }
 }
 
-fn set_event_row_type(row: &mut EventRow, ty: EventLogType) {
+pub fn set_event_row_type(row: &mut EventRow, ty: EventLogType) {
     #[cfg(feature = "prost-codec")]
     {
         row.r#type = ty.into();
@@ -783,7 +783,7 @@ fn make_overlapped_rollback(key: Key, row: &mut EventRow) {
 /// Decodes the write record and store its information in `row`. This may be called both when
 /// doing incremental scan of observing apply events. There's different behavior for the two
 /// case, distinguished by the `is_apply` parameter.
-fn decode_write(key: Vec<u8>, value: &[u8], row: &mut EventRow, is_apply: bool) -> bool {
+pub fn decode_write(key: Vec<u8>, value: &[u8], row: &mut EventRow, is_apply: bool) -> bool {
     let key = Key::from_encoded(key);
     let write = WriteRef::parse(value).unwrap().to_owned();
 
@@ -825,7 +825,7 @@ fn decode_write(key: Vec<u8>, value: &[u8], row: &mut EventRow, is_apply: bool) 
     false
 }
 
-fn decode_lock(key: Vec<u8>, lock: Lock, row: &mut EventRow) -> bool {
+pub fn decode_lock(key: Vec<u8>, lock: Lock, row: &mut EventRow) -> bool {
     let op_type = match lock.lock_type {
         LockType::Put => EventRowOpType::Put,
         LockType::Delete => EventRowOpType::Delete,
@@ -850,7 +850,7 @@ fn decode_lock(key: Vec<u8>, lock: Lock, row: &mut EventRow) -> bool {
     false
 }
 
-fn decode_default(value: Vec<u8>, row: &mut EventRow) {
+pub fn decode_default(value: Vec<u8>, row: &mut EventRow) {
     if !value.is_empty() {
         row.value = value.to_vec();
     }

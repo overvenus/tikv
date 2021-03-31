@@ -11,7 +11,9 @@ use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
 use crossbeam::atomic::AtomicCell;
 use engine_rocks::{RocksEngine, RocksSnapshot};
+use futures::channel::mpsc as future_mpsc;
 use futures::compat::Future01CompatExt;
+use futures::SinkExt;
 use grpcio::{ChannelBuilder, Environment};
 #[cfg(feature = "prost-codec")]
 use kvproto::cdcpb::event::Event as Event_oneof_event;
@@ -508,18 +510,21 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> Endpoint<T> {
                 reader.txn_extra_op.store(txn_extra_op);
             }
         }
-        let init = Initializer {
+        let mut init = Initializer {
             sched,
             region_id,
             conn_id,
             downstream_id,
+            request_id: request.get_request_id(),
             scan_batch_size: batch_size,
             downstream_state: downstream_state.clone(),
             txn_extra_op: delegate.txn_extra_op,
-            speed_limter: self.scan_speed_limter.clone(),
             observe_id: delegate.id,
             checkpoint_ts: checkpoint_ts.into(),
             build_resolver: is_new_delegate,
+
+            speed_limter: self.scan_speed_limter.clone(),
+            bounded_sink: conn.get_scan_sink(),
         };
 
         let (cb, fut) = tikv_util::future::paired_future_callback();
@@ -656,16 +661,16 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> Endpoint<T> {
         };
 
         let send_cdc_event = |conn: &Conn, event| {
-            if let Err(e) = conn.get_sink().try_send(event) {
-                match e {
-                    crossbeam::TrySendError::Disconnected(_) => {
-                        debug!("send event failed, disconnected";
-                            "conn_id" => ?conn.get_id(), "downstream" => conn.get_peer());
-                    }
-                    crossbeam::TrySendError::Full(_) => {
-                        info!("send event failed, full";
-                            "conn_id" => ?conn.get_id(), "downstream" => conn.get_peer());
-                    }
+            if let Err(e) = conn.get_sink().unbounded_send(event) {
+                if e.is_disconnected() {
+                    debug!("send event failed, disconnected";
+                        "conn_id" => ?conn.get_id(), "downstream" => conn.get_peer());
+                } else if e.is_full() {
+                    info!("send event failed, full";
+                        "conn_id" => ?conn.get_id(), "downstream" => conn.get_peer());
+                } else {
+                    error!("send event failed, unknown";
+                        "conn_id" => ?conn.get_id(), "downstream" => conn.get_peer(), "error" => ?e);
                 }
             }
         };
@@ -1005,9 +1010,9 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> Endpoint<T> {
         self.connections.insert(conn.get_id(), conn);
     }
 
-    fn flush_all(&self) {
-        self.connections.iter().for_each(|(_, conn)| conn.flush());
-    }
+    // fn flush_all(&self) {
+    //     self.connections.iter().for_each(|(_, conn)| conn.flush());
+    // }
 }
 
 struct Initializer {
@@ -1018,16 +1023,19 @@ struct Initializer {
     downstream_id: DownstreamID,
     downstream_state: Arc<AtomicCell<DownstreamState>>,
     conn_id: ConnID,
+    request_id: u64,
     checkpoint_ts: TimeStamp,
     scan_batch_size: usize,
     txn_extra_op: TxnExtraOp,
+
     speed_limter: Limiter,
+    bounded_sink: future_mpsc::Sender<CdcEvent>,
 
     build_resolver: bool,
 }
 
 impl Initializer {
-    async fn on_change_cmd(&self, mut resp: ReadResponse<RocksSnapshot>) {
+    async fn on_change_cmd(&mut self, mut resp: ReadResponse<RocksSnapshot>) {
         if let Some(region_snapshot) = resp.snapshot {
             assert_eq!(self.region_id, region_snapshot.get_region().get_id());
             let region = region_snapshot.get_region().clone();
@@ -1050,7 +1058,7 @@ impl Initializer {
         }
     }
 
-    async fn async_incremental_scan<S: Snapshot + 'static>(&self, snap: S, region: Region) {
+    async fn async_incremental_scan<S: Snapshot + 'static>(&mut self, snap: S, region: Region) {
         let downstream_id = self.downstream_id;
         let conn_id = self.conn_id;
         let region_id = region.get_id();
@@ -1106,13 +1114,16 @@ impl Initializer {
             }
             debug!("cdc scan entries"; "len" => entries.len(), "region_id" => region_id);
             fail_point!("before_schedule_incremental_scan");
-            let scanned = Task::IncrementalScan {
-                region_id,
-                downstream_id,
-                entries,
-            };
-            if let Err(e) = self.sched.schedule(scanned) {
-                error!("schedule cdc task failed"; "error" => ?e, "region_id" => region_id);
+            if let Err(e) = self.sink_scan_events(entries).await {
+                let deregister = Deregister::Downstream {
+                    region_id,
+                    downstream_id,
+                    conn_id,
+                    err: Some(e),
+                };
+                if let Err(e) = self.sched.schedule(Task::Deregister(deregister)) {
+                    error!("schedule cdc task failed"; "error" => ?e, "region_id" => region_id);
+                }
                 return;
             }
         }
@@ -1164,6 +1175,121 @@ impl Initializer {
         }
 
         Ok(entries)
+    }
+
+    async fn sink_scan_events(&mut self, entries: Vec<Option<TxnEntry>>) -> Result<()> {
+        let entries_len = entries.len();
+        let mut rows = vec![Vec::with_capacity(entries_len)];
+        let mut current_rows_size: usize = 0;
+        let mut done = false;
+        let mut barrier = None;
+        for entry in entries {
+            match entry {
+                Some(TxnEntry::Prewrite {
+                    default,
+                    lock,
+                    old_value,
+                }) => {
+                    let mut row = EventRow::default();
+                    let skip = crate::delegate::decode_lock(
+                        lock.0,
+                        Lock::parse(&lock.1).unwrap(),
+                        &mut row,
+                    );
+                    if skip {
+                        continue;
+                    }
+                    crate::delegate::decode_default(default.1, &mut row);
+                    let row_size = row.key.len() + row.value.len();
+                    if current_rows_size + row_size >= crate::delegate::EVENT_MAX_SIZE {
+                        rows.push(Vec::with_capacity(entries_len));
+                        current_rows_size = 0;
+                    }
+                    current_rows_size += row_size;
+                    row.old_value = old_value.unwrap_or_default();
+                    rows.last_mut().unwrap().push(row);
+                }
+                Some(TxnEntry::Commit {
+                    default,
+                    write,
+                    old_value,
+                }) => {
+                    let mut row = EventRow::default();
+                    let skip = crate::delegate::decode_write(write.0, &write.1, &mut row, false);
+                    if skip {
+                        continue;
+                    }
+                    crate::delegate::decode_default(default.1, &mut row);
+
+                    // This type means the row is self-contained, it has,
+                    //   1. start_ts
+                    //   2. commit_ts
+                    //   3. key
+                    //   4. value
+                    if row.get_type() == EventLogType::Rollback {
+                        // We dont need to send rollbacks to downstream,
+                        // because downstream does not needs rollback to clean
+                        // prewrite as it drops all previous stashed data.
+                        continue;
+                    }
+                    crate::delegate::set_event_row_type(&mut row, EventLogType::Committed);
+                    row.old_value = old_value.unwrap_or_default();
+                    let row_size = row.key.len() + row.value.len();
+                    if current_rows_size + row_size >= crate::delegate::EVENT_MAX_SIZE {
+                        rows.push(Vec::with_capacity(entries_len));
+                        current_rows_size = 0;
+                    }
+                    current_rows_size += row_size;
+                    rows.last_mut().unwrap().push(row);
+                }
+                None => {
+                    let mut row = EventRow::default();
+
+                    // This type means scan has finised.
+                    crate::delegate::set_event_row_type(&mut row, EventLogType::Initialized);
+                    rows.last_mut().unwrap().push(row);
+                    done = true;
+                }
+            }
+        }
+
+        for rs in rows {
+            if !rs.is_empty() {
+                let event_entries = EventEntries {
+                    entries: rs.into(),
+                    ..Default::default()
+                };
+                let mut event = Event {
+                    region_id: self.region_id,
+                    event: Some(Event_oneof_event::Entries(event_entries)),
+                    ..Default::default()
+                };
+                event.set_request_id(self.request_id);
+
+                if let Err(e) = self.bounded_sink.send(CdcEvent::Event(event)).await {
+                    error!("send scan event failed"; "req_id" => ?self.request_id);
+                    return Err(Error::Other(box_err!(e)));
+                }
+            }
+        }
+        if done {
+            let (cb, fut) = tikv_util::future::paired_future_callback();
+            if let Err(e) = self.bounded_sink.send(CdcEvent::Barrier(cb)).await {
+                error!("send scan barrier failed"; "req_id" => ?self.request_id);
+                return Err(Error::Other(box_err!(e)));
+            }
+            barrier = Some(fut);
+        }
+        if let Err(e) = self.bounded_sink.flush().await {
+            error!("flush scan event failed"; "req_id" => ?self.request_id);
+            return Err(Error::Other(box_err!(e)));
+        }
+        if let Some(barrier) = barrier {
+            // Make sure tikv sends out all scan events.
+            let _ = barrier.await;
+        }
+
+        Ok(())
     }
 
     fn finish_building_resolver(&self, mut resolver: Resolver, region: Region, takes: Duration) {
@@ -1241,7 +1367,7 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> Runnable for Endpoint<T> {
                 validate(self.capture_regions.get(&region_id));
             }
         }
-        self.flush_all();
+        // self.flush_all();
     }
 }
 
