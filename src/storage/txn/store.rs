@@ -180,6 +180,27 @@ impl TxnEntry {
             _ => unreachable!(),
         }
     }
+
+    pub fn size(&self) -> usize {
+        let mut size = 0;
+        match self {
+            TxnEntry::Commit { default, write, old_value } => {
+                size += default.0.len();
+                size += default.1.len();
+                size += write.0.len();
+                size += write.1.len();
+                size += old_value.as_ref().map_or(0, |v| v.len())
+            }
+            TxnEntry::Prewrite { default, lock, old_value } => {
+                size += default.0.len();
+                size += default.1.len();
+                size += lock.0.len();
+                size += lock.1.len();
+                size += old_value.as_ref().map_or(0, |v| v.len())
+            }
+        }
+        size
+    }
 }
 
 /// A batch of transaction entries.

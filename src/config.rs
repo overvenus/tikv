@@ -2256,6 +2256,7 @@ pub struct CdcConfig {
     pub min_ts_interval: ReadableDuration,
     pub old_value_cache_size: usize,
     pub hibernate_regions_compatible: bool,
+    pub incremental_scan_speed_limit: ReadableSize,
 }
 
 impl Default for CdcConfig {
@@ -2264,6 +2265,8 @@ impl Default for CdcConfig {
             min_ts_interval: ReadableDuration::secs(1),
             old_value_cache_size: 1024,
             hibernate_regions_compatible: false,
+            // 32MB/s
+            incremental_scan_speed_limit: ReadableSize(32 * MB),
         }
     }
 }

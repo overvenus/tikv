@@ -1,6 +1,7 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::cell::RefCell;
+use std::f64::INFINITY;
 use std::fmt;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -33,7 +34,7 @@ use tikv::storage::txn::TxnEntryScanner;
 use tikv::storage::Statistics;
 use tikv_util::impl_display_as_debug;
 use tikv_util::lru::LruCache;
-use tikv_util::time::Instant;
+use tikv_util::time::{Instant, Limiter};
 use tikv_util::timer::SteadyTimer;
 use tikv_util::worker::{Runnable, RunnableWithTimer, ScheduleError, Scheduler};
 use tokio::runtime::{Builder, Runtime};
@@ -239,7 +240,6 @@ pub struct Endpoint<T> {
     pd_client: Arc<dyn PdClient>,
     timer: SteadyTimer,
     min_ts_interval: Duration,
-    scan_batch_size: usize,
     tso_worker: Runtime,
     store_meta: Arc<Mutex<StoreMeta>>,
     /// The concurrency manager for transactions. It's needed for CDC to check locks when
@@ -247,6 +247,9 @@ pub struct Endpoint<T> {
     concurrency_manager: ConcurrencyManager,
 
     workers: Runtime,
+
+    scan_speed_limter: Limiter,
+    scan_batch_size: usize,
 
     min_resolved_ts: TimeStamp,
     min_ts_region_id: u64,
@@ -283,6 +286,13 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> Endpoint<T> {
             .core_threads(1)
             .build()
             .unwrap();
+        let speed_limter = Limiter::new(if cfg.incremental_scan_speed_limit.0 > 0 {
+            cfg.incremental_scan_speed_limit.0 as f64
+        } else {
+            INFINITY
+        });
+        // For scan efficiency, the min batch_size should be 1MB.
+        let scan_batch_size = 1024 * 1024;
         let ep = Endpoint {
             env,
             security_mgr,
@@ -292,12 +302,13 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> Endpoint<T> {
             pd_client,
             tso_worker,
             timer: SteadyTimer::default(),
+            scan_speed_limter: speed_limter,
+            scan_batch_size,
             workers,
             raft_router,
             observer,
             store_meta,
             concurrency_manager,
-            scan_batch_size: 1024,
             min_ts_interval: cfg.min_ts_interval.0,
             min_resolved_ts: TimeStamp::max(),
             min_ts_region_id: 0,
@@ -502,9 +513,10 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> Endpoint<T> {
             region_id,
             conn_id,
             downstream_id,
-            batch_size,
+            scan_batch_size: batch_size,
             downstream_state: downstream_state.clone(),
             txn_extra_op: delegate.txn_extra_op,
+            speed_limter: self.scan_speed_limter.clone(),
             observe_id: delegate.id,
             checkpoint_ts: checkpoint_ts.into(),
             build_resolver: is_new_delegate,
@@ -548,7 +560,7 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> Endpoint<T> {
         }
         self.workers.spawn(async move {
             match fut.await {
-                Ok(resp) => init.on_change_cmd(resp),
+                Ok(resp) => init.on_change_cmd(resp).await,
                 Err(e) => deregister_downstream(Error::Other(box_err!(e))),
             }
         });
@@ -1007,18 +1019,19 @@ struct Initializer {
     downstream_state: Arc<AtomicCell<DownstreamState>>,
     conn_id: ConnID,
     checkpoint_ts: TimeStamp,
-    batch_size: usize,
+    scan_batch_size: usize,
     txn_extra_op: TxnExtraOp,
+    speed_limter: Limiter,
 
     build_resolver: bool,
 }
 
 impl Initializer {
-    fn on_change_cmd(&self, mut resp: ReadResponse<RocksSnapshot>) {
+    async fn on_change_cmd(&self, mut resp: ReadResponse<RocksSnapshot>) {
         if let Some(region_snapshot) = resp.snapshot {
             assert_eq!(self.region_id, region_snapshot.get_region().get_id());
             let region = region_snapshot.get_region().clone();
-            self.async_incremental_scan(region_snapshot, region);
+            self.async_incremental_scan(region_snapshot, region).await;
         } else {
             assert!(
                 resp.response.get_header().has_error(),
@@ -1037,7 +1050,7 @@ impl Initializer {
         }
     }
 
-    fn async_incremental_scan<S: Snapshot + 'static>(&self, snap: S, region: Region) {
+    async fn async_incremental_scan<S: Snapshot + 'static>(&self, snap: S, region: Region) {
         let downstream_id = self.downstream_id;
         let conn_id = self.conn_id;
         let region_id = region.get_id();
@@ -1070,7 +1083,7 @@ impl Initializer {
                     "observe_id" => ?self.observe_id);
                 return;
             }
-            let entries = match Self::scan_batch(&mut scanner, self.batch_size, resolver.as_mut()) {
+            let entries = match self.scan_batch(&mut scanner, resolver.as_mut()).await {
                 Ok(res) => res,
                 Err(e) => {
                     error!("cdc scan entries failed"; "error" => ?e, "region_id" => region_id);
@@ -1112,15 +1125,20 @@ impl Initializer {
         CDC_SCAN_DURATION_HISTOGRAM.observe(takes.as_secs_f64());
     }
 
-    fn scan_batch<S: Snapshot>(
+    async fn scan_batch<S: Snapshot>(
+        &self,
         scanner: &mut DeltaScanner<S>,
-        batch_size: usize,
         resolver: Option<&mut Resolver>,
     ) -> Result<Vec<Option<TxnEntry>>> {
-        let mut entries = Vec::with_capacity(batch_size);
-        while entries.len() < entries.capacity() {
+        self.speed_limter.consume(self.scan_batch_size).await;
+        // Assume 1KB per entry.
+        let cap = self.scan_batch_size / 1024;
+        let mut entries = Vec::with_capacity(cap);
+        let mut size = 0;
+        while size <= self.scan_batch_size {
             match scanner.next_entry()? {
                 Some(entry) => {
+                    size += entry.size();
                     entries.push(Some(entry));
                 }
                 None => {
@@ -1279,6 +1297,7 @@ mod tests {
     use super::*;
     use collections::HashSet;
     use engine_traits::DATA_CFS;
+    use futures::executor::block_on;
     #[cfg(feature = "prost-codec")]
     use kvproto::cdcpb::event::Event as Event_oneof_event;
     use kvproto::errorpb::Error as ErrorHeader;
@@ -1336,7 +1355,8 @@ mod tests {
             downstream_state,
             conn_id: ConnID::new(),
             checkpoint_ts: 1.into(),
-            batch_size: 1,
+            speed_limter: Limiter::new(INFINITY),
+            scan_batch_size: 1,
             txn_extra_op: TxnExtraOp::Noop,
             build_resolver: true,
         };
@@ -1416,22 +1436,22 @@ mod tests {
             }
         };
 
-        initializer.async_incremental_scan(snap.clone(), region.clone());
+        block_on(initializer.async_incremental_scan(snap.clone(), region.clone()));
         check_result();
-        initializer.batch_size = 1000;
-        initializer.async_incremental_scan(snap.clone(), region.clone());
-        check_result();
-
-        initializer.batch_size = 10;
-        initializer.async_incremental_scan(snap.clone(), region.clone());
+        initializer.scan_batch_size = 1000;
+        block_on(initializer.async_incremental_scan(snap.clone(), region.clone()));
         check_result();
 
-        initializer.batch_size = 11;
-        initializer.async_incremental_scan(snap.clone(), region.clone());
+        initializer.scan_batch_size = 10;
+        block_on(initializer.async_incremental_scan(snap.clone(), region.clone()));
+        check_result();
+
+        initializer.scan_batch_size = 11;
+        block_on(initializer.async_incremental_scan(snap.clone(), region.clone()));
         check_result();
 
         initializer.build_resolver = false;
-        initializer.async_incremental_scan(snap.clone(), region.clone());
+        block_on(initializer.async_incremental_scan(snap.clone(), region.clone()));
 
         loop {
             let task = rx.recv_timeout(Duration::from_secs(1));
@@ -1445,7 +1465,7 @@ mod tests {
 
         // Test cancellation.
         initializer.downstream_state.store(DownstreamState::Stopped);
-        initializer.async_incremental_scan(snap, region);
+        block_on(initializer.async_incremental_scan(snap, region));
 
         loop {
             let task = rx.recv_timeout(Duration::from_secs(1));
