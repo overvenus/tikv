@@ -248,6 +248,10 @@ where
             base: self.map.iter(),
         }
     }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
 }
 
 unsafe impl<K: Send, V: Send> Send for LruCache<K, V> {}
