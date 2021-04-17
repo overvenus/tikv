@@ -449,17 +449,26 @@ impl<S: EngineSnapshot> MvccReader<S> {
     /// `prev_write` stands for the previous write record of the key
     /// it must be read in the caller and be passed in for optimization
     fn get_old_value(&mut self, start_ts: TimeStamp, prev_write: Write) -> Result<OldValue> {
-        if prev_write.may_have_old_value()
-            && prev_write
-                .as_ref()
-                .check_gc_fence_as_latest_version(start_ts)
+        if !prev_write
+            .as_ref()
+            .check_gc_fence_as_latest_version(start_ts)
         {
-            Ok(OldValue::Value {
-                short_value: prev_write.short_value,
-                start_ts: prev_write.start_ts,
-            })
-        } else {
-            Ok(OldValue::None)
+            return Ok(OldValue::None);
+        }
+        match prev_write.write_type {
+            WriteType::Put | WriteType::Delete => {
+                // For Put and Delete, there must be an old value either in its
+                // short value or in the default CF.
+                Ok(OldValue::Value {
+                    short_value: prev_write.short_value,
+                    start_ts: prev_write.start_ts,
+                })
+            }
+            WriteType::Rollback | WriteType::Lock => {
+                // For Rollback and Lock, it's unknown whether there is a more
+                // previous valid write.
+                Ok(OldValue::Unknown)
+            }
         }
     }
 }
@@ -1636,7 +1645,7 @@ pub mod tests {
             },
             // prev_write is Rollback, and there exists a more previous valid write
             Case {
-                expected: OldValue::None,
+                expected: OldValue::Unknown,
 
                 written: vec![
                     (
@@ -1651,7 +1660,7 @@ pub mod tests {
             },
             // prev_write is Rollback, and there isn't a more previous valid write
             Case {
-                expected: OldValue::None,
+                expected: OldValue::Unknown,
 
                 written: vec![(
                     Write::new(WriteType::Rollback, TimeStamp::new(5), None),
@@ -1660,7 +1669,7 @@ pub mod tests {
             },
             // prev_write is Lock, and there exists a more previous valid write
             Case {
-                expected: OldValue::None,
+                expected: OldValue::Unknown,
 
                 written: vec![
                     (
@@ -1675,7 +1684,7 @@ pub mod tests {
             },
             // prev_write is Lock, and there isn't a more previous valid write
             Case {
-                expected: OldValue::None,
+                expected: OldValue::Unknown,
 
                 written: vec![(
                     Write::new(WriteType::Lock, TimeStamp::new(5), None),
