@@ -55,6 +55,11 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
     }
 
     #[inline(always)]
+    pub fn get_write(&mut self, key: &Key, ts: TimeStamp) -> Result<Option<Write>> {
+        self.reader.get_write(key, ts, Some(self.start_ts))
+    }
+
+    #[inline(always)]
     pub fn seek_write(&mut self, key: &Key, ts: TimeStamp) -> Result<Option<(TimeStamp, Write)>> {
         self.reader.seek_write(key, ts)
     }
@@ -65,7 +70,7 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
     }
 
     #[inline(always)]
-    pub fn get_old_value(&mut self, prev_write: Write) -> Result<OldValue> {
+    pub fn get_old_value(&mut self, prev_write: Write) -> OldValue {
         self.reader.get_old_value(self.start_ts, prev_write)
     }
 
@@ -448,26 +453,28 @@ impl<S: EngineSnapshot> MvccReader<S> {
     /// Read the old value for key for CDC.
     /// `prev_write` stands for the previous write record of the key
     /// it must be read in the caller and be passed in for optimization
-    fn get_old_value(&mut self, start_ts: TimeStamp, prev_write: Write) -> Result<OldValue> {
+    fn get_old_value(&mut self, start_ts: TimeStamp, prev_write: Write) -> OldValue {
         if !prev_write
             .as_ref()
             .check_gc_fence_as_latest_version(start_ts)
         {
-            return Ok(OldValue::None);
+            return OldValue::None;
         }
         match prev_write.write_type {
             WriteType::Put | WriteType::Delete => {
                 // For Put and Delete, there must be an old value either in its
                 // short value or in the default CF.
-                Ok(OldValue::Value {
-                    short_value: prev_write.short_value,
-                    start_ts: prev_write.start_ts,
-                })
+                match prev_write.short_value {
+                    Some(value) => OldValue::Value { value },
+                    None => OldValue::ValueTimeStamp {
+                        start_ts: prev_write.start_ts,
+                    },
+                }
             }
             WriteType::Rollback | WriteType::Lock => {
                 // For Rollback and Lock, it's unknown whether there is a more
                 // previous valid write.
-                Ok(OldValue::Unknown)
+                OldValue::Unknown
             }
         }
     }

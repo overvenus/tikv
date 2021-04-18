@@ -1,7 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use super::timestamp::TimeStamp;
-use crate::Write;
 use byteorder::{ByteOrder, NativeEndian};
 use collections::HashMap;
 use kvproto::kvrpcpb;
@@ -323,10 +322,9 @@ impl From<kvrpcpb::Mutation> for Mutation {
 #[derive(Debug, Clone, PartialEq)]
 pub enum OldValue {
     /// A real `OldValue`
-    Value {
-        short_value: Option<Value>,
-        start_ts: TimeStamp,
-    },
+    Value { value: Value },
+    /// A timestamp of an old value in case a value is not inlined in Write
+    ValueTimeStamp { start_ts: TimeStamp },
     /// `None` means we don't found a previous value
     None,
     /// `Unknown` means we don't sure if there is a previous value
@@ -341,18 +339,6 @@ impl Default for OldValue {
     }
 }
 
-impl From<Option<Write>> for OldValue {
-    fn from(write: Option<Write>) -> Self {
-        match write {
-            Some(w) => OldValue::Value {
-                short_value: w.short_value,
-                start_ts: w.start_ts,
-            },
-            None => OldValue::None,
-        }
-    }
-}
-
 impl OldValue {
     pub fn valid(&self) -> bool {
         !matches!(self, OldValue::Unspecified | OldValue::Unknown)
@@ -360,10 +346,7 @@ impl OldValue {
 
     pub fn size(&self) -> usize {
         let value_size = match self {
-            OldValue::Value {
-                short_value: Some(v),
-                ..
-            } => v.len(),
+            OldValue::Value { value } => value.len(),
             _ => 0,
         };
         value_size + std::mem::size_of::<OldValue>()
@@ -374,7 +357,7 @@ impl OldValue {
 // key with current ts -> (short value of the prev txn, start ts of the prev txn).
 // The value of the map will be None when the mutation is `Insert`.
 // MutationType is the type of mutation of the current write.
-pub type OldValues = HashMap<Key, (OldValue, MutationType)>;
+pub type OldValues = HashMap<Key, (OldValue, Option<MutationType>)>;
 
 // Extra data fields filled by kvrpcpb::ExtraOp.
 #[derive(Default, Debug, Clone)]

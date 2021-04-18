@@ -385,4 +385,10 @@ lazy_static! {
     .unwrap();
     pub static ref CHECK_MEM_LOCK_DURATION_HISTOGRAM_VEC: CheckMemLockHistogramVec =
         auto_flush_from!(CHECK_MEM_LOCK_DURATION_HISTOGRAM, CheckMemLockHistogramVec);
+    pub static ref OLD_VALUE_INSERTION: IntCounterVec = register_int_counter_vec!(
+        "tikv_scheduler_old_value_insertion_total",
+        "Counter of scheduler old value cache insertion",
+        &["type"]
+    )
+    .unwrap();
 }

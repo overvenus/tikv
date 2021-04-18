@@ -84,7 +84,7 @@ pub fn prewrite<S: Snapshot>(
             OldValue::Unknown
         } else if let Some(w) = prev_write {
             // The mutation reads and get a previous write.
-            reader.get_old_value(w)?
+            reader.get_old_value(w)
         } else {
             // There is no previous write.
             OldValue::None
@@ -1096,8 +1096,7 @@ pub mod tests {
             (
                 b"k2",
                 OldValue::Value {
-                    short_value: Some(b"v2".to_vec()),
-                    start_ts: 11.into(),
+                    value: b"v2".to_vec(),
                 },
             ),
             (b"k3", OldValue::Unknown),
@@ -1107,8 +1106,7 @@ pub mod tests {
             (
                 b"k6",
                 OldValue::Value {
-                    short_value: Some(b"v6x".to_vec()),
-                    start_ts: 22.into(),
+                    value: b"v6x".to_vec(),
                 },
             ),
             (b"k7", OldValue::Unknown),

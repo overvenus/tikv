@@ -21,6 +21,7 @@ use crate::storage::{
         Error, ErrorInner, Result,
     },
     types::PrewriteResult,
+    metrics::OLD_VALUE_INSERTION,
     Context, Error as StorageError, ProcessResult, Snapshot,
 };
 use engine_traits::CF_WRITE;
@@ -453,7 +454,8 @@ impl<K: PrewriteKind> Prewriter<K> {
                     }
                     if old_value.valid() {
                         let key = key.append_ts(txn.start_ts);
-                        self.old_values.insert(key, (old_value, mutation_type));
+                        self.old_values
+                            .insert(key, (old_value, Some(mutation_type)));
                     }
                 }
                 Err(MvccError(box MvccErrorInner::CommitTsTooLarge { .. })) | Ok((..)) => {
@@ -476,6 +478,15 @@ impl<K: PrewriteKind> Prewriter<K> {
                 }
                 Err(e) => return Err(Error::from(e)),
             }
+        }
+
+        if !self.old_values.is_empty() {
+            let label = if matches!(self.kind.txn_kind(), TransactionKind::Optimistic(_)) {
+                "prewrite"
+            } else {
+                "pessimistic_prewrite"
+            };
+            OLD_VALUE_INSERTION.with_label_values(&[label]).inc_by(self.old_values.len() as i64);
         }
 
         Ok((locks, final_min_commit_ts))

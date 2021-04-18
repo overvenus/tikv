@@ -32,7 +32,7 @@ use tikv::storage::mvcc::{DeltaScanner, ScannerBuilder};
 use tikv::storage::txn::TxnEntry;
 use tikv::storage::txn::TxnEntryScanner;
 use tikv::storage::Statistics;
-use tikv_util::lru::LruCache;
+use tikv_util::lru::{LruCache, LruCacheEntryTracker};
 use tikv_util::time::Instant;
 use tikv_util::timer::SteadyTimer;
 use tikv_util::worker::{Runnable, RunnableWithTimer, ScheduleError, Scheduler};
@@ -105,19 +105,41 @@ type InitCallback = Box<dyn FnOnce() + Send>;
 pub(crate) type OldValueCallback =
     Box<dyn Fn(Key, TimeStamp, &mut OldValueCache) -> (Option<Vec<u8>>, Option<Statistics>) + Send>;
 
+pub struct CacheSize {
+    bytes: isize,
+}
+
+impl LruCacheEntryTracker<Key, (OldValue, Option<MutationType>)> for CacheSize {
+    fn on_insert(&mut self, key: &Key, val: &(OldValue, Option<MutationType>)) {
+        self.bytes += key.as_encoded().len() as isize;
+        self.bytes += val.0.size() as isize;
+        self.bytes += std::mem::size_of::<Option<MutationType>>() as isize;
+    }
+    fn on_remove(&mut self, key: &Key, val: &(OldValue, Option<MutationType>)) {
+        self.bytes -= key.as_encoded().len() as isize;
+        self.bytes -= val.0.size() as isize;
+        self.bytes -= std::mem::size_of::<Option<MutationType>>() as isize;
+    }
+}
 pub struct OldValueCache {
-    pub cache: LruCache<Key, (OldValue, MutationType)>,
-    pub miss_count: usize,
+    pub cache: LruCache<Key, (OldValue, Option<MutationType>), CacheSize>,
     pub access_count: usize,
+    pub miss_count: usize,
+    pub miss_none_count: usize,
 }
 
 impl OldValueCache {
     pub fn new(size: usize) -> OldValueCache {
         OldValueCache {
-            cache: LruCache::with_capacity(size),
-            miss_count: 0,
+            cache: LruCache::with_capacity_and_tracker(size, CacheSize { bytes: 0 }),
             access_count: 0,
+            miss_count: 0,
+            miss_none_count: 0,
         }
+    }
+
+    pub fn size(&self) -> usize {
+        self.cache.entry_tracker().bytes as usize
     }
 }
 
@@ -1542,18 +1564,14 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> RunnableWithTimer for Endpoint<T
         self.min_resolved_ts = TimeStamp::max();
         self.min_ts_region_id = 0;
 
-        let cache_size: usize = self
-            .old_value_cache
-            .cache
-            .iter()
-            .map(|(k, v)| k.as_encoded().len() + v.0.size())
-            .sum();
-        CDC_OLD_VALUE_CACHE_BYTES.set(cache_size as i64);
+        CDC_OLD_VALUE_CACHE_BYTES.set(self.old_value_cache.size() as i64);
         CDC_OLD_VALUE_CACHE_ACCESS.add(self.old_value_cache.access_count as i64);
         CDC_OLD_VALUE_CACHE_MISS.add(self.old_value_cache.miss_count as i64);
+        CDC_OLD_VALUE_CACHE_MISS_NONE.add(self.old_value_cache.miss_none_count as i64);
         CDC_OLD_VALUE_CACHE_LEN.set(self.old_value_cache.cache.len() as i64);
         self.old_value_cache.access_count = 0;
         self.old_value_cache.miss_count = 0;
+        self.old_value_cache.miss_none_count = 0;
     }
 
     fn get_interval(&self) -> Duration {
