@@ -2,6 +2,7 @@
 
 #![feature(box_patterns)]
 
+mod channel;
 mod delegate;
 mod endpoint;
 mod errors;
