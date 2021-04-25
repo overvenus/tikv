@@ -11,7 +11,6 @@ use crossbeam::atomic::AtomicCell;
 use engine_rocks::{RocksEngine, RocksSnapshot};
 use fail::fail_point;
 use futures::compat::Future01CompatExt;
-use futures::SinkExt;
 use grpcio::{ChannelBuilder, Environment};
 #[cfg(feature = "prost-codec")]
 use kvproto::cdcpb::event::Event as Event_oneof_event;
@@ -42,7 +41,7 @@ use txn_types::{
     Key, Lock, LockType, MutationType, OldValue, TimeStamp, TxnExtra, TxnExtraScheduler,
 };
 
-use crate::channel::SendError;
+use crate::channel::{MemoryQuota, SendError};
 use crate::delegate::{Delegate, Downstream, DownstreamID, DownstreamState};
 use crate::metrics::*;
 use crate::service::{CdcEvent, Conn, ConnID, FeatureGate};
@@ -257,6 +256,8 @@ pub struct Endpoint<T> {
     resolved_region_count: usize,
     unresolved_region_count: usize,
 
+    sink_memory_quota: MemoryQuota,
+
     // store_id -> client
     tikv_clients: Arc<Mutex<HashMap<u64, TikvClient>>>,
     env: Arc<Environment>,
@@ -274,6 +275,7 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> Endpoint<T> {
         concurrency_manager: ConcurrencyManager,
         env: Arc<Environment>,
         security_mgr: Arc<SecurityManager>,
+        sink_memory_quota: MemoryQuota,
     ) -> Endpoint<T> {
         let workers = Builder::new()
             .threaded_scheduler()
@@ -287,6 +289,7 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> Endpoint<T> {
             .core_threads(1)
             .build()
             .unwrap();
+        CDC_SINK_CAP.set(sink_memory_quota.cap() as i64);
         CDC_OLD_VALUE_CACHE_CAP.set(cfg.old_value_cache_size as i64);
         let old_value_cache = OldValueCache::new(cfg.old_value_cache_size);
         let speed_limter = Limiter::new(if cfg.incremental_scan_speed_limit.0 > 0 {
@@ -321,6 +324,7 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> Endpoint<T> {
             old_value_cache,
             resolved_region_count: 0,
             unresolved_region_count: 0,
+            sink_memory_quota,
             hibernate_regions_compatible: cfg.hibernate_regions_compatible,
             tikv_clients: Arc::new(Mutex::new(HashMap::default())),
         };
@@ -513,7 +517,7 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> Endpoint<T> {
                 reader.txn_extra_op.store(txn_extra_op);
             }
         }
-        let init = Initializer {
+        let mut init = Initializer {
             sched,
             region_id,
             conn_id,
@@ -659,7 +663,8 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> Endpoint<T> {
                     debug!("cdc send event failed, disconnected";
                         "conn_id" => ?conn.get_id(), "downstream" => ?conn.get_peer());
                 }
-                Err(SendError::Full) => {
+                // TODO handle errors.
+                Err(SendError::Full) | Err(SendError::Congest) => {
                     info!("cdc send event failed, full";
                         "conn_id" => ?conn.get_id(), "downstream" => ?conn.get_peer());
                 }
@@ -1021,7 +1026,7 @@ struct Initializer {
 }
 
 impl Initializer {
-    async fn on_change_cmd(&self, mut resp: ReadResponse<RocksSnapshot>) {
+    async fn on_change_cmd(&mut self, mut resp: ReadResponse<RocksSnapshot>) {
         CDC_SCAN_TASKS.with_label_values(&["total"]).inc();
         if let Some(region_snapshot) = resp.snapshot {
             assert_eq!(self.region_id, region_snapshot.get_region().get_id());
@@ -1053,7 +1058,7 @@ impl Initializer {
     }
 
     async fn async_incremental_scan<S: Snapshot + 'static>(
-        &self,
+        &mut self,
         snap: S,
         region: Region,
         require_barrier: bool,
@@ -1205,29 +1210,20 @@ impl Initializer {
     }
 
     async fn sink_scan_events(
-        &self,
+        &mut self,
         entries: Vec<Option<TxnEntry>>,
         done: bool,
         require_barrier: bool,
     ) -> Result<()> {
         let mut barrier = None;
-        let mut sink = self.sink.bounded_sink();
-        for event in Delegate::convert_to_grpc_events(self.region_id, self.request_id, entries) {
-            if let Err(e) = sink.send(CdcEvent::Event(event)).await {
-                error!("cdc send scan event failed"; "req_id" => ?self.request_id);
-                return Err(Error::Sink(e));
-            }
-        }
+        let mut events = Delegate::convert_to_grpc_events(self.region_id, self.request_id, entries);
         if done {
             let (cb, fut) = tikv_util::future::paired_future_callback();
-            if let Err(e) = sink.send(CdcEvent::Barrier(Some(cb))).await {
-                error!("cdc send scan barrier failed"; "req_id" => ?self.request_id);
-                return Err(Error::Sink(e));
-            }
+            events.push(CdcEvent::Barrier(Some(cb)));
             barrier = Some(fut);
         }
-        if let Err(e) = sink.flush().await {
-            error!("cdc flush scan event failed"; "req_id" => ?self.request_id);
+        if let Err(e) = self.sink.send_all(events).await {
+            error!("cdc send scan event failed"; "req_id" => ?self.request_id);
             return Err(Error::Sink(e));
         }
         if require_barrier {
@@ -1323,6 +1319,7 @@ impl<T: 'static + RaftStoreRouter<RocksEngine>> RunnableWithTimer for Endpoint<T
         self.old_value_cache.access_count = 0;
         self.old_value_cache.miss_count = 0;
         self.old_value_cache.miss_none_count = 0;
+        CDC_SINK_BYTES.set(self.sink_memory_quota.len() as i64);
     }
 
     fn get_interval(&self) -> Duration {
@@ -1405,7 +1402,8 @@ mod tests {
         crate::channel::Drain,
     ) {
         let (receiver_worker, rx) = new_receiver_worker();
-        let (sink, drain) = crate::channel::canal(buffer);
+        let quota = crate::channel::MemoryQuota::new(usize::MAX);
+        let (sink, drain) = crate::channel::canal(buffer, quota);
 
         let pool = Builder::new()
             .threaded_scheduler()
@@ -1458,6 +1456,7 @@ mod tests {
             ConcurrencyManager::new(1.into()),
             env,
             security_mgr,
+            MemoryQuota::new(usize::MAX),
         );
         (ep, raft_router, task_rx)
     }
@@ -1571,7 +1570,8 @@ mod tests {
 
     #[test]
     fn test_raftstore_is_busy() {
-        let (tx, _rx) = channel::canal(1);
+        let quota = crate::channel::MemoryQuota::new(usize::MAX);
+        let (tx, _rx) = channel::canal(1, quota);
         let (mut ep, raft_router, mut task_rx) = mock_endpoint(&CdcConfig::default());
         // Fill the channel.
         let _raft_rx = raft_router.add_region(1 /* region id */, 1 /* cap */);
@@ -1622,7 +1622,8 @@ mod tests {
             ..Default::default()
         });
         let _raft_rx = raft_router.add_region(1 /* region id */, 100 /* cap */);
-        let (tx, rx) = channel::canal(1);
+        let quota = crate::channel::MemoryQuota::new(usize::MAX);
+        let (tx, rx) = channel::canal(1, quota);
         let mut rx = rx.drain();
 
         let conn = Conn::new(tx, String::new());
@@ -1653,7 +1654,7 @@ mod tests {
         let cdc_event = channel::recv_timeout(&mut rx, Duration::from_millis(500))
             .unwrap()
             .unwrap();
-        if let CdcEvent::Event(mut e) = cdc_event {
+        if let CdcEvent::Event(mut e) = cdc_event.0 {
             assert_eq!(e.region_id, 1);
             assert_eq!(e.request_id, 2);
             let event = e.event.take().unwrap();
@@ -1679,7 +1680,7 @@ mod tests {
         let cdc_event = channel::recv_timeout(&mut rx, Duration::from_millis(500))
             .unwrap()
             .unwrap();
-        if let CdcEvent::Event(mut e) = cdc_event {
+        if let CdcEvent::Event(mut e) = cdc_event.0 {
             assert_eq!(e.region_id, 1);
             assert_eq!(e.request_id, 3);
             let event = e.event.take().unwrap();
@@ -1703,7 +1704,8 @@ mod tests {
         });
         let _raft_rx = raft_router.add_region(1 /* region id */, 100 /* cap */);
 
-        let (tx, rx) = channel::canal(1);
+        let quota = crate::channel::MemoryQuota::new(usize::MAX);
+        let (tx, rx) = channel::canal(1, quota);
         let mut rx = rx.drain();
         let mut region = Region::default();
         region.set_id(1);
@@ -1732,7 +1734,7 @@ mod tests {
         let cdc_event = channel::recv_timeout(&mut rx, Duration::from_millis(500))
             .unwrap()
             .unwrap();
-        if let CdcEvent::ResolvedTs(r) = cdc_event {
+        if let CdcEvent::ResolvedTs(r) = cdc_event.0 {
             assert_eq!(r.regions, vec![1]);
             assert_eq!(r.ts, 1);
         } else {
@@ -1759,7 +1761,7 @@ mod tests {
         let cdc_event = channel::recv_timeout(&mut rx, Duration::from_millis(500))
             .unwrap()
             .unwrap();
-        if let CdcEvent::ResolvedTs(mut r) = cdc_event {
+        if let CdcEvent::ResolvedTs(mut r) = cdc_event.0 {
             r.regions.as_mut_slice().sort_unstable();
             assert_eq!(r.regions, vec![1, 2]);
             assert_eq!(r.ts, 2);
@@ -1768,7 +1770,8 @@ mod tests {
         }
 
         // Register region 3 to another conn which is not support batch resolved ts.
-        let (tx, rx2) = channel::canal(1);
+        let quota = crate::channel::MemoryQuota::new(usize::MAX);
+        let (tx, rx2) = channel::canal(1, quota);
         let mut rx2 = rx2.drain();
         let mut region = Region::default();
         region.set_id(3);
@@ -1794,7 +1797,7 @@ mod tests {
         let cdc_event = channel::recv_timeout(&mut rx, Duration::from_millis(500))
             .unwrap()
             .unwrap();
-        if let CdcEvent::ResolvedTs(mut r) = cdc_event {
+        if let CdcEvent::ResolvedTs(mut r) = cdc_event.0 {
             r.regions.as_mut_slice().sort_unstable();
             // Although region 3 is not register in the first conn, batch resolved ts
             // sends all region ids.
@@ -1806,7 +1809,7 @@ mod tests {
         let cdc_event = channel::recv_timeout(&mut rx2, Duration::from_millis(500))
             .unwrap()
             .unwrap();
-        if let CdcEvent::Event(mut e) = cdc_event {
+        if let CdcEvent::Event(mut e) = cdc_event.0 {
             assert_eq!(e.region_id, 3);
             assert_eq!(e.request_id, 3);
             let event = e.event.take().unwrap();
@@ -1825,7 +1828,8 @@ mod tests {
     fn test_deregister() {
         let (mut ep, raft_router, _task_rx) = mock_endpoint(&CdcConfig::default());
         let _raft_rx = raft_router.add_region(1 /* region id */, 100 /* cap */);
-        let (tx, rx) = channel::canal(1);
+        let quota = crate::channel::MemoryQuota::new(usize::MAX);
+        let (tx, rx) = channel::canal(1, quota);
         let mut rx = rx.drain();
 
         let conn = Conn::new(tx, String::new());
@@ -1859,7 +1863,7 @@ mod tests {
             let cdc_event = channel::recv_timeout(&mut rx, Duration::from_millis(500))
                 .unwrap()
                 .unwrap();
-            if let CdcEvent::Event(mut e) = cdc_event {
+            if let CdcEvent::Event(mut e) = cdc_event.0 {
                 let event = e.event.take().unwrap();
                 match event {
                     Event_oneof_event::Error(err) => {
@@ -1903,7 +1907,7 @@ mod tests {
             .unwrap()
             .unwrap();
         loop {
-            if let CdcEvent::Event(mut e) = cdc_event {
+            if let CdcEvent::Event(mut e) = cdc_event.0 {
                 let event = e.event.take().unwrap();
                 match event {
                     Event_oneof_event::Error(err) => {

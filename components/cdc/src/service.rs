@@ -17,7 +17,7 @@ use protobuf::Message;
 use tikv_util::worker::*;
 use tikv_util::{error, info, warn};
 
-use crate::channel::{canal, Sink};
+use crate::channel::{canal, MemoryQuota, Sink};
 use crate::delegate::{Downstream, DownstreamID};
 use crate::endpoint::{Deregister, Task};
 
@@ -256,14 +256,18 @@ impl Conn {
 #[derive(Clone)]
 pub struct Service {
     scheduler: Scheduler<Task>,
+    memory_quota: MemoryQuota,
 }
 
 impl Service {
     /// Create a ChangeData service.
     ///
     /// It requires a scheduler of an `Endpoint` in order to schedule tasks.
-    pub fn new(scheduler: Scheduler<Task>) -> Service {
-        Service { scheduler }
+    pub fn new(scheduler: Scheduler<Task>, memory_quota: MemoryQuota) -> Service {
+        Service {
+            scheduler,
+            memory_quota,
+        }
     }
 }
 
@@ -274,8 +278,9 @@ impl ChangeData for Service {
         stream: RequestStream<ChangeDataRequest>,
         mut sink: DuplexSink<ChangeDataEvent>,
     ) {
-        // TODO explain 1024.
-        let (event_sink, event_drain) = canal(1024);
+        // TODO explain buffer.
+        let buffer = 1024;
+        let (event_sink, event_drain) = canal(buffer, self.memory_quota.clone());
         let peer = ctx.peer();
         let conn = Conn::new(event_sink, peer);
         let conn_id = conn.get_id();
