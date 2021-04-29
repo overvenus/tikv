@@ -1,7 +1,6 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::mem;
-use std::result::Result as StdResult;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -33,7 +32,7 @@ use raftstore::Error as RaftStoreError;
 use resolved_ts::Resolver;
 use tikv::storage::txn::TxnEntry;
 use tikv_util::time::Instant;
-use tikv_util::{debug, info};
+use tikv_util::{debug, info, warn};
 use txn_types::{Key, Lock, LockType, TimeStamp, WriteBatchFlags, WriteRef, WriteType};
 
 use crate::channel::{SendError, Sink};
@@ -109,12 +108,12 @@ impl Downstream {
     }
 
     /// Sink events to the downstream.
-    pub fn sink_event(&self, mut event: Event, force: bool) -> StdResult<(), SendError> {
+    pub fn sink_event(&self, mut event: Event, force: bool) -> Result<()> {
         event.set_request_id(self.req_id);
         if self.sink.is_none() {
             info!("cdc drop event, no sink";
                 "conn_id" => ?self.conn_id, "downstream_id" => ?self.id, "req_id" => self.req_id);
-            return Err(SendError::Disconnected);
+            return Err(Error::Sink(SendError::Disconnected));
         }
         let sink = self.sink.as_ref().unwrap();
         match sink.unbounded_send(CdcEvent::Event(event), force) {
@@ -122,22 +121,18 @@ impl Downstream {
             Err(SendError::Disconnected) => {
                 debug!("cdc send event failed, disconnected";
                     "conn_id" => ?self.conn_id, "downstream_id" => ?self.id, "req_id" => self.req_id);
-                Err(SendError::Disconnected)
+                Err(Error::Sink(SendError::Disconnected))
             }
             // TODO handle errors.
             Err(e @ SendError::Full) | Err(e @ SendError::Congest) => {
                 info!("cdc send event failed, full";
                     "conn_id" => ?self.conn_id, "downstream_id" => ?self.id, "req_id" => self.req_id);
-                Err(e)
+                Err(Error::Sink(e))
             }
         }
     }
 
-    pub fn sink_error_event(
-        &self,
-        region_id: u64,
-        err_event: EventError,
-    ) -> StdResult<(), SendError> {
+    pub fn sink_error_event(&self, region_id: u64, err_event: EventError) -> Result<()> {
         let mut change_data_event = Event::default();
         change_data_event.event = Some(Event_oneof_event::Error(err_event));
         change_data_event.region_id = region_id;
@@ -248,7 +243,12 @@ impl Delegate {
                     "err" => ?e);
                 let err = Error::request(e.into());
                 let error_event = self.error_event(err);
-                downstream.sink_error_event(self.region_id, error_event);
+                if let Err(err) = downstream.sink_error_event(self.region_id, error_event.clone()) {
+                    warn!("cdc send subscribe error failed";
+                        "region_id" => self.region_id, "error" => ?err, "origin_error" => ?error_event,
+                        "downstream_id" => ?downstream.id, "downstream" => ?downstream.peer,
+                        "request_id" => downstream.req_id, "conn_id" => ?downstream.conn_id);
+                }
                 return false;
             }
             self.downstreams.push(downstream);
@@ -280,11 +280,17 @@ impl Delegate {
 
     pub fn unsubscribe(&mut self, id: DownstreamID, err: Option<Error>) -> bool {
         let error_event = err.map(|err| self.error_event(err));
+        let region_id = self.region_id;
         let downstreams = self.downstreams_mut();
         downstreams.retain(|d| {
             if d.id == id {
                 if let Some(error_event) = error_event.clone() {
-                    let _ = d.sink_error_event(self.region_id, error_event);
+                    if let Err(err) = d.sink_error_event(region_id, error_event.clone()) {
+                        warn!("cdc send unsubscribe failed";
+                            "region_id" => region_id, "error" => ?err, "origin_error" => ?error_event,
+                            "downstream_id" => ?d.id, "downstream" => ?d.peer,
+                            "request_id" => d.req_id, "conn_id" => ?d.conn_id);
+                    }
                 }
                 d.state.store(DownstreamState::Stopped);
             }
@@ -334,35 +340,40 @@ impl Delegate {
 
         info!("cdc met region error";
             "region_id" => self.region_id, "error" => ?err);
-        let change_data_err = self.error_event(err);
-        for d in &self.downstreams {
-            d.state.store(DownstreamState::Stopped);
-        }
-        self.broadcast(change_data_err, false);
+        let region_id = self.region_id;
+        let error = self.error_event(err);
+        let send = move |downstream: &Downstream| {
+            downstream.state.store(DownstreamState::Stopped);
+            let error_event = error.clone();
+            if let Err(err) = downstream.sink_error_event(region_id, error_event) {
+                warn!("cdc broadcast error failed";
+                    "region_id" => region_id, "error" => ?err, "origin_error" => ?error,
+                    "downstream_id" => ?downstream.id, "downstream" => ?downstream.peer,
+                    "request_id" => downstream.req_id, "conn_id" => ?downstream.conn_id);
+            }
+            Ok(())
+        };
+
+        // TODO: In case we drop error messages, maybe we need a heartbeat mechanism
+        //       to allow TiCDC detect region status.
+        let _ = self.broadcast(send);
     }
 
-    fn broadcast(&self, change_data_event: Event, normal_only: bool) {
+    fn broadcast<F>(&self, send: F) -> Result<()>
+    where
+        F: Fn(&Downstream) -> Result<()>,
+    {
+        // fn broadcast(&self, change_data_event: Event, normal_only: bool) {
         let downstreams = self.downstreams();
         assert!(
             !downstreams.is_empty(),
-            "region {} miss downstream, event: {:?}",
+            "region {} miss downstream",
             self.region_id,
-            change_data_event,
         );
         for downstream in downstreams {
-            if normal_only && downstream.state.load() != DownstreamState::Normal {
-                continue;
-            }
-            let mut event = change_data_event.clone();
-            if !downstream.enable_old_value && self.txn_extra_op == TxnExtraOp::ReadOldValue {
-                if let Some(Event_oneof_event::Entries(ref mut entries)) = event.event {
-                    for entry in entries.mut_entries().iter_mut() {
-                        entry.mut_old_value().clear();
-                    }
-                }
-            }
-            downstream.sink_event(event, false);
+            send(downstream)?;
         }
+        Ok(())
     }
 
     /// Install a resolver and return pending downstreams.
@@ -419,25 +430,23 @@ impl Delegate {
                 mut request,
                 mut response,
             } = cmd;
-            if !response.get_header().has_error() {
-                if !request.has_admin_request() {
-                    let flags =
-                        WriteBatchFlags::from_bits_truncate(request.get_header().get_flags());
-                    let is_one_pc = flags.contains(WriteBatchFlags::ONE_PC);
-                    self.sink_data(
-                        index,
-                        request.requests.into(),
-                        old_value_cb,
-                        old_value_cache,
-                        is_one_pc,
-                    )?;
-                } else {
-                    self.sink_admin(request.take_admin_request(), response.take_admin_response())?;
-                }
-            } else {
+            if response.get_header().has_error() {
                 let err_header = response.mut_header().take_error();
                 self.mark_failed();
                 return Err(Error::request(err_header));
+            }
+            if !request.has_admin_request() {
+                let flags = WriteBatchFlags::from_bits_truncate(request.get_header().get_flags());
+                let is_one_pc = flags.contains(WriteBatchFlags::ONE_PC);
+                self.sink_data(
+                    index,
+                    request.requests.into(),
+                    old_value_cb,
+                    old_value_cache,
+                    is_one_pc,
+                )?;
+            } else {
+                self.sink_admin(request.take_admin_request(), response.take_admin_response())?;
             }
         }
         Ok(())
@@ -597,8 +606,28 @@ impl Delegate {
             event: Some(Event_oneof_event::Entries(event_entries)),
             ..Default::default()
         };
-        self.broadcast(change_data_event, true);
-        Ok(())
+        let txn_extra_op = self.txn_extra_op;
+        let send = move |downstream: &Downstream| {
+            if downstream.state.load() != DownstreamState::Normal {
+                return Ok(());
+            }
+            let mut event = change_data_event.clone();
+            if !downstream.enable_old_value && txn_extra_op == TxnExtraOp::ReadOldValue {
+                if let Some(Event_oneof_event::Entries(ref mut entries)) = event.event {
+                    for entry in entries.mut_entries().iter_mut() {
+                        entry.mut_old_value().clear();
+                    }
+                }
+            }
+            downstream.sink_event(event, false)
+        };
+        match self.broadcast(send) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.mark_failed();
+                Err(e)
+            }
+        }
     }
 
     fn sink_put(

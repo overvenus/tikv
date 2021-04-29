@@ -50,6 +50,7 @@ impl MemoryQuota {
         self.max_bytes
     }
     fn alloc(&self, bytes: usize) -> bool {
+        // TODO fix leak, it should be a loop of compare exchange.
         if self.total_bytes.load(Ordering::Relaxed) + bytes <= self.max_bytes {
             self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
             true
@@ -353,7 +354,7 @@ mod tests {
         assert!(event.size() != 0);
         // 1KB
         let max_pending_bytes = 1024;
-        let buffer = max_pending_bytes / event.size() + 1;
+        let buffer = max_pending_bytes / event.size();
         let force_send = false;
         let (mut send, _rx) = new_test_cancal(buffer as _, max_pending_bytes as _, force_send);
         for _ in 0..buffer {
