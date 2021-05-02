@@ -12,9 +12,7 @@ use engine_rocks::RocksEngine;
 use futures::future::Future;
 use futures::sink::Sink;
 use futures::stream::Stream;
-use futures03::compat::Compat;
 use futures03::compat::Compat01As03;
-use futures03::future::FutureExt;
 #[cfg(feature = "prost-codec")]
 use kvproto::cdcpb::{
     event::Event as Event_oneof_event, ChangeDataRequest,
@@ -43,7 +41,8 @@ use tikv_util::collections::HashMap;
 use tikv_util::time::{Instant, Limiter};
 use tikv_util::timer::{SteadyTimer, Timer};
 use tikv_util::worker::{Runnable, RunnableWithTimer, ScheduleError, Scheduler};
-use tokio_threadpool::{Builder, ThreadPool};
+use tokio::runtime::{Builder, Runtime};
+use tokio::sync::Semaphore;
 use txn_types::{Key, Lock, LockType, TimeStamp};
 
 use crate::channel::SendError;
@@ -235,10 +234,11 @@ pub struct Endpoint<T> {
     pd_client: Arc<dyn PdClient>,
     timer: SteadyTimer,
     min_ts_interval: Duration,
-    tso_worker: ThreadPool,
+    tso_worker: Runtime,
     store_meta: Arc<Mutex<StoreMeta>>,
 
-    workers: ThreadPool,
+    workers: Runtime,
+    scan_concurrency_semaphore: Arc<Semaphore>,
 
     scan_speed_limter: Limiter,
     max_scan_batch_bytes: usize,
@@ -262,8 +262,19 @@ impl<T: 'static + RaftStoreRouter> Endpoint<T> {
         observer: CdcObserver,
         store_meta: Arc<Mutex<StoreMeta>>,
     ) -> Endpoint<T> {
-        let workers = Builder::new().name_prefix("cdcwkr").pool_size(4).build();
-        let tso_worker = Builder::new().name_prefix("tso").pool_size(1).build();
+        let workers = Builder::new()
+            .threaded_scheduler()
+            .thread_name("cdcwkr")
+            .core_threads(4)
+            .build()
+            .unwrap();
+        let tso_worker = Builder::new()
+            .threaded_scheduler()
+            .thread_name("tso")
+            .core_threads(1)
+            .build()
+            .unwrap();
+        let scan_concurrency_semaphore = Arc::new(Semaphore::new(16));
         let speed_limter = Limiter::new(if cfg.incremental_scan_speed_limit.0 > 0 {
             cfg.incremental_scan_speed_limit.0 as f64
         } else {
@@ -287,6 +298,7 @@ impl<T: 'static + RaftStoreRouter> Endpoint<T> {
             max_scan_batch_bytes,
             max_scan_batch_size,
             workers,
+            scan_concurrency_semaphore,
             raft_router,
             observer,
             store_meta,
@@ -571,16 +583,14 @@ impl<T: 'static + RaftStoreRouter> Endpoint<T> {
             deregister_downstream(Error::Request(e.into()));
             return;
         }
-        self.workers.spawn(Compat::new(
-            async move {
-                match fut.await {
-                    Ok(resp) => init.on_change_cmd(resp).await,
-                    Err(e) => deregister_downstream(Error::Other(box_err!(e))),
-                };
+        let scan_concurrency_semaphore = self.scan_concurrency_semaphore.clone();
+        self.workers.spawn(async move {
+            let _permit = scan_concurrency_semaphore.acquire().await;
+            match fut.await {
+                Ok(resp) => init.on_change_cmd(resp).await,
+                Err(e) => deregister_downstream(Error::Other(box_err!(e))),
             }
-            .unit_error()
-            .boxed(),
-        ));
+        });
     }
 
     pub fn on_multi_batch(&mut self, multi: Vec<CmdBatch>, old_value_cb: OldValueCallback) {
@@ -807,7 +817,7 @@ impl<T: 'static + RaftStoreRouter> Endpoint<T> {
                     }).map_err(|_| ())
             },
         );
-        self.tso_worker.spawn(fut);
+        self.tso_worker.spawn(Compat01As03::new(fut));
     }
 
     fn on_open_conn(&mut self, conn: Conn) {
@@ -1182,7 +1192,7 @@ mod tests {
         buffer: usize,
     ) -> (
         Worker<Task>,
-        ThreadPool,
+        Runtime,
         Initializer,
         Receiver<Task>,
         crate::channel::Drain,
@@ -1191,9 +1201,11 @@ mod tests {
         let (sink, drain) = crate::channel::canal(buffer);
 
         let pool = Builder::new()
-            .name_prefix("test-initializer-worker")
-            .pool_size(4)
-            .build();
+            .threaded_scheduler()
+            .thread_name("test-initializer-worker")
+            .core_threads(1)
+            .build()
+            .unwrap();
         let downstream_state = Arc::new(AtomicCell::new(DownstreamState::Normal));
         let initializer = Initializer {
             sched: receiver_worker.scheduler(),
