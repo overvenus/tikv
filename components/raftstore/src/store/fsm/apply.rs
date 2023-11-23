@@ -17,6 +17,7 @@ use std::{
         mpsc::SyncSender,
         Arc, Mutex,
     },
+    thread,
     time::Duration,
     usize,
     vec::Drain,
@@ -51,6 +52,7 @@ use raft::eraftpb::{
     ConfChange, ConfChangeType, ConfChangeV2, Entry, EntryType, Snapshot as RaftSnapshot,
 };
 use raft_proto::ConfChangeI;
+use rand::Rng;
 use resource_control::{ResourceConsumeType, ResourceController, ResourceMetered};
 use smallvec::{smallvec, SmallVec};
 use sst_importer::SstImporter;
@@ -80,6 +82,7 @@ use crate::{
         ApplyCtxInfo, Cmd, CmdBatch, CmdObserveInfo, CoprocessorHost, ObserveHandle, ObserveLevel,
         RegionState,
     },
+    debug,
     store::{
         cmd_resp,
         entry_storage::{self, CachedEntries},
@@ -1372,6 +1375,14 @@ where
             );
         }
 
+        info!(
+            "applied command";
+            "region_id" => self.region_id(),
+            "peer_id" => self.id(),
+            "index" => index,
+            "req" => ?&req,
+        );
+
         // Set sync log hint if the cmd requires so.
         apply_ctx.sync_log_hint |= should_sync_log(&req);
 
@@ -1380,13 +1391,6 @@ where
         if let ApplyResult::WaitMergeSource(_) = exec_result {
             return exec_result;
         }
-
-        debug!(
-            "applied command";
-            "region_id" => self.region_id(),
-            "peer_id" => self.id(),
-            "index" => index
-        );
 
         // TODO: if we have exec_result, maybe we should return this callback too. Outer
         // store will call it after handing exec result.
@@ -1740,8 +1744,17 @@ where
                 unimplemented!();
             }
         );
+        let n = rand::thread_rng().gen_range(0..9);
+        if n < 3 {
+            thread::sleep(Duration::from_millis(10 * n));
+        }
 
         let requests = req.get_requests();
+        info!(">>> raft applying";
+            "cmd" => debug::format_raft_cmd(req),
+            "idx" => ctx.exec_log_index,
+            "tag" => &self.tag,
+        );
 
         let mut ranges = vec![];
         let mut ssts = vec![];

@@ -2316,12 +2316,6 @@ where
         fail_point!("on_apply_res", |_| {});
         match res {
             ApplyTaskRes::Apply(mut res) => {
-                debug!(
-                    "async apply finish";
-                    "region_id" => self.region_id(),
-                    "peer_id" => self.fsm.peer_id(),
-                    "res" => ?res,
-                );
                 if self.fsm.peer.wait_data {
                     return;
                 }
@@ -2330,6 +2324,13 @@ where
                     return;
                 }
                 let applied_index = res.apply_state.applied_index;
+                info!(
+                    "async apply finish";
+                    "region_id" => self.region_id(),
+                    "peer_id" => self.fsm.peer_id(),
+                    "res" => ?res,
+                    "applied_index from res" => applied_index,
+                );
                 self.fsm
                     .peer
                     .region_buckets_info_mut()
