@@ -79,6 +79,7 @@ use resource_control::ResourceGroupManager;
 use security::SecurityManager;
 use service::{service_event::ServiceEvent, service_manager::GrpcServiceManager};
 use snap_recovery::RecoveryService;
+use sst_importer::{IngestMediator, IngestObserver, Mediator};
 use tikv::{
     config::{
         ConfigController, DbConfigManger, DbType, LogConfigManager, MemoryConfigManager, TikvConfig,
@@ -894,6 +895,8 @@ where
                 .unwrap()
                 .region_read_progress
                 .clone();
+            // TODO: backup_stream may need to write its own observer so that
+            // its resolved ts does not advance until ingested ssts are backed up.
             let leadership_resolver = LeadershipResolver::new(
                 node.id(),
                 self.pd_client.clone(),
@@ -924,37 +927,6 @@ where
         } else {
             None
         };
-
-        let import_path = self.core.store_path.join("import");
-        let mut importer = SstImporter::new(
-            &self.core.config.import,
-            import_path,
-            self.core.encryption_key_manager.clone(),
-            self.core.config.storage.api_version(),
-            false,
-        )
-        .unwrap();
-        for (cf_name, compression_type) in &[
-            (
-                CF_DEFAULT,
-                self.core
-                    .config
-                    .rocksdb
-                    .defaultcf
-                    .bottommost_level_compression,
-            ),
-            (
-                CF_WRITE,
-                self.core
-                    .config
-                    .rocksdb
-                    .writecf
-                    .bottommost_level_compression,
-            ),
-        ] {
-            importer.set_compression_type(cf_name, from_rocks_compression_type(*compression_type));
-        }
-        let importer = Arc::new(importer);
 
         let split_check_runner = SplitCheckRunner::new(
             engines.engines.kv.clone(),
@@ -1000,39 +972,6 @@ where
             .registry
             .register_consistency_check_observer(100, observer);
 
-        node.start(
-            engines.engines.clone(),
-            server.transport(),
-            snap_mgr,
-            pd_worker,
-            engines.store_meta.clone(),
-            self.coprocessor_host.clone().unwrap(),
-            importer.clone(),
-            split_check_scheduler,
-            auto_split_controller,
-            self.concurrency_manager.clone(),
-            collector_reg_handle,
-            self.causal_ts_provider.clone(),
-            self.grpc_service_mgr.clone(),
-            safe_point.clone(),
-        )
-        .unwrap_or_else(|e| fatal!("failed to start node: {}", e));
-
-        // Start auto gc. Must after `Node::start` because `node_id` is initialized
-        // there.
-        assert!(node.id() > 0); // Node id should never be 0.
-        let auto_gc_config = AutoGcConfig::new(
-            self.pd_client.clone(),
-            self.region_info_accessor.clone(),
-            node.id(),
-        );
-        gc_worker
-            .start(node.id())
-            .unwrap_or_else(|e| fatal!("failed to start gc worker: {}", e));
-        if let Err(e) = gc_worker.start_auto_gc(auto_gc_config, safe_point) {
-            fatal!("failed to start auto_gc on storage, error: {}", e);
-        }
-
         initial_metric(&self.core.config.metric);
         if self.core.config.storage.enable_ttl {
             ttl_checker.start_with_timer(TtlChecker::new(
@@ -1069,6 +1008,8 @@ where
 
         // Start resolved ts
         if let Some(mut rts_worker) = rts_worker {
+            // Do not let sst ingest block resolved ts in production.
+            let ingest_observer = None;
             let rts_endpoint = resolved_ts::Endpoint::new(
                 &self.core.config.resolved_ts,
                 rts_worker.scheduler(),
@@ -1078,12 +1019,82 @@ where
                 self.concurrency_manager.clone(),
                 server.env(),
                 self.security_mgr.clone(),
+                ingest_observer,
             );
             self.resolved_ts_scheduler = Some(rts_worker.scheduler());
             rts_worker.start_with_timer(rts_endpoint);
             self.core.to_stop.push(rts_worker);
         }
 
+        // Start SST importer.
+        let ingest_observer = Arc::new(IngestObserver::default());
+        let mut ingest_mediator = IngestMediator::default();
+        ingest_mediator.register(ingest_observer.clone());
+        let import_path = self.core.store_path.join("import");
+        let mut importer = SstImporter::new(
+            &self.core.config.import,
+            import_path,
+            self.core.encryption_key_manager.clone(),
+            self.core.config.storage.api_version(),
+            false,
+            Arc::new(ingest_mediator),
+            ingest_observer,
+        )
+        .unwrap();
+        for (cf_name, compression_type) in &[
+            (
+                CF_DEFAULT,
+                self.core
+                    .config
+                    .rocksdb
+                    .defaultcf
+                    .bottommost_level_compression,
+            ),
+            (
+                CF_WRITE,
+                self.core
+                    .config
+                    .rocksdb
+                    .writecf
+                    .bottommost_level_compression,
+            ),
+        ] {
+            importer.set_compression_type(cf_name, from_rocks_compression_type(*compression_type));
+        }
+        let importer = Arc::new(importer);
+
+        node.start(
+            engines.engines.clone(),
+            server.transport(),
+            snap_mgr,
+            pd_worker,
+            engines.store_meta.clone(),
+            self.coprocessor_host.clone().unwrap(),
+            importer.clone(),
+            split_check_scheduler,
+            auto_split_controller,
+            self.concurrency_manager.clone(),
+            collector_reg_handle,
+            self.causal_ts_provider.clone(),
+            self.grpc_service_mgr.clone(),
+            safe_point.clone(),
+        )
+        .unwrap_or_else(|e| fatal!("failed to start node: {}", e));
+
+        // Start auto gc. Must after `Node::start` because `node_id` is initialized
+        // there.
+        assert!(node.id() > 0); // Node id should never be 0.
+        let auto_gc_config = AutoGcConfig::new(
+            self.pd_client.clone(),
+            self.region_info_accessor.clone(),
+            node.id(),
+        );
+        gc_worker
+            .start(node.id())
+            .unwrap_or_else(|e| fatal!("failed to start gc worker: {}", e));
+        if let Err(e) = gc_worker.start_auto_gc(auto_gc_config, safe_point) {
+            fatal!("failed to start auto_gc on storage, error: {}", e);
+        }
         cfg_controller.register(
             tikv::config::Module::Raftstore,
             Box::new(RaftstoreConfigManager::new(

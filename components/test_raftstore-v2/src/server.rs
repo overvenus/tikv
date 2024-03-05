@@ -46,6 +46,7 @@ use resource_metering::{CollectorRegHandle, ResourceTagFactory};
 use security::SecurityManager;
 use service::service_manager::GrpcServiceManager;
 use slog_global::debug;
+use sst_importer::{IngestMediator, IngestObserver, Mediator};
 use tempfile::TempDir;
 use test_pd_client::TestPdClient;
 use test_raftstore::{filter_send, AddressMap, Config, Filter};
@@ -457,6 +458,7 @@ impl<EK: KvEngine> ServerCluster<EK> {
         );
         gc_worker.start(node_id).unwrap();
 
+        let mut ingest_mediator = IngestMediator::default();
         let rts_worker = if cfg.resolved_ts.enable {
             // Resolved ts worker
             let mut rts_worker = LazyWorker::new("resolved-ts");
@@ -465,6 +467,8 @@ impl<EK: KvEngine> ServerCluster<EK> {
             // resolved ts endpoint needs store id.
             store_meta.lock().unwrap().store_id = node_id;
             // Resolved ts endpoint
+            let ingest_observer = Arc::new(IngestObserver::default());
+            ingest_mediator.register(ingest_observer.clone());
             let rts_endpoint = resolved_ts::Endpoint::new(
                 &cfg.resolved_ts,
                 rts_worker.scheduler(),
@@ -474,6 +478,7 @@ impl<EK: KvEngine> ServerCluster<EK> {
                 concurrency_manager.clone(),
                 self.env.clone(),
                 self.security_mgr.clone(),
+                Some(ingest_observer),
             );
             // Start the worker
             rts_worker.start(rts_endpoint);
@@ -542,6 +547,9 @@ impl<EK: KvEngine> ServerCluster<EK> {
 
         // Create import service.
         let importer = {
+            let mut ingest_mediator = IngestMediator::default();
+            let ingest_observer = Arc::new(IngestObserver::default());
+            ingest_mediator.register(ingest_observer.clone());
             let dir = Path::new(raft_engine.get_engine_path()).join("../import-sst");
             Arc::new(
                 SstImporter::new(
@@ -550,6 +558,8 @@ impl<EK: KvEngine> ServerCluster<EK> {
                     key_manager.clone(),
                     cfg.storage.api_version(),
                     true,
+                    Arc::new(ingest_mediator),
+                    ingest_observer,
                 )
                 .unwrap(),
             )

@@ -64,6 +64,7 @@ resolved_ts = { workspace = true }
 security = { path = "../security" }
 slog = { workspace = true }
 slog-global = { workspace = true }
+sst_importer = { workspace = true }
 thiserror = "1"
 tidb_query_datatype = { workspace = true }
 tikv = { workspace = true }

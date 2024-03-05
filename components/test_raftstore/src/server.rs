@@ -46,6 +46,7 @@ use resource_control::ResourceGroupManager;
 use resource_metering::{CollectorRegHandle, ResourceTagFactory};
 use security::SecurityManager;
 use service::service_manager::GrpcServiceManager;
+use sst_importer::{IngestMediator, IngestObserver, Mediator};
 use tempfile::TempDir;
 use test_pd_client::TestPdClient;
 use tikv::{
@@ -77,7 +78,7 @@ use tikv_util::{
     quota_limiter::QuotaLimiter,
     sys::thread::ThreadBuildWrapper,
     time::ThreadReadId,
-    worker::{Builder as WorkerBuilder, LazyWorker},
+    worker::{Builder as WorkerBuilder, LazyWorker, Scheduler},
     HandyRwLock,
 };
 use tokio::runtime::Builder as TokioBuilder;
@@ -344,6 +345,7 @@ impl<EK: KvEngineWithRocks> ServerCluster<EK> {
         );
         gc_worker.start(node_id).unwrap();
 
+        let mut ingest_mediator = IngestMediator::default();
         let rts_worker = if cfg.resolved_ts.enable {
             // Resolved ts worker
             let mut rts_worker = LazyWorker::new("resolved-ts");
@@ -351,6 +353,9 @@ impl<EK: KvEngineWithRocks> ServerCluster<EK> {
             rts_ob.register_to(&mut coprocessor_host);
             // resolved ts endpoint needs store id.
             store_meta.lock().unwrap().store_id = Some(node_id);
+            // Setup ingest observer.
+            let ingest_observer = Arc::new(IngestObserver::default());
+            ingest_mediator.register(ingest_observer.clone());
             // Resolved ts endpoint
             let rts_endpoint = resolved_ts::Endpoint::new(
                 &cfg.resolved_ts,
@@ -361,6 +366,7 @@ impl<EK: KvEngineWithRocks> ServerCluster<EK> {
                 concurrency_manager.clone(),
                 self.env.clone(),
                 self.security_mgr.clone(),
+                Some(ingest_observer),
             );
             // Start the worker
             rts_worker.start(rts_endpoint);
@@ -428,6 +434,8 @@ impl<EK: KvEngineWithRocks> ServerCluster<EK> {
 
         // Create import service.
         let importer = {
+            let ingest_observer = Arc::new(IngestObserver::default());
+            ingest_mediator.register(ingest_observer.clone());
             let dir = Path::new(engines.kv.path()).join("import-sst");
             Arc::new(
                 SstImporter::new(
@@ -436,6 +444,8 @@ impl<EK: KvEngineWithRocks> ServerCluster<EK> {
                     key_manager.clone(),
                     cfg.storage.api_version(),
                     false,
+                    Arc::new(ingest_mediator),
+                    ingest_observer,
                 )
                 .unwrap(),
             )
@@ -662,6 +672,12 @@ impl<EK: KvEngineWithRocks> ServerCluster<EK> {
         let client = RaftClient::new(node_id, self.conn_builder.clone());
         self.raft_clients.insert(node_id, client);
         Ok(node_id)
+    }
+
+    pub fn get_resolved_ts_scheduler(&self, store_id: u64) -> Option<Scheduler<resolved_ts::Task>> {
+        let meta = self.metas.get(&store_id)?;
+        let w = meta.rts_worker.as_ref()?;
+        Some(w.scheduler())
     }
 }
 

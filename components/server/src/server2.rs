@@ -71,6 +71,7 @@ use resolved_ts::Task;
 use resource_control::ResourceGroupManager;
 use security::SecurityManager;
 use service::{service_event::ServiceEvent, service_manager::GrpcServiceManager};
+use sst_importer::{IngestMediator, IngestObserver, Mediator};
 use tikv::{
     config::{
         loop_registry, ConfigController, ConfigurableDb, DbConfigManger, DbType, LogConfigManager,
@@ -680,6 +681,8 @@ where
                     rts_worker.scheduler(),
                 )),
             );
+            // Do not let sst ingest block resolved ts in production.
+            let ingest_observer = None;
             let rts_endpoint = resolved_ts::Endpoint::new(
                 &self.core.config.resolved_ts,
                 rts_worker.scheduler(),
@@ -689,6 +692,7 @@ where
                 self.concurrency_manager.clone(),
                 self.env.clone(),
                 self.security_mgr.clone(),
+                ingest_observer,
             );
             self.resolved_ts_scheduler = Some(rts_worker.scheduler());
             rts_worker.start_with_timer(rts_endpoint);
@@ -734,6 +738,43 @@ where
         } else {
             None
         };
+
+        // Start SST importer.
+        let ingest_observer = Arc::new(IngestObserver::default());
+        let mut ingest_mediator = IngestMediator::default();
+        ingest_mediator.register(ingest_observer.clone());
+        let import_path = self.core.store_path.join("import");
+        let mut importer = SstImporter::new(
+            &self.core.config.import,
+            import_path,
+            self.core.encryption_key_manager.clone(),
+            self.core.config.storage.api_version(),
+            true,
+            Arc::new(ingest_mediator),
+            ingest_observer,
+        )
+        .unwrap();
+        for (cf_name, compression_type) in &[
+            (
+                CF_DEFAULT,
+                self.core
+                    .config
+                    .rocksdb
+                    .defaultcf
+                    .bottommost_level_compression,
+            ),
+            (
+                CF_WRITE,
+                self.core
+                    .config
+                    .rocksdb
+                    .writecf
+                    .bottommost_level_compression,
+            ),
+        ] {
+            importer.set_compression_type(cf_name, from_rocks_compression_type(*compression_type));
+        }
+        let importer = Arc::new(importer);
 
         let server_config = Arc::new(VersionTrack::new(self.core.config.server.clone()));
 
@@ -788,37 +829,6 @@ where
                 server.get_grpc_mem_quota().clone(),
             )),
         );
-
-        let import_path = self.core.store_path.join("import");
-        let mut importer = SstImporter::new(
-            &self.core.config.import,
-            import_path,
-            self.core.encryption_key_manager.clone(),
-            self.core.config.storage.api_version(),
-            true,
-        )
-        .unwrap();
-        for (cf_name, compression_type) in &[
-            (
-                CF_DEFAULT,
-                self.core
-                    .config
-                    .rocksdb
-                    .defaultcf
-                    .bottommost_level_compression,
-            ),
-            (
-                CF_WRITE,
-                self.core
-                    .config
-                    .rocksdb
-                    .writecf
-                    .bottommost_level_compression,
-            ),
-        ] {
-            importer.set_compression_type(cf_name, from_rocks_compression_type(*compression_type));
-        }
-        let importer = Arc::new(importer);
 
         // V2 starts split-check worker within raftstore.
 

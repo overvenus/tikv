@@ -1,7 +1,9 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod test_sst_lease;
 #[path = "../mod.rs"]
 mod testsuite;
+
 use std::{sync::mpsc::channel, time::Duration};
 
 use futures::executor::block_on;
@@ -69,10 +71,15 @@ fn test_resolved_ts_basic() {
     meta.set_region_id(r1.id);
     meta.set_region_epoch(sst_epoch);
 
-    suite.upload_sst(r1.id, &meta, &data).unwrap();
+    let import = suite.get_import_client(r1.id);
+    must_acquire_sst_lease(import, &meta, Duration::MAX);
+    let resp = send_upload_sst(import, &meta, &data).unwrap();
+    assert!(!resp.has_error(), "{:?}", resp);
 
     let tracked_index_before = suite.region_tracked_index(r1.id);
-    suite.must_ingest_sst(r1.id, meta);
+    let ctx = suite.get_context(r1.id);
+    let import = suite.get_import_client(r1.id);
+    must_ingest_sst(import, ctx, meta);
     let mut tracked_index_after = suite.region_tracked_index(r1.id);
     for _ in 0..10 {
         if tracked_index_after > tracked_index_before {

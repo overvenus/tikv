@@ -30,6 +30,7 @@ use raftstore::{
     store::{msg::Callback, util::RegionReadProgressRegistry},
 };
 use security::SecurityManager;
+use sst_importer::Observer;
 use tikv_util::{
     info,
     sys::thread::ThreadBuildWrapper,
@@ -49,11 +50,12 @@ pub(crate) const DEFAULT_CHECK_LEADER_TIMEOUT_DURATION: Duration = Duration::fro
 const DEFAULT_GRPC_GZIP_COMPRESSION_LEVEL: usize = 2;
 const DEFAULT_GRPC_MIN_MESSAGE_SIZE_TO_COMPRESS: usize = 4096;
 
-pub struct AdvanceTsWorker {
+pub(crate) struct AdvanceTsWorker {
     pd_client: Arc<dyn PdClient>,
     timer: SteadyTimer,
     worker: Runtime,
     scheduler: Scheduler<Task>,
+    ingest_observer: Option<Arc<dyn Observer>>,
     /// The concurrency manager for transactions. It's needed for CDC to check
     /// locks when calculating resolved_ts.
     pub(crate) concurrency_manager: ConcurrencyManager,
@@ -67,6 +69,7 @@ impl AdvanceTsWorker {
         pd_client: Arc<dyn PdClient>,
         scheduler: Scheduler<Task>,
         concurrency_manager: ConcurrencyManager,
+        ingest_observer: Option<Arc<dyn Observer>>,
     ) -> Self {
         let worker = Builder::new_multi_thread()
             .thread_name("advance-ts")
@@ -80,6 +83,7 @@ impl AdvanceTsWorker {
             pd_client,
             worker,
             timer: SteadyTimer::default(),
+            ingest_observer,
             concurrency_manager,
             last_pd_tso: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -95,6 +99,7 @@ impl AdvanceTsWorker {
         advance_ts_interval: Duration,
         advance_notify: Arc<Notify>,
     ) {
+        let ingest_observer = self.ingest_observer.clone();
         let cm = self.concurrency_manager.clone();
         let pd_client = self.pd_client.clone();
         let scheduler = self.scheduler.clone();
@@ -125,7 +130,23 @@ impl AdvanceTsWorker {
                 }
             }
 
-            let regions = leader_resolver.resolve(regions, min_ts).await;
+            let mut regions = leader_resolver.resolve(regions, min_ts).await;
+
+            // Skip regions those are currently ingesting SSTs.
+            if let Some(observer) = ingest_observer {
+                regions.retain(|region_id| {
+                    if let Some(uuid) = observer.get_region_lease(*region_id) {
+                        info!("skip advancing resolved ts due to ingest sst";
+                            "region_id" => region_id,
+                            "lease_uuid" => ?uuid,
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+
             if !regions.is_empty() {
                 if let Err(e) = scheduler.schedule(Task::ResolvedTsAdvanced {
                     regions,
