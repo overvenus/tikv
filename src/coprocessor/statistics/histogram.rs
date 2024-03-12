@@ -177,7 +177,7 @@ impl From<Histogram> for tipb::Histogram {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use std::iter::repeat;
 

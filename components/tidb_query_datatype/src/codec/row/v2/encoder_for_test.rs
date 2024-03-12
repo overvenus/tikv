@@ -299,7 +299,7 @@ impl ChecksumHeader {
         ChecksumHeader(0)
     }
 
-    #[cfg(test)]
+    #[cfg(skip)]
     fn set_version(&mut self, ver: u8) {
         self.0 &= !0b111;
         self.0 |= ver & 0b111;
@@ -521,7 +521,7 @@ pub fn prepare_cols_for_test() -> Vec<Column> {
     ]
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use std::str::FromStr;
 

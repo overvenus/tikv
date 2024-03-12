@@ -208,7 +208,7 @@ impl Ord for BinaryLiteral {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::*;
 

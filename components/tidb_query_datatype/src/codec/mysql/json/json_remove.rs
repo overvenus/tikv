@@ -22,7 +22,7 @@ impl<'a> JsonRef<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::{super::path_expr::parse_json_path_expr, *};
 

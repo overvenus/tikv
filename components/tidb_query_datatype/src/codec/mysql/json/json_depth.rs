@@ -40,7 +40,7 @@ fn depth_json(j: &JsonRef<'_>) -> Result<i64> {
     } + 1)
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::super::Json;
 

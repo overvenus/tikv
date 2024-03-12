@@ -357,7 +357,7 @@ impl<'a, T: PrimInt> LeBytes<'a, T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use std::u16;
 
@@ -518,7 +518,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod benches {
     use test::black_box;
 

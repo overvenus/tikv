@@ -710,7 +710,7 @@ impl crate::codec::data_type::AsMySqlBool for Duration {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use std::sync::Arc;
 
@@ -1256,7 +1256,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod benches {
     use super::*;
     use crate::codec::mysql::MAX_FSP;

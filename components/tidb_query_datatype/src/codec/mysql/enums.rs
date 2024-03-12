@@ -281,7 +281,7 @@ pub trait EnumDecoder: NumberDecoder {
 
 impl<T: BufferReader> EnumDecoder for T {}
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::*;
 

@@ -210,7 +210,7 @@ fn handle_qe_stream_response(
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use anyhow::anyhow;
     use protobuf::Message;

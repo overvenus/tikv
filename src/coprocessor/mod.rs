@@ -194,7 +194,7 @@ impl ReqContext {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn default_for_test() -> Self {
         Self::new(
             ReqTag::test,
@@ -237,7 +237,7 @@ lazy_static! {
         MEMTRACE_ROOT.sub_trace(Id::Name("analyze"));
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::*;
 

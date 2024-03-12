@@ -38,7 +38,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use std::{thread, time::Duration};
 

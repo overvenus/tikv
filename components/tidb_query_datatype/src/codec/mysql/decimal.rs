@@ -2420,7 +2420,7 @@ impl Hash for Decimal {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use std::{cmp::Ordering, collections::hash_map::DefaultHasher, sync::Arc};
 

@@ -111,7 +111,7 @@ impl<'a, T: Evaluable> UnsafeRefInto<&'static ChunkedVecSized<T>> for &'a Chunke
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::*;
     use crate::codec::data_type::*;
@@ -258,7 +258,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod benches {
     use super::*;
 

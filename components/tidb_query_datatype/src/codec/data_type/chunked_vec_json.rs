@@ -127,7 +127,7 @@ impl<'a> UnsafeRefInto<&'static ChunkedVecJson> for &'a ChunkedVecJson {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::*;
 

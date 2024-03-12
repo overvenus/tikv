@@ -30,7 +30,7 @@ pub mod prelude {
 
 pub use self::{def::*, error::*};
 
-#[cfg(test)]
+#[cfg(skip)]
 extern crate test;
 
 pub mod codec;

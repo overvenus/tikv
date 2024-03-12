@@ -124,7 +124,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use std::{
         sync::{

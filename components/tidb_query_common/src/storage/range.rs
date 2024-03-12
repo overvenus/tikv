@@ -13,9 +13,9 @@ pub enum Range {
 impl Range {
     pub fn from_pb_range(mut range: KeyRange, accept_point_range: bool) -> Self {
         if accept_point_range && crate::util::is_point(&range) {
-            Range::Point(PointRange(range.take_start()))
+            Range::Point(PointRange((&*range.take_start()).to_owned()))
         } else {
-            Range::Interval(IntervalRange::from((range.take_start(), range.take_end())))
+            Range::Interval(IntervalRange::from(((&*range.take_start()).to_owned(), (&*range.take_end()).to_owned())))
         }
     }
 }

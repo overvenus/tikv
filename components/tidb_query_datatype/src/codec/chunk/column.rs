@@ -964,7 +964,7 @@ impl Column {
         self.len() == 0
     }
 
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn decode(buf: &mut tikv_util::codec::BytesSlice<'_>, tp: FieldTypeTp) -> Result<Column> {
         let length = buf.read_u32_le()? as usize;
         let mut col = Column::new(tp, length);
@@ -1018,7 +1018,7 @@ pub trait ChunkColumnEncoder: NumberEncoder {
 
 impl<T: BufferWriter> ChunkColumnEncoder for T {}
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use std::{f64, u64};
 

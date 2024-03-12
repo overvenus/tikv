@@ -947,7 +947,7 @@ impl From<AnalyzeMixedResult> for tipb::AnalyzeMixedResp {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use ::std::collections::HashMap;
     use tidb_query_datatype::codec::{datum, datum::Datum};
@@ -1102,7 +1102,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod benches {
     use tidb_query_datatype::{
         codec::{

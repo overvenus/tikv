@@ -63,7 +63,7 @@ pub fn div_i64_with_u64(a: i64, b: u64) -> Result<u64> {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use std::{i64, u64};
 

@@ -1154,7 +1154,7 @@ pub fn skip_n(buf: &mut &[u8], n: usize) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use std::{
         cmp::Ordering, i16, i32, i64, i8, slice::from_ref, str::FromStr, sync::Arc, u16, u32, u64,

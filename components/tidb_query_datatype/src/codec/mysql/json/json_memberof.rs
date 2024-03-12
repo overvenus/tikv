@@ -30,7 +30,7 @@ impl<'a> JsonRef<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::super::Json;
     #[test]

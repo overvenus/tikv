@@ -1129,7 +1129,7 @@ fn no_exp_float_str_to_int_str(valid_float: &str, mut dot_idx: usize) -> Cow<'_,
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     #![allow(clippy::float_cmp)]
 

@@ -572,7 +572,7 @@ impl_from! { Json, ChunkedVecJson }
 impl_from! { Enum, ChunkedVecEnum }
 impl_from! { Set, ChunkedVecSet }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::*;
 

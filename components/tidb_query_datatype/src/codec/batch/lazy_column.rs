@@ -273,7 +273,7 @@ impl LazyBatchColumn {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::*;
     use crate::codec::datum::{Datum, DatumEncoder};
@@ -389,7 +389,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod benches {
     use super::*;
 

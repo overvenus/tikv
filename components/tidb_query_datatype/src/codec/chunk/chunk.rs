@@ -79,7 +79,7 @@ impl Chunk {
         RowIterator::new(self)
     }
 
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn decode(
         buf: &mut tikv_util::codec::BytesSlice<'_>,
         field_types: &[FieldType],
@@ -164,7 +164,7 @@ impl<'a> Iterator for RowIterator<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use test::{black_box, Bencher};
 

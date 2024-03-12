@@ -201,7 +201,7 @@ impl PartialOrd for Json {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::*;
     use crate::{

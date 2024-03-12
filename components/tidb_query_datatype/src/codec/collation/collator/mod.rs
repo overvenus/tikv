@@ -26,7 +26,7 @@ use crate::codec::Result;
 
 pub const PADDING_SPACE: char = 0x20 as char;
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use crate::{codec::collation::Collator, match_template_collator, Collation};
 

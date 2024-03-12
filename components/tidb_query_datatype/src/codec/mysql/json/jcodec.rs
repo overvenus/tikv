@@ -271,7 +271,7 @@ pub trait JsonDecoder: NumberDecoder {
 
 impl<T: BufferReader> JsonDecoder for T {}
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::*;
 

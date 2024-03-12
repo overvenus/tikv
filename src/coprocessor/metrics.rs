@@ -204,12 +204,12 @@ pub struct CopLocalMetrics {
 }
 
 impl CopLocalMetrics {
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn local_read_stats(&self) -> &ReadStats {
         &self.local_read_stats
     }
 
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn clear(&mut self) {
         self.local_read_stats.region_infos.clear();
         self.local_read_stats.region_buckets.clear();

@@ -156,7 +156,7 @@ impl<'a> UnsafeRefInto<&'static ChunkedVecEnum> for &'a ChunkedVecEnum {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::*;
 

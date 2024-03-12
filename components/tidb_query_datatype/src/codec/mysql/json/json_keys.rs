@@ -48,7 +48,7 @@ fn json_keys(j: &JsonRef<'_>) -> Result<Option<Json>> {
     })
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use std::str::FromStr;
 

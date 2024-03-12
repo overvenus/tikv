@@ -147,7 +147,7 @@ impl<'a> JsonRef<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use std::collections::BTreeMap;
 

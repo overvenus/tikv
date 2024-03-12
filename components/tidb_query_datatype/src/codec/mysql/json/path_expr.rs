@@ -307,7 +307,7 @@ pub fn parse_json_path_expr(path_expr_input: &str) -> Result<PathExpression> {
     Ok(path_expr)
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::*;
 

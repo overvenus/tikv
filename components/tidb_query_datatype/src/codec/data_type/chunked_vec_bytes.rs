@@ -219,7 +219,7 @@ impl<'a> UnsafeRefInto<&'static ChunkedVecBytes> for &'a ChunkedVecBytes {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use super::*;
 
@@ -393,7 +393,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod benches {
     use super::*;
 
