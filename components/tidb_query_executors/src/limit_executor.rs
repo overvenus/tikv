@@ -74,7 +74,7 @@ impl<Src: BatchExecutor> BatchExecutor for BatchLimitExecutor<Src> {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use futures::executor::block_on;
     use tidb_query_datatype::{

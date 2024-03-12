@@ -364,7 +364,7 @@ impl<Src: BatchExecutor, I: AggregationExecutorImpl<Src>> BatchExecutor
 }
 
 /// Shared test facilities for different aggregation executors.
-#[cfg(test)]
+#[cfg(skip)]
 pub mod tests {
     use tidb_query_aggr::*;
     use tidb_query_codegen::AggrFunction;

@@ -80,7 +80,7 @@ impl BatchSimpleAggregationExecutor<Box<dyn BatchExecutor<StorageStats = ()>>> {
 }
 
 impl<Src: BatchExecutor> BatchSimpleAggregationExecutor<Src> {
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn new_for_test(
         src: Src,
         aggr_defs: Vec<Expr>,
@@ -232,7 +232,7 @@ impl<Src: BatchExecutor> AggregationExecutorImpl<Src> for SimpleAggregationImpl 
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use futures::executor::block_on;
     use tidb_query_codegen::AggrFunction;

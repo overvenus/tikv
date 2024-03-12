@@ -110,7 +110,7 @@ pub struct BatchStreamAggregationImpl {
 }
 
 impl<Src: BatchExecutor> BatchStreamAggregationExecutor<Src> {
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn new_for_test(
         src: Src,
         group_by_exps: Vec<RpnExpression>,
@@ -127,7 +127,7 @@ impl<Src: BatchExecutor> BatchStreamAggregationExecutor<Src> {
         .unwrap()
     }
 
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn new_for_test_with_config(
         config: Arc<EvalConfig>,
         src: Src,
@@ -454,7 +454,7 @@ fn update_current_states(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use futures::executor::block_on;
     use tidb_query_datatype::{

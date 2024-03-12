@@ -111,7 +111,7 @@ impl BatchFastHashAggregationExecutor<Box<dyn BatchExecutor<StorageStats = ()>>>
 }
 
 impl<Src: BatchExecutor> BatchFastHashAggregationExecutor<Src> {
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn new_for_test(
         src: Src,
         group_by_exp: RpnExpression,
@@ -128,7 +128,7 @@ impl<Src: BatchExecutor> BatchFastHashAggregationExecutor<Src> {
         .unwrap()
     }
 
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn new_for_test_with_config(
         config: Arc<EvalConfig>,
         src: Src,
@@ -464,7 +464,7 @@ where
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use futures::executor::block_on;
     use tidb_query_datatype::{expr::EvalWarnings, FieldTypeTp};

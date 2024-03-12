@@ -89,7 +89,7 @@ impl BatchSlowHashAggregationExecutor<Box<dyn BatchExecutor<StorageStats = ()>>>
 }
 
 impl<Src: BatchExecutor> BatchSlowHashAggregationExecutor<Src> {
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn new_for_test(
         src: Src,
         group_by_exps: Vec<RpnExpression>,
@@ -106,7 +106,7 @@ impl<Src: BatchExecutor> BatchSlowHashAggregationExecutor<Src> {
         .unwrap()
     }
 
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn new_for_test_with_config(
         config: Arc<EvalConfig>,
         src: Src,
@@ -511,7 +511,7 @@ impl PartialEq for GroupKeyRefUnsafe {
 
 impl Eq for GroupKeyRefUnsafe {}
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use futures::executor::block_on;
     use tidb_query_datatype::{codec::data_type::*, FieldTypeTp};

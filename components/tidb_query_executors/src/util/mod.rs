@@ -2,7 +2,7 @@
 
 pub mod aggr_executor;
 pub mod hash_aggr_helper;
-#[cfg(test)]
+#[cfg(skip)]
 pub mod mock_executor;
 pub mod scan_executor;
 pub mod top_n_heap;

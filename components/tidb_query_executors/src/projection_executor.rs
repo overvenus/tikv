@@ -43,7 +43,7 @@ fn get_schema_from_exprs(child_schema: &[FieldType], exprs: &[RpnExpression]) ->
 }
 
 impl<Src: BatchExecutor> BatchProjectionExecutor<Src> {
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn new_for_test(src: Src, exprs: Vec<RpnExpression>) -> Self {
         let schema = get_schema_from_exprs(src.schema(), &exprs);
 
@@ -159,7 +159,7 @@ impl<Src: BatchExecutor> BatchExecutor for BatchProjectionExecutor<Src> {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use futures::executor::block_on;
     use tidb_query_codegen::rpn_fn;

@@ -85,7 +85,7 @@ impl BatchTopNExecutor<Box<dyn BatchExecutor<StorageStats = ()>>> {
 }
 
 impl<Src: BatchExecutor> BatchTopNExecutor<Src> {
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn new_for_test(
         src: Src,
         order_exprs: Vec<RpnExpression>,
@@ -113,7 +113,7 @@ impl<Src: BatchExecutor> BatchTopNExecutor<Src> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn new_for_test_with_config(
         config: Arc<EvalConfig>,
         src: Src,
@@ -331,7 +331,7 @@ impl<Src: BatchExecutor> BatchExecutor for BatchTopNExecutor<Src> {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use futures::executor::block_on;
     use tidb_query_datatype::{

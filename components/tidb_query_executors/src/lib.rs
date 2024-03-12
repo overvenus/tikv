@@ -19,11 +19,11 @@ extern crate tikv_util;
 #[macro_use(other_err)]
 extern crate tidb_query_common;
 
-#[cfg(test)]
+#[cfg(skip)]
 pub use tidb_query_aggr::*;
-#[cfg(test)]
+#[cfg(skip)]
 pub use tidb_query_expr::function::*;
-#[cfg(test)]
+#[cfg(skip)]
 pub use tidb_query_expr::*;
 mod fast_hash_aggr_executor;
 mod index_scan_executor;

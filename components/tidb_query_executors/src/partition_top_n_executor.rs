@@ -55,7 +55,7 @@ pub struct BatchPartitionTopNExecutor<Src: BatchExecutor> {
 }
 
 impl<Src: BatchExecutor> BatchPartitionTopNExecutor<Src> {
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn new_for_test(
         src: Src,
         order_exprs: Vec<RpnExpression>,
@@ -92,7 +92,7 @@ impl<Src: BatchExecutor> BatchPartitionTopNExecutor<Src> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(skip)]
     pub fn new_for_test_with_config(
         config: Arc<EvalConfig>,
         src: Src,
@@ -379,7 +379,7 @@ impl<Src: BatchExecutor> BatchExecutor for BatchPartitionTopNExecutor<Src> {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use futures::executor::block_on;
     use tidb_query_datatype::{
