@@ -83,8 +83,8 @@ impl Table {
     /// Create a `KeyRange` which select all records in current table.
     pub fn get_record_range_all(&self) -> KeyRange {
         let mut range = KeyRange::default();
-        range.set_start(table::encode_row_key(self.id, i64::MIN));
-        range.set_end(table::encode_row_key(self.id, i64::MAX));
+        range.set_start(table::encode_row_key(self.id, i64::MIN).into());
+        range.set_end(table::encode_row_key(self.id, i64::MAX).into());
         range
     }
 
@@ -92,10 +92,10 @@ impl Table {
     /// is included.
     pub fn get_record_range(&self, start_handle_id: i64, end_handle_id: i64) -> KeyRange {
         let mut range = KeyRange::default();
-        range.set_start(table::encode_row_key(self.id, start_handle_id));
+        range.set_start(table::encode_row_key(self.id, start_handle_id).into());
         let mut end_key = table::encode_row_key(self.id, end_handle_id);
         tidb_query_common::util::convert_to_prefix_next(&mut end_key);
-        range.set_end(end_key);
+        range.set_end(end_key.into());
         range
     }
 
@@ -110,10 +110,10 @@ impl Table {
         let mut range = KeyRange::default();
         let mut buf = Vec::with_capacity(8);
         buf.encode_i64(i64::MIN).unwrap();
-        range.set_start(table::encode_index_seek_key(self.id, idx, &buf));
+        range.set_start(table::encode_index_seek_key(self.id, idx, &buf).into());
         buf.clear();
         buf.encode_i64(i64::MAX).unwrap();
-        range.set_end(table::encode_index_seek_key(self.id, idx, &buf));
+        range.set_end(table::encode_index_seek_key(self.id, idx, &buf).into());
         range
     }
 }

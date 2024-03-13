@@ -349,8 +349,8 @@ fn test_invalid_range() {
     let (_, endpoint, _) = init_data_with_commit(&product, &data, true);
     let mut req = new_analyze_index_req(&product, 3, product["name"].index, 4, 32, 0, 1);
     let mut key_range = KeyRange::default();
-    key_range.set_start(b"xxx".to_vec());
-    key_range.set_end(b"zzz".to_vec());
+    key_range.set_start(b"xxx".to_vec().into());
+    key_range.set_end(b"zzz".to_vec().into());
     req.set_ranges(vec![key_range].into());
     let resp = handle_request(&endpoint, req);
     assert!(!resp.get_other_error().is_empty());

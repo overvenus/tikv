@@ -1743,8 +1743,8 @@ fn test_invalid_range() {
     let (_, endpoint) = init_with_data(&product, &data);
 
     let mut select = DagSelect::from(&product);
-    select.key_ranges[0].set_start(b"xxx".to_vec());
-    select.key_ranges[0].set_end(b"zzz".to_vec());
+    select.key_ranges[0].set_start(b"xxx".to_vec().into());
+    select.key_ranges[0].set_end(b"zzz".to_vec().into());
     let req = select.build();
     let resp = handle_request(&endpoint, req);
     assert!(!resp.get_other_error().is_empty());

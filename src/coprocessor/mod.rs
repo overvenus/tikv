@@ -137,10 +137,10 @@ pub struct ReqContext {
     pub cache_match_version: Option<u64>,
 
     /// The lower bound key in ranges of the request
-    pub lower_bound: Vec<u8>,
+    pub lower_bound: bytes::Bytes,
 
     /// The upper bound key in ranges of the request
-    pub upper_bound: Vec<u8>,
+    pub upper_bound: bytes::Bytes,
 
     /// Perf level
     pub perf_level: PerfLevel,
@@ -170,11 +170,11 @@ impl ReqContext {
         let access_locks = TsSet::from_u64s(context.take_committed_locks());
         let lower_bound = match ranges.first().as_ref() {
             Some(range) => range.start.clone(),
-            None => vec![],
+            None => vec![].into(),
         };
         let upper_bound = match ranges.last().as_ref() {
             Some(range) => range.end.clone(),
-            None => vec![],
+            None => vec![].into(),
         };
         Self {
             tag,

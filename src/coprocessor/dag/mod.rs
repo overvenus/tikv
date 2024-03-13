@@ -151,8 +151,8 @@ fn handle_qe_response(
         Ok((sel_resp, range)) => {
             let mut resp = Response::default();
             if let Some(range) = range {
-                resp.mut_range().set_start(range.lower_inclusive);
-                resp.mut_range().set_end(range.upper_exclusive);
+                resp.mut_range().set_start(range.lower_inclusive.into());
+                resp.mut_range().set_end(range.upper_exclusive.into());
             }
             resp.set_data(box_try!(sel_resp.write_to_bytes()));
             resp.set_can_be_cached(can_be_cached);
@@ -190,8 +190,8 @@ fn handle_qe_stream_response(
         Ok((Some((s_resp, range)), finished)) => {
             let mut resp = Response::default();
             resp.set_data(box_try!(s_resp.write_to_bytes()));
-            resp.mut_range().set_start(range.lower_inclusive);
-            resp.mut_range().set_end(range.upper_exclusive);
+            resp.mut_range().set_start(range.lower_inclusive.into());
+            resp.mut_range().set_end(range.upper_exclusive.into());
             Ok((Some(resp), finished))
         }
         Ok((None, finished)) => Ok((None, finished)),

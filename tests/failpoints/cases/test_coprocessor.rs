@@ -322,9 +322,9 @@ fn test_paging_scan_multi_ranges() {
                 .paging_size(paging_size)
                 .desc(desc);
             let mut range1 = builder.key_ranges[0].clone();
-            range1.set_end(product.get_record_range_one(data[1].0).get_end().into());
+            range1.set_end(product.get_record_range_one(data[1].0).end.clone());
             let mut range2 = builder.key_ranges[0].clone();
-            range2.set_start(product.get_record_range_one(data[3].0).get_start().into());
+            range2.set_start(product.get_record_range_one(data[3].0).start.clone());
             let key_ranges = vec![range1.clone(), range2.clone()];
 
             let req = builder.key_ranges(key_ranges).build();
