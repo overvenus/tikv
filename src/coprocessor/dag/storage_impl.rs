@@ -82,7 +82,7 @@ impl<S: Store> Storage for TikvStorage<S> {
             .store
             .incremental_get(&Key::from_raw(&key))
             .map_err(Error::from)?;
-        Ok(value.map(move |v| (key, v)))
+        Ok(value.map(move |v| (key.as_ref().to_owned(), v)))
     }
 
     #[inline]

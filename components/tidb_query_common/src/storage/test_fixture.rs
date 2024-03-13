@@ -90,14 +90,14 @@ impl super::Storage for FixtureStorage {
     }
 
     fn get(&mut self, is_key_only: bool, range: PointRange) -> Result<Option<super::OwnedKvPair>> {
-        let r = self.data.get(&range.0);
+        let r = self.data.get(range.0.as_ref());
         match r {
             None => Ok(None),
             Some(Ok(v)) => {
                 if !is_key_only {
-                    Ok(Some((range.0, v.clone())))
+                    Ok(Some((range.0.as_ref().to_owned(), v.clone())))
                 } else {
-                    Ok(Some((range.0, Vec::new())))
+                    Ok(Some((range.0.as_ref().to_owned(), Vec::new())))
                 }
             }
             Some(Err(err_producer)) => Err(err_producer()),

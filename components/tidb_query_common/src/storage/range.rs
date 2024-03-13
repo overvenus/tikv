@@ -13,9 +13,12 @@ pub enum Range {
 impl Range {
     pub fn from_pb_range(mut range: KeyRange, accept_point_range: bool) -> Self {
         if accept_point_range && crate::util::is_point(&range) {
-            Range::Point(PointRange((&*range.take_start()).to_owned()))
+            Range::Point(PointRange(range.start.clone()))
         } else {
-            Range::Interval(IntervalRange::from(((&*range.take_start()).to_owned(), (&*range.take_end()).to_owned())))
+            Range::Interval(IntervalRange::from((
+                (&*range.take_start()).to_owned(),
+                (&*range.take_end()).to_owned(),
+            )))
         }
     }
 }
@@ -88,17 +91,17 @@ impl<'a, 'b> From<(&'a str, &'b str)> for IntervalRange {
 }
 
 #[derive(Default, PartialEq, Clone)]
-pub struct PointRange(pub Vec<u8>);
+pub struct PointRange(pub bytes::Bytes);
 
 impl std::fmt::Debug for PointRange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", &log_wrappers::Value::key(self.0.as_slice()))
+        write!(f, "{}", &log_wrappers::Value::key(&*self.0))
     }
 }
 
 impl From<Vec<u8>> for PointRange {
     fn from(v: Vec<u8>) -> Self {
-        PointRange(v)
+        PointRange(v.into())
     }
 }
 
