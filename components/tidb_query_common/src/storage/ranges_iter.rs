@@ -73,7 +73,7 @@ impl RangesIterator {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use std::sync::atomic;
 

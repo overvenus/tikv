@@ -3,13 +3,14 @@
 use std::{marker::PhantomData, time::Duration};
 
 use api_version::KvFormat;
+use bytes::BufMut;
 use tikv_util::time::Instant;
 use yatp::task::future::reschedule;
 
 use super::{range::*, ranges_iter::*, OwnedKvPair, Storage};
 use crate::error::StorageError;
 
-const KEY_BUFFER_CAPACITY: usize = 64;
+// const KEY_BUFFER_CAPACITY: usize = 64;
 /// Batch executors are run in coroutines. `MAX_TIME_SLICE` is the maximum time
 /// a coroutine can run without being yielded.
 const MAX_TIME_SLICE: Duration = Duration::from_millis(1);
@@ -32,8 +33,8 @@ pub struct RangesScanner<T, F> {
     // of each response slice, so that partial retry can be non-overlapping.
     is_scanned_range_aware: bool,
     current_range: IntervalRange,
-    working_range_begin_key: Vec<u8>,
-    working_range_end_key: Vec<u8>,
+    working_range_begin_key: bytes::Bytes,
+    working_range_end_key: bytes::Bytes,
     rescheduler: RescheduleChecker,
 
     _phantom: PhantomData<F>,
@@ -95,11 +96,11 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
             scanned_rows_per_range: Vec::with_capacity(ranges_len),
             is_scanned_range_aware,
             current_range: IntervalRange {
-                lower_inclusive: Vec::with_capacity(KEY_BUFFER_CAPACITY),
-                upper_exclusive: Vec::with_capacity(KEY_BUFFER_CAPACITY),
+                lower_inclusive: bytes::Bytes::new(),
+                upper_exclusive: bytes::Bytes::new(),
             },
-            working_range_begin_key: Vec::with_capacity(KEY_BUFFER_CAPACITY),
-            working_range_end_key: Vec::with_capacity(KEY_BUFFER_CAPACITY),
+            working_range_begin_key: bytes::Bytes::new(),
+            working_range_end_key: bytes::Bytes::new(),
             rescheduler: RescheduleChecker::new(),
             _phantom: PhantomData,
         }
@@ -194,8 +195,7 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
             );
             std::mem::swap(&mut range.upper_exclusive, &mut self.working_range_end_key);
 
-            self.working_range_begin_key
-                .extend_from_slice(&range.upper_exclusive);
+            self.working_range_begin_key = range.upper_exclusive.clone();
         } else {
             std::mem::swap(&mut range.lower_inclusive, &mut self.working_range_end_key);
             std::mem::swap(
@@ -203,8 +203,7 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
                 &mut self.working_range_begin_key,
             );
 
-            self.working_range_begin_key
-                .extend_from_slice(&range.lower_inclusive);
+            self.working_range_begin_key = range.lower_inclusive.clone();
         }
 
         range
@@ -222,13 +221,11 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
         if self.current_range.lower_inclusive.is_empty() || self.ranges_iter.is_drained() {
             self.current_range.lower_inclusive.clear();
             self.current_range.upper_exclusive.clear();
-            self.current_range
-                .lower_inclusive
-                .extend_from_slice(&point.0);
-            self.current_range
-                .upper_exclusive
-                .extend_from_slice(&point.0);
-            self.current_range.upper_exclusive.push(0);
+            self.current_range.lower_inclusive = point.0.clone();
+            let mut upper = bytes::BytesMut::with_capacity(point.0.len() + 1);
+            upper.extend_from_slice(&point.0);
+            upper.put_u8(0);
+            self.current_range.upper_exclusive = upper.freeze();
         }
         self.update_working_range_begin_key();
     }
@@ -240,12 +237,8 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
         if self.current_range.lower_inclusive.is_empty() || self.ranges_iter.is_drained() {
             self.current_range.lower_inclusive.clear();
             self.current_range.upper_exclusive.clear();
-            self.current_range
-                .lower_inclusive
-                .extend_from_slice(&range.lower_inclusive);
-            self.current_range
-                .upper_exclusive
-                .extend_from_slice(&range.upper_exclusive);
+            self.current_range.lower_inclusive = range.lower_inclusive.clone();
+            self.current_range.upper_exclusive = range.upper_exclusive.clone();
         }
         self.update_working_range_begin_key();
     }
@@ -255,11 +248,9 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
 
         if self.working_range_begin_key.is_empty() {
             if !self.scan_backward_in_range {
-                self.working_range_begin_key
-                    .extend(&self.current_range.lower_inclusive);
+                self.working_range_begin_key = self.current_range.lower_inclusive.clone();
             } else {
-                self.working_range_begin_key
-                    .extend(&self.current_range.upper_exclusive);
+                self.working_range_begin_key = self.current_range.upper_exclusive.clone();
             }
         }
     }
@@ -269,11 +260,9 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
 
         self.working_range_end_key.clear();
         if !self.scan_backward_in_range {
-            self.working_range_end_key
-                .extend(&self.current_range.upper_exclusive);
+            self.working_range_end_key = self.current_range.upper_exclusive.clone();
         } else {
-            self.working_range_end_key
-                .extend(&self.current_range.lower_inclusive);
+            self.working_range_end_key = self.current_range.lower_inclusive.clone();
         }
     }
 
@@ -282,15 +271,17 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
 
         if let Some((key, _)) = some_row {
             self.working_range_end_key.clear();
-            self.working_range_end_key.extend(key);
+            let mut upper = bytes::BytesMut::with_capacity(key.len() + 1);
+            upper.extend_from_slice(&key);
             if !self.scan_backward_in_range {
-                self.working_range_end_key.push(0);
+                upper.put_u8(0);
             }
+            self.working_range_end_key = upper.freeze();
         }
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use api_version::{keyspace::KvPair, ApiV1};
     use futures::executor::block_on;

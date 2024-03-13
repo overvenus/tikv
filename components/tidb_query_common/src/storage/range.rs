@@ -46,8 +46,8 @@ impl From<PointRange> for Range {
 
 #[derive(Default, PartialEq, Clone)]
 pub struct IntervalRange {
-    pub lower_inclusive: Vec<u8>,
-    pub upper_exclusive: Vec<u8>,
+    pub lower_inclusive: bytes::Bytes,
+    pub upper_exclusive: bytes::Bytes,
 }
 
 impl std::fmt::Debug for IntervalRange {
@@ -56,13 +56,13 @@ impl std::fmt::Debug for IntervalRange {
         write!(
             f,
             "{}",
-            &log_wrappers::Value::key(self.lower_inclusive.as_slice())
+            &log_wrappers::Value::key(self.lower_inclusive.as_ref())
         )?;
         write!(f, ", ")?;
         write!(
             f,
             "{}",
-            &log_wrappers::Value::key(self.upper_exclusive.as_slice())
+            &log_wrappers::Value::key(self.upper_exclusive.as_ref())
         )?;
         write!(f, ")")
     }
@@ -71,8 +71,8 @@ impl std::fmt::Debug for IntervalRange {
 impl From<(Vec<u8>, Vec<u8>)> for IntervalRange {
     fn from((lower, upper): (Vec<u8>, Vec<u8>)) -> Self {
         IntervalRange {
-            lower_inclusive: lower,
-            upper_exclusive: upper,
+            lower_inclusive: lower.into(),
+            upper_exclusive: upper.into(),
         }
     }
 }

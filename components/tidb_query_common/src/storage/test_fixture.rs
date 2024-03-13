@@ -58,9 +58,9 @@ impl super::Storage for FixtureStorage {
         is_key_only: bool,
         range: IntervalRange,
     ) -> Result<()> {
-        let data_view = self
-            .data
-            .range(range.lower_inclusive..range.upper_exclusive);
+        let data_view = self.data.range(
+            range.lower_inclusive.as_ref().to_owned()..range.upper_exclusive.as_ref().to_owned(),
+        );
         // Erase the lifetime to be 'static.
         self.data_view_unsafe = unsafe { Some(std::mem::transmute(data_view)) };
         self.is_backward_scan = is_backward_scan;
