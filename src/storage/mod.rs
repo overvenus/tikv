@@ -615,7 +615,10 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         let priority_tag = get_priority_tag(priority);
         let resource_tag = self.resource_tag_factory.new_tag_with_key_ranges(
             &ctx,
-            vec![(key.as_encoded().to_vec(), key.as_encoded().to_vec())],
+            vec![(
+                key.as_encoded().to_vec().into(),
+                key.as_encoded().to_vec().into(),
+            )],
         );
         let concurrency_manager = self.concurrency_manager.clone();
         let api_version = self.api_version;
@@ -809,7 +812,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         let rand_key = requests[rand_index].get_key().to_vec();
         let resource_tag = self
             .resource_tag_factory
-            .new_tag_with_key_ranges(rand_ctx, vec![(rand_key.clone(), rand_key)]);
+            .new_tag_with_key_ranges(rand_ctx, vec![(rand_key.clone().into(), rand_key.into())]);
         // Unset the TLS tracker because the future below does not belong to any
         // specific request
         clear_tls_tracker_token();
@@ -1001,7 +1004,12 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         let priority_tag = get_priority_tag(priority);
         let key_ranges = keys
             .iter()
-            .map(|k| (k.as_encoded().to_vec(), k.as_encoded().to_vec()))
+            .map(|k| {
+                (
+                    k.as_encoded().to_vec().into(),
+                    k.as_encoded().to_vec().into(),
+                )
+            })
             .collect();
         let resource_tag = self
             .resource_tag_factory
@@ -1184,7 +1192,12 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         let priority_tag = get_priority_tag(priority);
         let key_ranges = keys
             .iter()
-            .map(|k| (k.as_encoded().to_vec(), k.as_encoded().to_vec()))
+            .map(|k| {
+                (
+                    k.as_encoded().to_vec().into(),
+                    k.as_encoded().to_vec().into(),
+                )
+            })
             .collect();
         let resource_tag = self
             .resource_tag_factory
@@ -1382,10 +1395,10 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         let resource_tag = self.resource_tag_factory.new_tag_with_key_ranges(
             &ctx,
             vec![(
-                start_key.as_encoded().to_vec(),
+                start_key.as_encoded().to_vec().into(),
                 match &end_key {
-                    Some(k) => k.as_encoded().to_vec(),
-                    None => vec![],
+                    Some(k) => k.as_encoded().to_vec().into(),
+                    None => vec![].into(),
                 },
             )],
         );
@@ -1560,12 +1573,12 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             &ctx,
             vec![(
                 match &start_key {
-                    Some(k) => k.as_encoded().to_vec(),
-                    None => vec![],
+                    Some(k) => k.as_encoded().to_vec().into(),
+                    None => vec![].into(),
                 },
                 match &end_key {
-                    Some(k) => k.as_encoded().to_vec(),
-                    None => vec![],
+                    Some(k) => k.as_encoded().to_vec().into(),
+                    None => vec![].into(),
                 },
             )],
         );
@@ -1876,7 +1889,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         let priority_tag = get_priority_tag(priority);
         let resource_tag = self
             .resource_tag_factory
-            .new_tag_with_key_ranges(&ctx, vec![(key.clone(), key.clone())]);
+            .new_tag_with_key_ranges(&ctx, vec![(key.clone().into(), key.clone().into())]);
         let api_version = self.api_version;
         let busy_threshold = Duration::from_millis(ctx.busy_threshold_ms as u64);
 
@@ -1984,7 +1997,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         let rand_key = gets[rand_index].get_key().to_vec();
         let resource_tag = self
             .resource_tag_factory
-            .new_tag_with_key_ranges(rand_ctx, vec![(rand_key.clone(), rand_key)]);
+            .new_tag_with_key_ranges(rand_ctx, vec![(rand_key.clone().into(), rand_key.into())]);
 
         self.read_pool_spawn_with_busy_check(
             busy_threshold,
@@ -2121,7 +2134,10 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             )
         });
         let priority_tag = get_priority_tag(priority);
-        let key_ranges = keys.iter().map(|k| (k.clone(), k.clone())).collect();
+        let key_ranges = keys
+            .iter()
+            .map(|k| (k.clone().into(), k.clone().into()))
+            .collect();
         let resource_tag = self
             .resource_tag_factory
             .new_tag_with_key_ranges(&ctx, key_ranges);
@@ -2768,7 +2784,12 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         let priority_tag = get_priority_tag(priority);
         let key_ranges = ranges
             .iter()
-            .map(|key_range| (key_range.start_key.clone(), key_range.end_key.clone()))
+            .map(|key_range| {
+                (
+                    key_range.start_key.clone().into(),
+                    key_range.end_key.clone().into(),
+                )
+            })
             .collect();
         let resource_tag = self
             .resource_tag_factory
@@ -2931,7 +2952,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         let priority_tag = get_priority_tag(priority);
         let resource_tag = self
             .resource_tag_factory
-            .new_tag_with_key_ranges(&ctx, vec![(key.clone(), key.clone())]);
+            .new_tag_with_key_ranges(&ctx, vec![(key.clone().into(), key.clone().into())]);
         let api_version = self.api_version;
         let busy_threshold = Duration::from_millis(ctx.busy_threshold_ms as u64);
 
@@ -3113,7 +3134,12 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         let priority_tag = get_priority_tag(priority);
         let key_ranges = ranges
             .iter()
-            .map(|key_range| (key_range.start_key.clone(), key_range.end_key.clone()))
+            .map(|key_range| {
+                (
+                    key_range.start_key.clone().into(),
+                    key_range.end_key.clone().into(),
+                )
+            })
             .collect();
         let resource_tag = self
             .resource_tag_factory

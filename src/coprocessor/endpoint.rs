@@ -504,7 +504,7 @@ impl<E: Engine> Endpoint<E> {
         let key_ranges = req_ctx
             .ranges
             .iter()
-            .map(|key_range| (key_range.get_start().to_vec(), key_range.get_end().to_vec()))
+            .map(|key_range| (key_range.start.clone(), key_range.end.clone()))
             .collect();
         let resource_tag = self
             .resource_tag_factory
@@ -781,7 +781,7 @@ impl<E: Engine> Endpoint<E> {
         let key_ranges = req_ctx
             .ranges
             .iter()
-            .map(|key_range| (key_range.get_start().to_vec(), key_range.get_end().to_vec()))
+            .map(|key_range| (key_range.start.clone(), key_range.end.clone()))
             .collect();
         let resource_tag = self
             .resource_tag_factory

@@ -4718,6 +4718,7 @@ dependencies = [
 name = "resource_metering"
 version = "0.0.1"
 dependencies = [
+ "bytes",
  "collections",
  "crossbeam",
  "futures 0.3.15",

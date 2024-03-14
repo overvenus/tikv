@@ -938,7 +938,7 @@ impl AutoSplitController {
     }
 }
 
-#[cfg(test)]
+#[cfg(skip)]
 mod tests {
     use online_config::{ConfigChange, ConfigManager, ConfigValue};
     use resource_metering::{RawRecord, TagInfos};

@@ -186,7 +186,7 @@ impl ResourceTagFactory {
     pub fn new_tag_with_key_ranges(
         &self,
         context: &kvproto::kvrpcpb::Context,
-        key_ranges: Vec<(Vec<u8>, Vec<u8>)>,
+        key_ranges: Vec<(bytes::Bytes, bytes::Bytes)>,
     ) -> ResourceMeteringTag {
         let tag_infos = TagInfos::from_rpc_context_with_key_ranges(context, key_ranges);
         ResourceMeteringTag {
@@ -288,7 +288,7 @@ pub struct TagInfos {
     pub region_id: u64,
     pub peer_id: u64,
     // Only a read request contains the key ranges.
-    pub key_ranges: Vec<(Vec<u8>, Vec<u8>)>,
+    pub key_ranges: Vec<(bytes::Bytes, bytes::Bytes)>,
     pub extra_attachment: Vec<u8>,
 }
 
@@ -307,7 +307,7 @@ impl TagInfos {
     // create a TagInfos with start and end keys for a read request.
     pub fn from_rpc_context_with_key_ranges(
         context: &kvproto::kvrpcpb::Context,
-        key_ranges: Vec<(Vec<u8>, Vec<u8>)>,
+        key_ranges: Vec<(bytes::Bytes, bytes::Bytes)>,
     ) -> Self {
         let peer = context.get_peer();
         Self {
