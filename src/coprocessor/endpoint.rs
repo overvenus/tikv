@@ -184,7 +184,7 @@ impl<E: Engine> Endpoint<E> {
         let (context, data, ranges, mut start_ts) = (
             req.take_context(),
             req.take_data(),
-            req.take_ranges().to_vec(),
+            req.take_ranges().into_vec(),
             req.get_start_ts(),
         );
         let cache_match_version = if req.get_is_cache_enabled() {
