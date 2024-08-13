@@ -396,7 +396,6 @@ impl RangeCacheMemoryEngine {
         write_batch_id: u64,
         range: &CacheRange,
     ) -> RangeCacheStatus {
-        let rocks_snap = Arc::new(self.rocks_engine.as_ref().unwrap().snapshot(None));
         let mut core = self.core.write();
         let range_manager = core.mut_range_manager();
         if range_manager.pending_ranges_in_loading_contains(range) {
@@ -452,7 +451,7 @@ impl RangeCacheMemoryEngine {
 
             let range_manager = core.mut_range_manager();
             range_manager.pending_ranges.swap_remove(idx);
-            // let rocks_snap = Arc::new(self.rocks_engine.as_ref().unwrap().snapshot(None));
+            let rocks_snap = Arc::new(self.rocks_engine.as_ref().unwrap().snapshot(None));
             // Here, we use the range in `pending_ranges` rather than the parameter range as
             // the region may be splitted.
             range_manager
