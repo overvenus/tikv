@@ -762,7 +762,7 @@ mod tests {
             let mut core = engine.core.write();
             core.mut_range_manager().set_safe_point(&r1, 10);
 
-            let snap = Arc::new(rocks_engine.snapshot(None));
+            let snap = Arc::new(rocks_engine.snapshot());
             core.mut_range_manager()
                 .pending_ranges_loading_data
                 .push_back((r2.clone(), snap, false));
@@ -800,7 +800,7 @@ mod tests {
         let path = Builder::new().prefix("test_group").tempdir().unwrap();
         let path_str = path.path().to_str().unwrap();
         let rocks_engine = new_engine(path_str, DATA_CFS).unwrap();
-        let snap = rocks_engine.snapshot(None);
+        let snap = rocks_engine.snapshot();
 
         let mut range_manager = RangeManager::default();
         let r1 = CacheRange::new(b"k00".to_vec(), b"k10".to_vec());

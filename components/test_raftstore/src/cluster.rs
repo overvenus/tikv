@@ -2159,10 +2159,6 @@ impl<T: Simulator> Drop for Cluster<T> {
 pub trait RawEngine<EK: engine_traits::KvEngine>:
     Peekable<DbVector = EK::DbVector> + SyncMutable
 {
-    fn range_cache_engine(&self) -> bool {
-        false
-    }
-
     fn region_local_state(&self, region_id: u64)
     -> engine_traits::Result<Option<RegionLocalState>>;
 
@@ -2185,29 +2181,5 @@ impl RawEngine<RocksEngine> for RocksEngine {
 
     fn raft_local_state(&self, region_id: u64) -> engine_traits::Result<Option<RaftLocalState>> {
         self.get_msg_cf(CF_RAFT, &keys::raft_state_key(region_id))
-    }
-}
-
-impl RawEngine<RocksEngine> for HybridEngineImpl {
-    fn range_cache_engine(&self) -> bool {
-        true
-    }
-
-    fn region_local_state(
-        &self,
-        region_id: u64,
-    ) -> engine_traits::Result<Option<RegionLocalState>> {
-        self.disk_engine()
-            .get_msg_cf(CF_RAFT, &keys::region_state_key(region_id))
-    }
-
-    fn raft_apply_state(&self, region_id: u64) -> engine_traits::Result<Option<RaftApplyState>> {
-        self.disk_engine()
-            .get_msg_cf(CF_RAFT, &keys::apply_state_key(region_id))
-    }
-
-    fn raft_local_state(&self, region_id: u64) -> engine_traits::Result<Option<RaftLocalState>> {
-        self.disk_engine()
-            .get_msg_cf(CF_RAFT, &keys::raft_state_key(region_id))
     }
 }
