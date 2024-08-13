@@ -167,7 +167,7 @@ impl<E> CmdObserver<E> for EvictionObserver {
     ) {
         self.on_flush_cmd();
     }
-    fn on_applied_current_term(&self, role: StateRole, region: &Region) {}
+    fn on_applied_current_term(&self, _: StateRole, _: &Region) {}
 }
 
 #[cfg(test)]
@@ -225,7 +225,6 @@ mod tests {
         // Must not evict range for region split.
         observer.post_exec_cmd(&mut ctx, &cmd, &RegionState::default(), &mut apply);
         observer.on_flush_cmd();
-        let expected = CacheRange::from_region(&region);
         assert!(&cache_engine.evicted_ranges.lock().unwrap().is_empty());
     }
 
