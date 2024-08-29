@@ -12,7 +12,6 @@ use engine_traits::{
     CacheRegion, EvictReason, IterOptions, Iterable, Iterator, MiscExt, RangeHintService,
     SnapshotMiscExt, CF_DEFAULT, CF_WRITE, DATA_CFS,
 };
-use hex::FromHexError;
 use parking_lot::RwLock;
 use pd_client::{PdClient, RpcClient};
 use raftstore::coprocessor::RegionInfoProvider;
@@ -38,11 +37,10 @@ use crate::{
         GC_FILTERED_STATIC, RANGE_CACHE_COUNT, RANGE_CACHE_MEMORY_USAGE, RANGE_GC_TIME_HISTOGRAM,
         RANGE_LOAD_TIME_HISTOGRAM,
     },
-    range_manager::{CacheRegionMeta, RegionState},
+    range_manager::{CacheRegionMeta, LoadFailedReason, RegionState},
     range_stats::{RangeStatsManager, DEFAULT_EVICT_MIN_DURATION},
     region_label::{
-        KeyRangeRule, LabelRule, RegionLabelAddedCb, RegionLabelRulesManager,
-        RegionLabelServiceBuilder,
+        LabelRule, RegionLabelChangedCallback, RegionLabelRulesManager, RegionLabelServiceBuilder,
     },
     write_batch::RangeCacheWriteBatchEntry,
 };
@@ -126,7 +124,7 @@ pub struct BgWorkManager {
     delete_region_scheduler: Scheduler<BackgroundTask>,
     tick_stopper: Option<(JoinHandle<()>, Sender<bool>)>,
     core: Arc<RwLock<RangeCacheMemoryEngineCore>>,
-    region_info_provider: Option<Arc<dyn RegionInfoProvider>>,
+    _region_info_provider: Option<Arc<dyn RegionInfoProvider>>,
 }
 
 impl Drop for BgWorkManager {
@@ -163,46 +161,43 @@ impl PdRangeHintService {
     /// label is removed or no longer set to always.
     pub fn start<F>(&self, remote: Remote<yatp::task::future::TaskCell>, range_manager_load_cb: F)
     where
-        F: Fn(&[u8], &[u8]) + Send + Sync + 'static,
+        F: Fn(&CacheRegion, bool) -> Result<(), LoadFailedReason> + Send + Sync + 'static,
     {
-        let parse_range = |key_range: &KeyRangeRule| {
-            let start = hex::decode(&key_range.start_key)?;
-            let end = hex::decode(&key_range.end_key)?;
-            Ok::<_, FromHexError>((start, end))
-        };
-
         let pd_client = self.0.clone();
-        let region_label_added_cb: RegionLabelAddedCb = Arc::new(move |label_rule: &LabelRule| {
-            if !label_rule
-                .labels
-                .iter()
-                .any(|e| e.key == CACHE_LABEL_RULE_KEY && e.value == CACHE_LABEL_RULE_ALWAYS)
-            {
-                // not related to caching, skip.
-                return;
-            }
-            for key_range in &label_rule.data {
-                match parse_range(key_range) {
-                    Ok((start, end)) => {
-                        info!("ime requested to cache range";
-                            "start" => ?log_wrappers::Value(&start),
-                            "end" => ?log_wrappers::Value(&end));
-                        range_manager_load_cb(&start, &end);
-                    }
-                    Err(e) => {
-                        error!("ime unable to convert key_range rule to cache range"; "err" => ?e);
+        let region_label_changed_cb: RegionLabelChangedCallback = Arc::new(
+            move |label_rule: &LabelRule, is_add: bool| {
+                if !label_rule
+                    .labels
+                    .iter()
+                    .any(|e| e.key == CACHE_LABEL_RULE_KEY && e.value == CACHE_LABEL_RULE_ALWAYS)
+                {
+                    // not related to caching, skip.
+                    return;
+                }
+                for key_range in &label_rule.data {
+                    match CacheRegion::try_from(key_range) {
+                        Ok(cache_range) => {
+                            info!("ime requested to cache range"; "range" => ?&cache_range);
+                            if let Err(reason) = range_manager_load_cb(&cache_range, is_add) {
+                                error!("ime cache range load failed"; "range" => ?&cache_range, "reason" => ?reason);
+                            }
+                        }
+                        Err(e) => {
+                            error!("ime unable to convert key_range rule to cache range"; "error" => ?e);
+                        }
                     }
                 }
-            }
-        });
+            },
+        );
         let mut region_label_svc = RegionLabelServiceBuilder::new(
             Arc::new(RegionLabelRulesManager {
-                region_label_added_cb: Some(region_label_added_cb),
+                region_label_change_cb: Some(region_label_changed_cb),
                 ..RegionLabelRulesManager::default()
             }),
             pd_client,
         )
         .rule_filter_fn(|label_rule| {
+            info!("dbg rule"; "rule" => ?label_rule);
             label_rule
                 .labels
                 .iter()
@@ -248,7 +243,7 @@ impl BgWorkManager {
             delete_region_scheduler: delete_range_scheduler,
             tick_stopper: Some((h, tx)),
             core,
-            region_info_provider,
+            _region_info_provider: region_info_provider,
         }
     }
 
@@ -263,41 +258,25 @@ impl BgWorkManager {
 
     pub fn start_bg_hint_service(&self, range_hint_service: PdRangeHintService) {
         let core = self.core.clone();
-        let region_info_provider = self.region_info_provider.clone();
-        range_hint_service.start(self.worker.remote(), move |start: &[u8], end: &[u8]| {
-            let Some(ref info_provider) = region_info_provider else {
-                warn!("ime region info provider is none, skip load pinned range.");
-                return;
-            };
-
-            let regions = match info_provider.get_regions_in_range(start, end) {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(
-                        "ime get regions in range failed"; "err" => ?e,
-                        "start" => ?log_wrappers::Value(start),
-                        "end" => ?log_wrappers::Value(end)
-                    );
-                    return;
+        range_hint_service.start(
+            self.worker.remote(),
+            move |cache_range: &CacheRegion, is_add: bool| {
+                let mut engine = core.write();
+                if is_add {
+                    engine
+                        .mut_range_manager()
+                        .add_preferred_range(cache_range.clone());
+                } else {
+                    engine
+                        .mut_range_manager()
+                        .remove_preferred_range(cache_range.clone());
                 }
-            };
-
-            if regions.is_empty() {
-                return;
-            }
-
-            let mut engine = core.write();
-            for r in regions {
-                let cache_region = CacheRegion::from_region(&r);
-                if let Err(e) = engine.mut_range_manager().load_region(cache_region) {
-                    warn!("ime load region by label failed"; "err" => ?e, "region" => ?r);
-                }
-            }
-            // TODO (afeinberg): This does not actually load the range. The load
-            // happens the apply thread begins to apply raft
-            // entries. To force this (for read-only use-cases) we
-            // should propose a No-Op command.
-        });
+                // TODO (afeinberg): This does not actually load the range. The load happens
+                // the apply thread begins to apply raft entries. To force this (for read-only
+                // use-cases) we should propose a No-Op command.
+                Ok(())
+            },
+        );
     }
 
     fn start_tick(
