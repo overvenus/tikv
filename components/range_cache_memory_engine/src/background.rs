@@ -909,7 +909,12 @@ impl Runnable for BackgroundRunner {
                         // We will handle possible region split and partial cancelation
                         // in `on_snapshot_load_canceled` and `on_snapshot_load_finished`.
                         if region_meta.get_state() != RegionState::Loading {
-                            assert_eq!(region_meta.get_state(), RegionState::LoadingCanceled);
+                            assert_eq!(
+                                region_meta.get_state(),
+                                RegionState::LoadingCanceled,
+                                "{:?}",
+                                region_meta
+                            );
                             is_canceled = true;
                         }
 
