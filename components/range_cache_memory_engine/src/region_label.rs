@@ -16,6 +16,7 @@ use pd_client::{
 };
 use serde::{Deserialize, Serialize};
 use tikv_util::{error, info, timer::GLOBAL_TIMER_HANDLE};
+use txn_types::Key;
 
 /// RegionLabel is the label of a region. This struct is partially copied from
 /// https://github.com/tikv/pd/blob/783d060861cef37c38cbdcab9777fe95c17907fe/server/schedule/labeler/rules.go#L31.
@@ -54,9 +55,15 @@ impl TryFrom<&KeyRangeRule> for CacheRegion {
     type Error = Box<dyn std::error::Error>;
 
     fn try_from(key_range: &KeyRangeRule) -> Result<Self, Self::Error> {
-        let start_key = data_key(&hex::decode(&key_range.start_key)?);
-        let end_key = data_end_key(&hex::decode(&key_range.end_key)?);
-        Ok(CacheRegion::new(0, 0, start_key, end_key))
+        // The KeyRangeRule is composed of raw keys in hex format.
+        // Therefore, we need to decode the keys first and then re-encode them.
+        let raw_start_key = hex::decode(&key_range.start_key)?;
+        let raw_end_key = hex::decode(&key_range.end_key)?;
+        let start_key = Key::from_raw(&raw_start_key);
+        let end_key = Key::from_raw(&raw_end_key);
+        let data_start_key = data_key(start_key.as_encoded());
+        let data_end_key = data_end_key(end_key.as_encoded());
+        Ok(CacheRegion::new(0, 0, data_start_key, data_end_key))
     }
 }
 pub type RegionLabelAddedCb = Arc<dyn Fn(&LabelRule) + Send + Sync>;
@@ -288,6 +295,7 @@ impl RegionLabelService {
 pub mod tests {
 
     use futures::executor::block_on;
+    use keys::origin_key;
     use pd_client::meta_storage::{Delete, Put};
     use security::{SecurityConfig, SecurityManager};
     use test_pd::{mocker::MetaStorage, util::*, Server as MockServer};
@@ -458,5 +466,38 @@ pub mod tests {
         assert_eq!(label.data[0].start_key, "c".to_string());
 
         server.stop();
+    }
+
+    #[test]
+    fn test_convert_key_range_rule_to_cache_region() {
+        let rules = [
+            ("", ""),
+            ("", "7A7480000000000001FF3200000000000000F8"),
+            ("7A7480000000000001FF3200000000000000F8", ""),
+            (
+                "7A7480000000000001FF3200000000000000F8",
+                "7A7480000000000001FF3300000000000000F8",
+            ),
+        ];
+        for (start, end) in rules {
+            let rule = KeyRangeRule {
+                start_key: start.to_owned(),
+                end_key: end.to_owned(),
+            };
+            let range = CacheRegion::try_from(&rule).unwrap();
+
+            let start_key = hex::encode_upper(
+                Key::from_encoded_slice(origin_key(&range.start))
+                    .into_raw()
+                    .unwrap(),
+            );
+            assert_eq!(rule.start_key, start_key);
+            let end_key = hex::encode_upper(
+                Key::from_encoded_slice(origin_key(&range.end))
+                    .into_raw()
+                    .unwrap(),
+            );
+            assert_eq!(rule.end_key, end_key);
+        }
     }
 }

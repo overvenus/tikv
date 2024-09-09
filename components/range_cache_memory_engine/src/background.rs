@@ -12,7 +12,6 @@ use engine_traits::{
     CacheRegion, EvictReason, IterOptions, Iterable, Iterator, MiscExt, RangeHintService,
     SnapshotMiscExt, CF_DEFAULT, CF_WRITE, DATA_CFS,
 };
-use hex::FromHexError;
 use parking_lot::RwLock;
 use pd_client::{PdClient, RpcClient};
 use raftstore::coprocessor::RegionInfoProvider;
@@ -41,8 +40,7 @@ use crate::{
     range_manager::{CacheRegionMeta, RegionState},
     range_stats::{RangeStatsManager, DEFAULT_EVICT_MIN_DURATION},
     region_label::{
-        KeyRangeRule, LabelRule, RegionLabelAddedCb, RegionLabelRulesManager,
-        RegionLabelServiceBuilder,
+        LabelRule, RegionLabelAddedCb, RegionLabelRulesManager, RegionLabelServiceBuilder,
     },
     write_batch::RangeCacheWriteBatchEntry,
 };
@@ -165,12 +163,6 @@ impl PdRangeHintService {
     where
         F: Fn(&[u8], &[u8]) + Send + Sync + 'static,
     {
-        let parse_range = |key_range: &KeyRangeRule| {
-            let start = hex::decode(&key_range.start_key)?;
-            let end = hex::decode(&key_range.end_key)?;
-            Ok::<_, FromHexError>((start, end))
-        };
-
         let pd_client = self.0.clone();
         let region_label_added_cb: RegionLabelAddedCb = Arc::new(move |label_rule: &LabelRule| {
             if !label_rule
@@ -182,12 +174,12 @@ impl PdRangeHintService {
                 return;
             }
             for key_range in &label_rule.data {
-                match parse_range(key_range) {
-                    Ok((start, end)) => {
+                match CacheRegion::try_from(key_range) {
+                    Ok(range) => {
                         info!("ime requested to cache range";
-                            "start" => ?log_wrappers::Value(&start),
-                            "end" => ?log_wrappers::Value(&end));
-                        range_manager_load_cb(&start, &end);
+                            "start" => ?log_wrappers::Value(&range.start),
+                            "end" => ?log_wrappers::Value(&range.end));
+                        range_manager_load_cb(&range.start, &range.end);
                     }
                     Err(e) => {
                         error!("ime unable to convert key_range rule to cache range"; "err" => ?e);
