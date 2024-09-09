@@ -21,7 +21,7 @@ use engine_traits::{CacheRegion, EvictReason, FailedReason};
 use futures::executor::block_on;
 use parking_lot::RwLock;
 use strum::EnumCount;
-use tikv_util::{info, time::Instant, warn};
+use tikv_util::{info, time::Instant};
 
 use crate::{metrics::observe_eviction_duration, read::RangeCacheSnapshotMeta};
 
@@ -291,8 +291,10 @@ impl RegionMetaMap {
         assert!(!self.overlaps_with(&meta.region));
         let id = meta.region.id;
         let data_end_key = meta.region.end.clone();
-        self.regions.insert(id, meta);
-        self.regions_by_range.insert(data_end_key, id);
+        let old = self.regions.insert(id, meta);
+        assert!(old.is_none(), "old region: {:?}", old);
+        let prev_id = self.regions_by_range.insert(data_end_key, id);
+        assert!(prev_id.is_none(), "prev region id: {:?}", prev_id);
         if self.regions.len() == 1 {
             assert!(!self.is_active.load(Ordering::Relaxed));
             self.is_active.store(true, Ordering::Relaxed);
@@ -342,6 +344,10 @@ impl RegionMetaMap {
         if let Some((_key, id)) = entry {
             let meta = &self.regions[id];
             if meta.region.start < region.end {
+                tikv_util::error!("unexpected overlap";
+                    "regions" => ?&self.regions,
+                    "regions_by_range" => ?&self.regions_by_range,
+                    "new_meta" => ?meta);
                 return true;
             }
         }
@@ -363,7 +369,7 @@ impl RegionMetaMap {
                 removed_regions.push(region_meta.region.id);
                 return true;
             }
-            warn!("ime load region overlaps with existing region";
+            tikv_util::debug!("ime load region overlaps with existing region";
                 "region" => ?region,
                 "exist_meta" => ?region_meta);
             overlapped_region_state = Some(region_meta.state);
