@@ -257,14 +257,13 @@ mod tests {
             },
         ];
 
-        for (i, c) in cases.into_iter().enumerate() {
+        for c in cases {
             let mut cfg = RangeCacheEngineConfig::default();
             cfg.enabled = true;
             cfg.hard_limit_threshold = c.hard_limit_threshold;
             cfg.soft_limit_threshold = c.soft_limit_threshold;
             cfg.stop_load_limit_threshold = c.stop_load_limit_threshold;
 
-            dbg!(i);
             let res = cfg.validate(c.capacity, c.region_size);
             if c.expect_err {
                 res.unwrap_err();
