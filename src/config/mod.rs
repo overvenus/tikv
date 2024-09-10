@@ -98,7 +98,7 @@ pub const BLOCK_CACHE_RATE: f64 = 0.45;
 /// Because multi-rocksdb has 25% memory table quota, we have to reduce block
 /// cache a bit
 pub const RAFTSTORE_V2_BLOCK_CACHE_RATE: f64 = 0.30;
-/// By default. 15% of block cache size will be used for in-memory engine.
+/// By default. 20% of block cache size will be used for in-memory engine.
 const IN_MEMORY_ENGINE_BLOCK_CACHE_RATE: f64 = 0.20;
 
 /// By default, TiKV will try to limit memory usage to 75% of system memory.
