@@ -99,7 +99,7 @@ pub const BLOCK_CACHE_RATE: f64 = 0.45;
 /// cache a bit
 pub const RAFTSTORE_V2_BLOCK_CACHE_RATE: f64 = 0.30;
 /// By default. 15% of block cache size will be used for in-memory engine.
-const IN_MEMORY_ENGINE_BLOCK_CACHE_RATE: f64 = 0.15;
+const IN_MEMORY_ENGINE_BLOCK_CACHE_RATE: f64 = 0.20;
 
 /// By default, TiKV will try to limit memory usage to 75% of system memory.
 pub const MEMORY_USAGE_LIMIT_RATE: f64 = 0.75;
