@@ -19,8 +19,8 @@ use bytes::Bytes;
 use collections::{HashMap, HashSet};
 use crossbeam::{atomic::AtomicCell, channel::TrySendError};
 use engine_traits::{
-    CacheRegion, Engines, KvEngine, PerfContext, RaftEngine, Snapshot, SnapshotContext, WriteBatch,
-    WriteOptions, CF_DEFAULT, CF_LOCK, CF_WRITE,
+    Engines, KvEngine, PerfContext, RaftEngine, Snapshot, WriteBatch, WriteOptions, CF_DEFAULT,
+    CF_LOCK, CF_WRITE,
 };
 use error_code::ErrorCodeExt;
 use fail::fail_point;
@@ -90,7 +90,7 @@ use crate::{
         RoleChange,
     },
     errors::RAFTSTORE_IS_BUSY,
-    router::RaftStoreRouter,
+    router::{RaftStoreRouter, ReadContext},
     store::{
         async_io::{read::ReadTask, write::WriteMsg, write_router::WriteRouter},
         fsm::{
@@ -3915,7 +3915,12 @@ where
         self.should_wake_up = true;
     }
 
-    fn pre_transfer_leader(&mut self, peer: &metapb::Peer) -> bool {
+    fn pre_transfer_leader<T: Transport>(
+        &mut self,
+        peer: &metapb::Peer,
+        extra_msgs: Vec<ExtraMessage>,
+        ctx: &mut PollContext<EK, ER, T>,
+    ) -> bool {
         // Checks if safe to transfer leader.
         if self.raft_group.raft.has_pending_conf() {
             info!(
@@ -3941,6 +3946,17 @@ where
         // forbids setting it for MsgTransferLeader messages.
         msg.set_log_term(self.term());
         self.raft_group.raft.msgs.push(msg);
+
+        extra_msgs.into_iter().for_each(|extra_msg| {
+            let mut msg = RaftMessage::default();
+            msg.set_region_id(self.region_id);
+            msg.set_from_peer(self.peer.clone());
+            msg.set_to_peer(peer.clone());
+            msg.set_region_epoch(self.region().get_region_epoch().clone());
+            msg.set_extra_msg(extra_msg);
+            self.send_raft_messages(ctx, vec![msg]);
+        });
+
         true
     }
 
@@ -4794,27 +4810,29 @@ where
     ///    to do the remaining work.
     ///
     /// See also: tikv/rfcs#37.
-    fn propose_transfer_leader<T>(
+    fn propose_transfer_leader<T: Transport>(
         &mut self,
         ctx: &mut PollContext<EK, ER, T>,
         req: RaftCmdRequest,
         cb: Callback<EK::Snapshot>,
     ) -> bool {
         let transfer_leader = get_transfer_leader_cmd(&req).unwrap();
-        if let Err(err) = ctx
+        let extra_msgs = match ctx
             .coprocessor_host
             .pre_transfer_leader(self.region(), transfer_leader)
         {
-            warn!("Coprocessor rejected transfer leader."; "err" => ?err,
+            Err(err) => {
+                warn!("Coprocessor rejected transfer leader."; "err" => ?err,
                 "region_id" => self.region_id,
                 "peer_id" => self.peer.get_id(),
                 "transferee" => transfer_leader.get_peer().get_id());
-            let mut resp = RaftCmdResponse::new();
-            *resp.mut_header().mut_error() = Error::from(err).into();
-            cb.invoke_with_response(resp);
-            return false;
-        }
-
+                let mut resp = RaftCmdResponse::new();
+                *resp.mut_header().mut_error() = Error::from(err).into();
+                cb.invoke_with_response(resp);
+                return false;
+            }
+            Ok(msgs) => msgs,
+        };
         ctx.raft_metrics.propose.transfer_leader.inc();
 
         let prs = self.raft_group.raft.prs();
@@ -4846,7 +4864,7 @@ where
         let transferred = if peer.id == self.peer.id {
             false
         } else {
-            self.pre_transfer_leader(peer)
+            self.pre_transfer_leader(peer, extra_msgs, ctx)
         };
 
         // transfer leader command doesn't need to replicate log and apply, so we
@@ -5033,23 +5051,20 @@ where
             }
         }
 
-        let snap_ctx = if let Ok(read_ts) = decode_u64(&mut req.get_header().get_flag_data()) {
-            Some(SnapshotContext {
-                region: Some(CacheRegion::from_region(&region)),
-                read_ts,
-            })
+        let read_ctx = if let Ok(read_ts) = decode_u64(&mut req.get_header().get_flag_data()) {
+            ReadContext::new(None, Some(read_ts))
         } else {
-            None
+            ReadContext::new(None, None)
         };
 
         let mut reader = PollContextReader {
             engines: &ctx.engines,
         };
         let mut resp = reader.execute(
+            &read_ctx,
             &req,
             &Arc::new(region),
             read_index,
-            snap_ctx,
             None,
             &ctx.coprocessor_host,
         );
@@ -5239,7 +5254,7 @@ where
 
     // Check disk usages for the peer itself and other peers in the raft group.
     // The return value indicates whether the proposal is allowed or not.
-    fn check_normal_proposal_with_disk_full_opt<T>(
+    fn check_normal_proposal_with_disk_full_opt<T: Transport>(
         &mut self,
         ctx: &mut PollContext<EK, ER, T>,
         disk_full_opt: DiskFullOpt,
@@ -5275,7 +5290,7 @@ where
                         "peer_id" => self.peer.get_id(),
                         "target_peer_id" => p.get_id(),
                     );
-                    self.pre_transfer_leader(&p);
+                    self.pre_transfer_leader(&p, vec![], ctx);
                 }
             }
         } else {
@@ -6052,12 +6067,8 @@ where
         &self.engines.kv
     }
 
-    fn get_snapshot(
-        &mut self,
-        snap_ctx: Option<SnapshotContext>,
-        _: &Option<LocalReadContext<'_, EK>>,
-    ) -> Arc<EK::Snapshot> {
-        Arc::new(self.engines.kv.snapshot(snap_ctx))
+    fn get_snapshot(&mut self, _: &Option<LocalReadContext<'_, EK>>) -> Arc<EK::Snapshot> {
+        Arc::new(self.engines.kv.snapshot())
     }
 }
 
