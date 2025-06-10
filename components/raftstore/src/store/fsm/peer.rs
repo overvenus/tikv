@@ -636,6 +636,7 @@ where
         let count = msgs.len();
         #[allow(const_evaluatable_unchecked)]
         let mut distribution = [0; PeerMsg::<EK>::COUNT];
+        let mut last_msg: Option<(PeerMsg<EK>, Instant)> = None;
         for m in msgs.drain(..) {
             // skip handling remain messages if fsm is destroyed. This can aviod handling
             // arbitary messages(e.g. CasualMessage::ForceCompactRaftLogs) that may need
@@ -645,6 +646,18 @@ where
             if self.fsm.stopped && !matches!(&m, PeerMsg::RaftCommand(_)) {
                 continue;
             }
+            let now = Instant::now();
+            if let Some((msg, t)) = last_msg {
+                if now.saturating_duration_since(t) > Duration::from_millis(2) {
+                    warn!("dbg slow peer message handling";
+                        "region_id" => self.fsm.region_id(),
+                        "peer_id" => self.fsm.peer_id(),
+                        "msg" => ?msg,
+                        "elapsed" => ?now.saturating_duration_since(t),
+                    );
+                }
+            }
+            last_msg = Some((m.clone(), now));
             distribution[m.discriminant()] += 1;
             match m {
                 PeerMsg::RaftMessage(msg, sent_time) => {
@@ -730,6 +743,19 @@ where
                 }
             }
         }
+
+        let now = Instant::now();
+        if let Some((msg, t)) = last_msg {
+            if now.saturating_duration_since(t) > Duration::from_millis(2) {
+                warn!("dbg slow peer message handling";
+                    "region_id" => self.fsm.region_id(),
+                    "peer_id" => self.fsm.peer_id(),
+                    "msg" => ?msg,
+                    "elapsed" => ?now.saturating_duration_since(t),
+                );
+            }
+        }
+
         self.on_loop_finished();
         slow_log!(
             T timer,
@@ -998,8 +1024,8 @@ where
         let term = self.fsm.peer.raft_group.raft.term;
         if let Some(e) = &req.expected_epoch {
             if let Err(err) = compare_region_epoch(e, self.region(), true, true, true) {
-                warn!("epoch not match for wait apply, aborting."; "err" => %err, 
-                    "peer" => self.fsm.peer.peer_id(), 
+                warn!("epoch not match for wait apply, aborting."; "err" => %err,
+                    "peer" => self.fsm.peer.peer_id(),
                     "region" => self.fsm.peer.region().get_id());
                 let mut pberr = errorpb::Error::from(err);
                 req.syncer
@@ -1214,7 +1240,7 @@ where
             CasualMessage::ForceCompactRaftLogs => {
                 self.on_raft_gc_log_tick(true);
             }
-            CasualMessage::AccessPeer(cb) => {
+            CasualMessage::AccessPeer(mut cb) => {
                 let peer = &self.fsm.peer;
                 let store = peer.get_store();
                 let mut local_state = RegionLocalState::default();
@@ -1225,7 +1251,7 @@ where
                 if store.is_applying_snapshot() {
                     local_state.set_state(PeerState::Applying);
                 }
-                cb(RegionMeta::new(
+                (cb.0.take().unwrap())(RegionMeta::new(
                     &local_state,
                     store.apply_state(),
                     self.fsm.hibernate_state.group_state(),

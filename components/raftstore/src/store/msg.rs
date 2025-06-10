@@ -120,6 +120,12 @@ pub enum Callback<S: Snapshot> {
     Test { cb: TestCallback },
 }
 
+impl <S: Snapshot> Clone for Callback<S> {
+    fn clone(&self) -> Self {
+        Callback::None
+    }
+}
+
 impl<S: Snapshot> HeapSize for Callback<S> {}
 
 impl<S> Callback<S>
@@ -459,7 +465,7 @@ impl StoreTick {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MergeResultKind {
     /// Its target peer applys `CommitMerge` log.
     FromTargetLog,
@@ -535,6 +541,81 @@ where
     CheckPendingAdmin(UnboundedSender<CheckAdminResponse>),
 }
 
+impl <SK> Clone for SignificantMsg<SK>
+where
+    SK: Snapshot,
+{
+    fn clone(&self) -> Self {
+        match self {
+            SignificantMsg::SnapshotStatus { region_id, to_peer_id, status } => {
+                SignificantMsg::SnapshotStatus {
+                    region_id: *region_id,
+                    to_peer_id: *to_peer_id,
+                    status: *status,
+                }
+            }
+            SignificantMsg::StoreUnreachable { store_id } => {
+                SignificantMsg::StoreUnreachable { store_id: *store_id }
+            }
+            SignificantMsg::Unreachable { region_id, to_peer_id } => {
+                SignificantMsg::Unreachable {
+                    region_id: *region_id,
+                    to_peer_id: *to_peer_id,
+                }
+            }
+            SignificantMsg::CatchUpLogs(catch_up_logs) => SignificantMsg::CatchUpLogs(catch_up_logs.clone()),
+            SignificantMsg::MergeResult { target_region_id, target, result } => {
+                SignificantMsg::MergeResult {
+                    target_region_id: *target_region_id,
+                    target: target.clone(),
+                    result: result.clone(),
+                }
+            }
+            SignificantMsg::StoreResolved { store_id, group_id } => {
+                SignificantMsg::StoreResolved { store_id: *store_id, group_id: *group_id }
+            }
+            SignificantMsg::CaptureChange { cmd, region_epoch, callback } => {
+                SignificantMsg::CaptureChange {
+                    cmd: cmd.clone(),
+                    region_epoch: region_epoch.clone(),
+                    callback: callback.clone(),
+                }
+            }
+            SignificantMsg::LeaderCallback(callback) => SignificantMsg::LeaderCallback(callback.clone()),
+            SignificantMsg::RaftLogGcFlushed => SignificantMsg::RaftLogGcFlushed,
+            SignificantMsg::RaftlogFetched(fetched_logs) => SignificantMsg::RaftlogFetched(fetched_logs.clone()),
+            SignificantMsg::EnterForceLeaderState { syncer, failed_stores } => {
+                SignificantMsg::EnterForceLeaderState {
+                    syncer: syncer.clone(),
+                    failed_stores: failed_stores.clone(),
+                }
+            }
+            SignificantMsg::ExitForceLeaderState => SignificantMsg::ExitForceLeaderState,
+            SignificantMsg::UnsafeRecoveryDemoteFailedVoters { syncer, failed_voters } => {
+                SignificantMsg::UnsafeRecoveryDemoteFailedVoters {
+                    syncer: syncer.clone(),
+                    failed_voters: failed_voters.clone(),
+                }
+            }
+            SignificantMsg::UnsafeRecoveryDestroy(syncer) => {
+                SignificantMsg::UnsafeRecoveryDestroy(syncer.clone())
+            }
+            SignificantMsg::UnsafeRecoveryWaitApply(syncer) => {
+                SignificantMsg::UnsafeRecoveryWaitApply(syncer.clone())
+            }
+            SignificantMsg::UnsafeRecoveryFillOutReport(syncer) => {
+                SignificantMsg::UnsafeRecoveryFillOutReport(syncer.clone())
+            }
+            SignificantMsg::SnapshotBrWaitApply(request) => {
+                SignificantMsg::SnapshotBrWaitApply(request.clone())
+            }
+            SignificantMsg::CheckPendingAdmin(sender) => {
+                SignificantMsg::CheckPendingAdmin(sender.clone())
+            }
+        }
+    }
+}
+
 /// Campaign type for triggering a Raft campaign.
 #[derive(Debug, Clone, Copy)]
 pub enum CampaignType {
@@ -546,9 +627,24 @@ pub enum CampaignType {
     UnsafeSplitCampaign,
 }
 
+pub struct AccessPeer(pub Option<Box<dyn FnOnce(RegionMeta) + Send + 'static>>);
+
+impl Clone for AccessPeer {
+    fn clone(&self) -> Self {
+        AccessPeer(None)
+    }
+}
+
+impl fmt::Debug for AccessPeer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AccessPeer(...)")
+    }
+}
+
 /// Message that will be sent to a peer.
 ///
 /// These messages are not significant and can be dropped occasionally.
+#[derive(Debug)]
 pub enum CasualMessage<EK: KvEngine> {
     /// Split the target region into several partitions.
     SplitRegion {
@@ -610,7 +706,7 @@ pub enum CasualMessage<EK: KvEngine> {
     ForceCompactRaftLogs,
 
     /// A message to access peer's internal state.
-    AccessPeer(Box<dyn FnOnce(RegionMeta) + Send + 'static>),
+    AccessPeer(AccessPeer),
 
     /// Region info from PD
     QueryRegionLeaderResp {
@@ -644,80 +740,168 @@ pub enum CasualMessage<EK: KvEngine> {
     Campaign(CampaignType),
 }
 
-impl<EK: KvEngine> fmt::Debug for CasualMessage<EK> {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<EK: KvEngine> Clone for CasualMessage<EK> {
+    fn clone(&self) -> Self {
         match self {
-            CasualMessage::ComputeHashResult {
-                index,
-                context,
-                ref hash,
-            } => write!(
-                fmt,
-                "ComputeHashResult [index: {}, context: {}, hash: {}]",
-                index,
-                log_wrappers::Value::key(context),
-                escape(hash)
-            ),
             CasualMessage::SplitRegion {
-                ref split_keys,
+                region_epoch,
+                split_keys,
+                callback,
                 source,
-                ..
-            } => write!(
-                fmt,
-                "Split region with {} from {}",
-                KeysInfoFormatter(split_keys.iter()),
-                source,
-            ),
+                share_source_region_size,
+            } => CasualMessage::SplitRegion {
+                region_epoch: region_epoch.clone(),
+                split_keys: split_keys.clone(),
+                callback: callback.clone(),
+                source: source.clone(),
+                share_source_region_size: *share_source_region_size,
+            },
+            CasualMessage::ComputeHashResult { index, context, hash } => {
+                CasualMessage::ComputeHashResult {
+                    index: *index,
+                    context: context.clone(),
+                    hash: hash.clone(),
+                }
+            }
             CasualMessage::RegionApproximateSize { size, splitable } => {
-                write!(
-                    fmt,
-                    "Region's approximate size [size: {:?}], [splitable: {:?}]",
-                    size, splitable
-                )
+                CasualMessage::RegionApproximateSize {
+                    size: size.clone(),
+                    splitable: splitable.clone(),
+                }
             }
             CasualMessage::RegionApproximateKeys { keys, splitable } => {
-                write!(
-                    fmt,
-                    "Region's approximate keys [keys: {:?}], [splitable: {:?}",
-                    keys, splitable
-                )
+                CasualMessage::RegionApproximateKeys {
+                    keys: keys.clone(),
+                    splitable: splitable.clone(),
+                }
             }
             CasualMessage::CompactionDeclinedBytes { bytes } => {
-                write!(fmt, "compaction declined bytes {}", bytes)
+                CasualMessage::CompactionDeclinedBytes { bytes: *bytes }
             }
-            CasualMessage::HalfSplitRegion { source, .. } => {
-                write!(fmt, "Half Split from {}", source)
-            }
-            CasualMessage::GcSnap { ref snaps } => write! {
-                fmt,
-                "gc snaps {:?}",
-                snaps
+            CasualMessage::HalfSplitRegion {
+                region_epoch,
+                start_key,
+                end_key,
+                policy,
+                source,
+                cb,
+            } => CasualMessage::HalfSplitRegion {
+                region_epoch: region_epoch.clone(),
+                start_key: start_key.clone(),
+                end_key: end_key.clone(),
+                policy: *policy,
+                source,
+                cb: cb.clone(),
             },
-            CasualMessage::ClearRegionSize => write! {
-                fmt,
-                "clear region size"
+            CasualMessage::GcSnap { snaps } => CasualMessage::GcSnap { snaps: snaps.clone() },
+            CasualMessage::ClearRegionSize => CasualMessage::ClearRegionSize,
+            CasualMessage::RegionOverlapped => CasualMessage::RegionOverlapped,
+            CasualMessage::SnapshotGenerated => CasualMessage::SnapshotGenerated,
+            CasualMessage::ForceCompactRaftLogs => CasualMessage::ForceCompactRaftLogs,
+            CasualMessage::AccessPeer(access_peer) => CasualMessage::AccessPeer(access_peer.clone()),
+            CasualMessage::QueryRegionLeaderResp { region, leader } => {
+                CasualMessage::QueryRegionLeaderResp { region: region.clone(), leader: leader.clone() }
+            }
+            CasualMessage::RejectRaftAppend { peer_id } => CasualMessage::RejectRaftAppend {
+                peer_id: *peer_id,
             },
-            CasualMessage::RegionOverlapped => write!(fmt, "RegionOverlapped"),
-            CasualMessage::SnapshotGenerated => write!(fmt, "SnapshotGenerated"),
-            CasualMessage::ForceCompactRaftLogs => write!(fmt, "ForceCompactRaftLogs"),
-            CasualMessage::AccessPeer(_) => write!(fmt, "AccessPeer"),
-            CasualMessage::QueryRegionLeaderResp { .. } => write!(fmt, "QueryRegionLeaderResp"),
-            CasualMessage::RejectRaftAppend { peer_id } => {
-                write!(fmt, "RejectRaftAppend(peer_id={})", peer_id)
+            CasualMessage::RefreshRegionBuckets {
+                region_epoch,
+                buckets,
+                bucket_ranges,
+                cb,
+            } => CasualMessage::RefreshRegionBuckets {
+                region_epoch: region_epoch.clone(),
+                buckets: buckets.clone(),
+                bucket_ranges: bucket_ranges.clone(),
+                cb: cb.clone(),
+            },
+            CasualMessage::RenewLease => CasualMessage::RenewLease,
+            CasualMessage::SnapshotApplied { peer_id, tombstone } => {
+                CasualMessage::SnapshotApplied {
+                    peer_id: *peer_id,
+                    tombstone: *tombstone,
+                }
             }
-            CasualMessage::RefreshRegionBuckets { .. } => write!(fmt, "RefreshRegionBuckets"),
-            CasualMessage::RenewLease => write!(fmt, "RenewLease"),
-            CasualMessage::SnapshotApplied { peer_id, tombstone } => write!(
-                fmt,
-                "SnapshotApplied, peer_id={}, tombstone={}",
-                peer_id, tombstone
-            ),
-            CasualMessage::Campaign(_) => {
-                write!(fmt, "Campaign")
-            }
+            CasualMessage::Campaign(campaign_type) => CasualMessage::Campaign(*campaign_type),
         }
     }
 }
+
+// impl<EK: KvEngine> fmt::Debug for CasualMessage<EK> {
+//     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         match self {
+//             CasualMessage::ComputeHashResult {
+//                 index,
+//                 context,
+//                 ref hash,
+//             } => write!(
+//                 fmt,
+//                 "ComputeHashResult [index: {}, context: {}, hash: {}]",
+//                 index,
+//                 log_wrappers::Value::key(context),
+//                 escape(hash)
+//             ),
+//             CasualMessage::SplitRegion {
+//                 ref split_keys,
+//                 source,
+//                 ..
+//             } => write!(
+//                 fmt,
+//                 "Split region with {} from {}",
+//                 KeysInfoFormatter(split_keys.iter()),
+//                 source,
+//             ),
+//             CasualMessage::RegionApproximateSize { size, splitable } => {
+//                 write!(
+//                     fmt,
+//                     "Region's approximate size [size: {:?}], [splitable: {:?}]",
+//                     size, splitable
+//                 )
+//             }
+//             CasualMessage::RegionApproximateKeys { keys, splitable } => {
+//                 write!(
+//                     fmt,
+//                     "Region's approximate keys [keys: {:?}], [splitable: {:?}",
+//                     keys, splitable
+//                 )
+//             }
+//             CasualMessage::CompactionDeclinedBytes { bytes } => {
+//                 write!(fmt, "compaction declined bytes {}", bytes)
+//             }
+//             CasualMessage::HalfSplitRegion { source, .. } => {
+//                 write!(fmt, "Half Split from {}", source)
+//             }
+//             CasualMessage::GcSnap { ref snaps } => write! {
+//                 fmt,
+//                 "gc snaps {:?}",
+//                 snaps
+//             },
+//             CasualMessage::ClearRegionSize => write! {
+//                 fmt,
+//                 "clear region size"
+//             },
+//             CasualMessage::RegionOverlapped => write!(fmt, "RegionOverlapped"),
+//             CasualMessage::SnapshotGenerated => write!(fmt, "SnapshotGenerated"),
+//             CasualMessage::ForceCompactRaftLogs => write!(fmt, "ForceCompactRaftLogs"),
+//             CasualMessage::AccessPeer(_) => write!(fmt, "AccessPeer"),
+//             CasualMessage::QueryRegionLeaderResp { .. } => write!(fmt, "QueryRegionLeaderResp"),
+//             CasualMessage::RejectRaftAppend { peer_id } => {
+//                 write!(fmt, "RejectRaftAppend(peer_id={})", peer_id)
+//             }
+//             CasualMessage::RefreshRegionBuckets { .. } => write!(fmt, "RefreshRegionBuckets"),
+//             CasualMessage::RenewLease => write!(fmt, "RenewLease"),
+//             CasualMessage::SnapshotApplied { peer_id, tombstone } => write!(
+//                 fmt,
+//                 "SnapshotApplied, peer_id={}, tombstone={}",
+//                 peer_id, tombstone
+//             ),
+//             CasualMessage::Campaign(_) => {
+//                 write!(fmt, "Campaign")
+//             }
+//         }
+//     }
+// }
 
 /// control options for raftcmd.
 #[derive(Debug, Default, Clone)]
@@ -734,6 +918,17 @@ pub struct RaftCommand<S: Snapshot> {
     pub request: RaftCmdRequest,
     pub callback: Callback<S>,
     pub extra_opts: RaftCmdExtraOpts,
+}
+
+impl<S: Snapshot> Clone for RaftCommand<S> {
+    fn clone(&self) -> Self {
+        RaftCommand {
+            send_time: self.send_time,
+            request: self.request.clone(),
+            callback: self.callback.clone(),
+            extra_opts: self.extra_opts.clone(),
+        }
+    }
 }
 
 impl<S: Snapshot> RaftCommand<S> {
@@ -764,13 +959,14 @@ impl<S: Snapshot> RaftCommand<S> {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct InspectedRaftMessage {
     pub heap_size: usize,
     pub msg: RaftMessage,
 }
 
 /// Message that can be sent to a peer.
-#[derive(EnumCount, EnumVariantNames)]
+#[derive(EnumCount, EnumVariantNames, Debug)]
 pub enum PeerMsg<EK: KvEngine> {
     /// Raft message is the message sent between raft nodes in the same
     /// raft group. Messages need to be redirected to raftstore if target
@@ -808,35 +1004,56 @@ pub enum PeerMsg<EK: KvEngine> {
 
 impl<EK: KvEngine> ResourceMetered for PeerMsg<EK> {}
 
-impl<EK: KvEngine> fmt::Debug for PeerMsg<EK> {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<EK: KvEngine> Clone for PeerMsg<EK> {
+    fn clone(&self) -> Self {
         match self {
-            PeerMsg::RaftMessage(..) => write!(fmt, "Raft Message"),
-            PeerMsg::RaftCommand(_) => write!(fmt, "Raft Command"),
-            PeerMsg::Tick(tick) => write! {
-                fmt,
-                "{:?}",
-                tick
-            },
-            PeerMsg::SignificantMsg(msg) => write!(fmt, "{:?}", msg),
-            PeerMsg::ApplyRes(res) => write!(fmt, "ApplyRes {:?}", res),
-            PeerMsg::Start => write!(fmt, "Startup"),
-            PeerMsg::Noop => write!(fmt, "Noop"),
-            PeerMsg::Persisted {
-                peer_id,
-                ready_number,
-            } => write!(
-                fmt,
-                "Persisted peer_id {}, ready_number {}",
-                peer_id, ready_number
-            ),
-            PeerMsg::CasualMessage(msg) => write!(fmt, "CasualMessage {:?}", msg),
-            PeerMsg::HeartbeatPd => write!(fmt, "HeartbeatPd"),
-            PeerMsg::UpdateReplicationMode => write!(fmt, "UpdateReplicationMode"),
-            PeerMsg::Destroy(peer_id) => write!(fmt, "Destroy {}", peer_id),
+            PeerMsg::RaftMessage(msg, time) => PeerMsg::RaftMessage(msg.clone(), *time),
+            PeerMsg::RaftCommand(box cmd) => PeerMsg::RaftCommand(Box::new(cmd.clone())),
+            PeerMsg::Tick(tick) => PeerMsg::Tick(*tick),
+            PeerMsg::SignificantMsg(box msg) => PeerMsg::SignificantMsg(Box::new(msg.clone())),
+            PeerMsg::ApplyRes(box res) => PeerMsg::ApplyRes(Box::new(res.clone())),
+            PeerMsg::Start => PeerMsg::Start,
+            PeerMsg::Noop => PeerMsg::Noop,
+            PeerMsg::Persisted { peer_id, ready_number } => {
+                PeerMsg::Persisted { peer_id: *peer_id, ready_number: *ready_number }
+            }
+            PeerMsg::CasualMessage(box msg) => PeerMsg::CasualMessage(Box::new(msg.clone())),
+            PeerMsg::HeartbeatPd => PeerMsg::HeartbeatPd,
+            PeerMsg::UpdateReplicationMode => PeerMsg::UpdateReplicationMode,
+            PeerMsg::Destroy(peer_id) => PeerMsg::Destroy(*peer_id),
         }
     }
 }
+
+// impl<EK: KvEngine> fmt::Debug for PeerMsg<EK> {
+//     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         match self {
+//             PeerMsg::RaftMessage(..) => write!(fmt, "Raft Message"),
+//             PeerMsg::RaftCommand(_) => write!(fmt, "Raft Command"),
+//             PeerMsg::Tick(tick) => write! {
+//                 fmt,
+//                 "{:?}",
+//                 tick
+//             },
+//             PeerMsg::SignificantMsg(msg) => write!(fmt, "{:?}", msg),
+//             PeerMsg::ApplyRes(res) => write!(fmt, "ApplyRes {:?}", res),
+//             PeerMsg::Start => write!(fmt, "Startup"),
+//             PeerMsg::Noop => write!(fmt, "Noop"),
+//             PeerMsg::Persisted {
+//                 peer_id,
+//                 ready_number,
+//             } => write!(
+//                 fmt,
+//                 "Persisted peer_id {}, ready_number {}",
+//                 peer_id, ready_number
+//             ),
+//             PeerMsg::CasualMessage(msg) => write!(fmt, "CasualMessage {:?}", msg),
+//             PeerMsg::HeartbeatPd => write!(fmt, "HeartbeatPd"),
+//             PeerMsg::UpdateReplicationMode => write!(fmt, "UpdateReplicationMode"),
+//             PeerMsg::Destroy(peer_id) => write!(fmt, "Destroy {}", peer_id),
+//         }
+//     }
+// }
 
 impl<EK: KvEngine> PeerMsg<EK> {
     pub fn discriminant(&self) -> usize {

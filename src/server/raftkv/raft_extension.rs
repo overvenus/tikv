@@ -19,6 +19,7 @@ use raftstore::{
         CasualMessage,
     },
 };
+use raftstore::store::msg::AccessPeer;
 use tikv_util::future::paired_future_callback;
 
 use crate::storage::kv;
@@ -143,7 +144,7 @@ where
         let (cb, rx) = paired_future_callback();
         let res = self
             .router
-            .send_casual_msg(region_id, CasualMessage::AccessPeer(cb));
+            .send_casual_msg(region_id, CasualMessage::AccessPeer(AccessPeer(Some(cb))));
         Box::pin(async move {
             res?;
             Ok(box_try!(rx.await))

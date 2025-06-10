@@ -212,7 +212,7 @@ impl<C> PendingCmdQueue<C> {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct ChangePeer {
     pub index: u64,
     // The proposed ConfChangeV2 or (legacy) ConfChange
@@ -225,6 +225,7 @@ pub struct ChangePeer {
     pub region: Region,
 }
 
+#[derive(Clone)]
 pub struct Range {
     pub cf: String,
     pub start_key: Vec<u8>,
@@ -253,7 +254,7 @@ impl Range {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct SwitchWitness {
     pub index: u64,
     pub switches: Vec<SwitchWitnessRequest>,
@@ -317,6 +318,71 @@ pub enum ExecResult<S> {
     // and try to compact pending gc. If false, raftstore does not do any additional
     // processing.
     HasPendingCompactCmd(bool),
+}
+
+impl<S: Snapshot> Clone for ExecResult<S> {
+    fn clone(&self) -> ExecResult<S> {
+        match self {
+            ExecResult::ChangePeer(change_peer) => ExecResult::ChangePeer(change_peer.clone()),
+            ExecResult::CompactLog {
+                state,
+                first_index,
+                has_pending,
+            } => ExecResult::CompactLog {
+                state: state.clone(),
+                first_index: *first_index,
+                has_pending: *has_pending,
+            },
+            ExecResult::SplitRegion {
+                regions,
+                derived,
+                new_split_regions,
+                share_source_region_size,
+            } => ExecResult::SplitRegion {
+                regions: regions.clone(),
+                derived: derived.clone(),
+                new_split_regions: new_split_regions.clone(),
+                share_source_region_size: *share_source_region_size,
+            },
+            ExecResult::PrepareMerge { region, state } => {
+                ExecResult::PrepareMerge {
+                    region: region.clone(),
+                    state: state.clone(),
+                }
+            }
+            ExecResult::CommitMerge { index, region, source } => ExecResult::CommitMerge {
+                index: *index,
+                region: region.clone(),
+                source: source.clone(),
+            },
+            ExecResult::RollbackMerge { region, commit } => ExecResult::RollbackMerge {
+                region: region.clone(),
+                commit: *commit,
+            },
+            ExecResult::ComputeHash { .. } => ExecResult::TransferLeader { term: 0 },
+            ExecResult::VerifyHash { index, context, hash } => ExecResult::VerifyHash {
+                index: *index,
+                context: context.clone(),
+                hash: hash.clone(),
+            },
+            ExecResult::DeleteRange { ranges } => ExecResult::DeleteRange {
+                ranges: ranges.clone(),
+            },
+            ExecResult::IngestSst { ssts } => ExecResult::IngestSst {
+                ssts: ssts.clone(),
+            },
+            ExecResult::TransferLeader { term } => ExecResult::TransferLeader { term: *term },
+            ExecResult::Flashback { region } => ExecResult::Flashback {
+                region: region.clone(),
+            },
+            ExecResult::BatchSwitchWitness(switches) => {
+                ExecResult::BatchSwitchWitness(switches.clone())
+            }
+            ExecResult::HasPendingCompactCmd(b) => {
+                ExecResult::HasPendingCompactCmd(*b)
+            }
+        }
+    }
 }
 
 /// The possible returned value when applying logs.
@@ -3627,7 +3693,7 @@ pub struct Destroy {
 
 /// A message that asks the delegate to apply to the given logs and then reply
 /// to target mailbox.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct CatchUpLogs {
     /// The target region to be notified when given logs are applied.
     pub target_region_id: u64,
@@ -3715,7 +3781,7 @@ impl Debug for GenSnapTask {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ObserverType {
     Cdc(ObserveHandle),
     Rts(ObserveHandle),
@@ -3732,7 +3798,7 @@ impl ObserverType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChangeObserver {
     pub ty: ObserverType,
     pub region_id: u64,
@@ -3922,6 +3988,31 @@ where
         // Whether destroy request is from its target region's snapshot
         merge_from_snapshot: bool,
     },
+}
+
+impl<S: Snapshot> Clone for TaskRes<S> {
+    fn clone(&self) -> Self {
+        match self {
+            TaskRes::Apply(res) => TaskRes::Apply(ApplyRes {
+                region_id: res.region_id,
+                apply_state: res.apply_state.clone(),
+                applied_term: res.applied_term,
+                exec_res: res.exec_res.clone(),
+                metrics: res.metrics.clone(),
+                bucket_stat: res.bucket_stat.clone(),
+                write_seqno: res.write_seqno.clone(),
+            }),
+            TaskRes::Destroy {
+                region_id,
+                peer_id,
+                merge_from_snapshot,
+            } => TaskRes::Destroy {
+                region_id: *region_id,
+                peer_id: *peer_id,
+                merge_from_snapshot: *merge_from_snapshot,
+            },
+        }
+    }
 }
 
 pub struct ApplyFsm<EK>

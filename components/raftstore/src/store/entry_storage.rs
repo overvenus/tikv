@@ -387,7 +387,7 @@ pub enum RaftlogFetchState {
     Fetched(Box<RaftlogFetchResult>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct RaftlogFetchResult {
     pub ents: raft::Result<Vec<Entry>>,
     // because entries may be empty, so store the original low index that the task issued

@@ -74,7 +74,7 @@ impl<EK> fmt::Display for ReadTask<EK> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FetchedLogs {
     pub context: GetEntriesContext,
     pub logs: Box<RaftlogFetchResult>,
