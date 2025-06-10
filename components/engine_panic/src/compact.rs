@@ -50,6 +50,7 @@ impl CompactExt for PanicEngine {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct PanicCompactedEvent;
 
 impl CompactedEvent for PanicCompactedEvent {

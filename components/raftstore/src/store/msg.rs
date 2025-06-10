@@ -120,7 +120,7 @@ pub enum Callback<S: Snapshot> {
     Test { cb: TestCallback },
 }
 
-impl <S: Snapshot> Clone for Callback<S> {
+impl<S: Snapshot> Clone for Callback<S> {
     fn clone(&self) -> Self {
         Callback::None
     }
@@ -541,62 +541,78 @@ where
     CheckPendingAdmin(UnboundedSender<CheckAdminResponse>),
 }
 
-impl <SK> Clone for SignificantMsg<SK>
+impl<SK> Clone for SignificantMsg<SK>
 where
     SK: Snapshot,
 {
     fn clone(&self) -> Self {
         match self {
-            SignificantMsg::SnapshotStatus { region_id, to_peer_id, status } => {
-                SignificantMsg::SnapshotStatus {
-                    region_id: *region_id,
-                    to_peer_id: *to_peer_id,
-                    status: *status,
-                }
+            SignificantMsg::SnapshotStatus {
+                region_id,
+                to_peer_id,
+                status,
+            } => SignificantMsg::SnapshotStatus {
+                region_id: *region_id,
+                to_peer_id: *to_peer_id,
+                status: *status,
+            },
+            SignificantMsg::StoreUnreachable { store_id } => SignificantMsg::StoreUnreachable {
+                store_id: *store_id,
+            },
+            SignificantMsg::Unreachable {
+                region_id,
+                to_peer_id,
+            } => SignificantMsg::Unreachable {
+                region_id: *region_id,
+                to_peer_id: *to_peer_id,
+            },
+            SignificantMsg::CatchUpLogs(catch_up_logs) => {
+                SignificantMsg::CatchUpLogs(catch_up_logs.clone())
             }
-            SignificantMsg::StoreUnreachable { store_id } => {
-                SignificantMsg::StoreUnreachable { store_id: *store_id }
+            SignificantMsg::MergeResult {
+                target_region_id,
+                target,
+                result,
+            } => SignificantMsg::MergeResult {
+                target_region_id: *target_region_id,
+                target: target.clone(),
+                result: result.clone(),
+            },
+            SignificantMsg::StoreResolved { store_id, group_id } => SignificantMsg::StoreResolved {
+                store_id: *store_id,
+                group_id: *group_id,
+            },
+            SignificantMsg::CaptureChange {
+                cmd,
+                region_epoch,
+                callback,
+            } => SignificantMsg::CaptureChange {
+                cmd: cmd.clone(),
+                region_epoch: region_epoch.clone(),
+                callback: callback.clone(),
+            },
+            SignificantMsg::LeaderCallback(callback) => {
+                SignificantMsg::LeaderCallback(callback.clone())
             }
-            SignificantMsg::Unreachable { region_id, to_peer_id } => {
-                SignificantMsg::Unreachable {
-                    region_id: *region_id,
-                    to_peer_id: *to_peer_id,
-                }
-            }
-            SignificantMsg::CatchUpLogs(catch_up_logs) => SignificantMsg::CatchUpLogs(catch_up_logs.clone()),
-            SignificantMsg::MergeResult { target_region_id, target, result } => {
-                SignificantMsg::MergeResult {
-                    target_region_id: *target_region_id,
-                    target: target.clone(),
-                    result: result.clone(),
-                }
-            }
-            SignificantMsg::StoreResolved { store_id, group_id } => {
-                SignificantMsg::StoreResolved { store_id: *store_id, group_id: *group_id }
-            }
-            SignificantMsg::CaptureChange { cmd, region_epoch, callback } => {
-                SignificantMsg::CaptureChange {
-                    cmd: cmd.clone(),
-                    region_epoch: region_epoch.clone(),
-                    callback: callback.clone(),
-                }
-            }
-            SignificantMsg::LeaderCallback(callback) => SignificantMsg::LeaderCallback(callback.clone()),
             SignificantMsg::RaftLogGcFlushed => SignificantMsg::RaftLogGcFlushed,
-            SignificantMsg::RaftlogFetched(fetched_logs) => SignificantMsg::RaftlogFetched(fetched_logs.clone()),
-            SignificantMsg::EnterForceLeaderState { syncer, failed_stores } => {
-                SignificantMsg::EnterForceLeaderState {
-                    syncer: syncer.clone(),
-                    failed_stores: failed_stores.clone(),
-                }
+            SignificantMsg::RaftlogFetched(fetched_logs) => {
+                SignificantMsg::RaftlogFetched(fetched_logs.clone())
             }
+            SignificantMsg::EnterForceLeaderState {
+                syncer,
+                failed_stores,
+            } => SignificantMsg::EnterForceLeaderState {
+                syncer: syncer.clone(),
+                failed_stores: failed_stores.clone(),
+            },
             SignificantMsg::ExitForceLeaderState => SignificantMsg::ExitForceLeaderState,
-            SignificantMsg::UnsafeRecoveryDemoteFailedVoters { syncer, failed_voters } => {
-                SignificantMsg::UnsafeRecoveryDemoteFailedVoters {
-                    syncer: syncer.clone(),
-                    failed_voters: failed_voters.clone(),
-                }
-            }
+            SignificantMsg::UnsafeRecoveryDemoteFailedVoters {
+                syncer,
+                failed_voters,
+            } => SignificantMsg::UnsafeRecoveryDemoteFailedVoters {
+                syncer: syncer.clone(),
+                failed_voters: failed_voters.clone(),
+            },
             SignificantMsg::UnsafeRecoveryDestroy(syncer) => {
                 SignificantMsg::UnsafeRecoveryDestroy(syncer.clone())
             }
@@ -756,13 +772,15 @@ impl<EK: KvEngine> Clone for CasualMessage<EK> {
                 source: source.clone(),
                 share_source_region_size: *share_source_region_size,
             },
-            CasualMessage::ComputeHashResult { index, context, hash } => {
-                CasualMessage::ComputeHashResult {
-                    index: *index,
-                    context: context.clone(),
-                    hash: hash.clone(),
-                }
-            }
+            CasualMessage::ComputeHashResult {
+                index,
+                context,
+                hash,
+            } => CasualMessage::ComputeHashResult {
+                index: *index,
+                context: context.clone(),
+                hash: hash.clone(),
+            },
             CasualMessage::RegionApproximateSize { size, splitable } => {
                 CasualMessage::RegionApproximateSize {
                     size: size.clone(),
@@ -793,18 +811,25 @@ impl<EK: KvEngine> Clone for CasualMessage<EK> {
                 source,
                 cb: cb.clone(),
             },
-            CasualMessage::GcSnap { snaps } => CasualMessage::GcSnap { snaps: snaps.clone() },
+            CasualMessage::GcSnap { snaps } => CasualMessage::GcSnap {
+                snaps: snaps.clone(),
+            },
             CasualMessage::ClearRegionSize => CasualMessage::ClearRegionSize,
             CasualMessage::RegionOverlapped => CasualMessage::RegionOverlapped,
             CasualMessage::SnapshotGenerated => CasualMessage::SnapshotGenerated,
             CasualMessage::ForceCompactRaftLogs => CasualMessage::ForceCompactRaftLogs,
-            CasualMessage::AccessPeer(access_peer) => CasualMessage::AccessPeer(access_peer.clone()),
-            CasualMessage::QueryRegionLeaderResp { region, leader } => {
-                CasualMessage::QueryRegionLeaderResp { region: region.clone(), leader: leader.clone() }
+            CasualMessage::AccessPeer(access_peer) => {
+                CasualMessage::AccessPeer(access_peer.clone())
             }
-            CasualMessage::RejectRaftAppend { peer_id } => CasualMessage::RejectRaftAppend {
-                peer_id: *peer_id,
-            },
+            CasualMessage::QueryRegionLeaderResp { region, leader } => {
+                CasualMessage::QueryRegionLeaderResp {
+                    region: region.clone(),
+                    leader: leader.clone(),
+                }
+            }
+            CasualMessage::RejectRaftAppend { peer_id } => {
+                CasualMessage::RejectRaftAppend { peer_id: *peer_id }
+            }
             CasualMessage::RefreshRegionBuckets {
                 region_epoch,
                 buckets,
@@ -855,15 +880,15 @@ impl<EK: KvEngine> Clone for CasualMessage<EK> {
 //             CasualMessage::RegionApproximateSize { size, splitable } => {
 //                 write!(
 //                     fmt,
-//                     "Region's approximate size [size: {:?}], [splitable: {:?}]",
-//                     size, splitable
+//                     "Region's approximate size [size: {:?}], [splitable:
+// {:?}]",                     size, splitable
 //                 )
 //             }
 //             CasualMessage::RegionApproximateKeys { keys, splitable } => {
 //                 write!(
 //                     fmt,
-//                     "Region's approximate keys [keys: {:?}], [splitable: {:?}",
-//                     keys, splitable
+//                     "Region's approximate keys [keys: {:?}], [splitable:
+// {:?}",                     keys, splitable
 //                 )
 //             }
 //             CasualMessage::CompactionDeclinedBytes { bytes } => {
@@ -881,18 +906,19 @@ impl<EK: KvEngine> Clone for CasualMessage<EK> {
 //                 fmt,
 //                 "clear region size"
 //             },
-//             CasualMessage::RegionOverlapped => write!(fmt, "RegionOverlapped"),
-//             CasualMessage::SnapshotGenerated => write!(fmt, "SnapshotGenerated"),
-//             CasualMessage::ForceCompactRaftLogs => write!(fmt, "ForceCompactRaftLogs"),
+//             CasualMessage::RegionOverlapped => write!(fmt,
+// "RegionOverlapped"),             CasualMessage::SnapshotGenerated =>
+// write!(fmt, "SnapshotGenerated"),             
+// CasualMessage::ForceCompactRaftLogs => write!(fmt, "ForceCompactRaftLogs"),
 //             CasualMessage::AccessPeer(_) => write!(fmt, "AccessPeer"),
-//             CasualMessage::QueryRegionLeaderResp { .. } => write!(fmt, "QueryRegionLeaderResp"),
-//             CasualMessage::RejectRaftAppend { peer_id } => {
-//                 write!(fmt, "RejectRaftAppend(peer_id={})", peer_id)
-//             }
-//             CasualMessage::RefreshRegionBuckets { .. } => write!(fmt, "RefreshRegionBuckets"),
-//             CasualMessage::RenewLease => write!(fmt, "RenewLease"),
-//             CasualMessage::SnapshotApplied { peer_id, tombstone } => write!(
-//                 fmt,
+//             CasualMessage::QueryRegionLeaderResp { .. } => write!(fmt,
+// "QueryRegionLeaderResp"),             CasualMessage::RejectRaftAppend {
+// peer_id } => {                 write!(fmt, "RejectRaftAppend(peer_id={})",
+// peer_id)             }
+//             CasualMessage::RefreshRegionBuckets { .. } => write!(fmt,
+// "RefreshRegionBuckets"),             CasualMessage::RenewLease => write!(fmt,
+// "RenewLease"),             CasualMessage::SnapshotApplied { peer_id,
+// tombstone } => write!(                 fmt,
 //                 "SnapshotApplied, peer_id={}, tombstone={}",
 //                 peer_id, tombstone
 //             ),
@@ -1014,9 +1040,13 @@ impl<EK: KvEngine> Clone for PeerMsg<EK> {
             PeerMsg::ApplyRes(box res) => PeerMsg::ApplyRes(Box::new(res.clone())),
             PeerMsg::Start => PeerMsg::Start,
             PeerMsg::Noop => PeerMsg::Noop,
-            PeerMsg::Persisted { peer_id, ready_number } => {
-                PeerMsg::Persisted { peer_id: *peer_id, ready_number: *ready_number }
-            }
+            PeerMsg::Persisted {
+                peer_id,
+                ready_number,
+            } => PeerMsg::Persisted {
+                peer_id: *peer_id,
+                ready_number: *ready_number,
+            },
             PeerMsg::CasualMessage(box msg) => PeerMsg::CasualMessage(Box::new(msg.clone())),
             PeerMsg::HeartbeatPd => PeerMsg::HeartbeatPd,
             PeerMsg::UpdateReplicationMode => PeerMsg::UpdateReplicationMode,
@@ -1047,11 +1077,11 @@ impl<EK: KvEngine> Clone for PeerMsg<EK> {
 //                 "Persisted peer_id {}, ready_number {}",
 //                 peer_id, ready_number
 //             ),
-//             PeerMsg::CasualMessage(msg) => write!(fmt, "CasualMessage {:?}", msg),
-//             PeerMsg::HeartbeatPd => write!(fmt, "HeartbeatPd"),
-//             PeerMsg::UpdateReplicationMode => write!(fmt, "UpdateReplicationMode"),
-//             PeerMsg::Destroy(peer_id) => write!(fmt, "Destroy {}", peer_id),
-//         }
+//             PeerMsg::CasualMessage(msg) => write!(fmt, "CasualMessage {:?}",
+// msg),             PeerMsg::HeartbeatPd => write!(fmt, "HeartbeatPd"),
+//             PeerMsg::UpdateReplicationMode => write!(fmt,
+// "UpdateReplicationMode"),             PeerMsg::Destroy(peer_id) =>
+// write!(fmt, "Destroy {}", peer_id),         }
 //     }
 // }
 
@@ -1084,7 +1114,7 @@ impl<EK: KvEngine> PeerMsg<EK> {
     }
 }
 
-#[derive(EnumCount, EnumVariantNames)]
+#[derive(EnumCount, EnumVariantNames, Clone, Debug)]
 pub enum StoreMsg<EK>
 where
     EK: KvEngine,
@@ -1132,45 +1162,61 @@ where
 
     /// Message only used for test.
     #[cfg(any(test, feature = "testexport"))]
-    Validate(Box<dyn FnOnce(&crate::store::Config) + Send>),
+    Validate(Validate1),
 }
 
 impl<EK: KvEngine> ResourceMetered for StoreMsg<EK> {}
 
-impl<EK> fmt::Debug for StoreMsg<EK>
-where
-    EK: KvEngine,
-{
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            StoreMsg::RaftMessage(_) => write!(fmt, "Raft Message"),
-            StoreMsg::StoreUnreachable { store_id } => {
-                write!(fmt, "Store {}  is unreachable", store_id)
-            }
-            StoreMsg::CompactedEvent(ref event) => write!(fmt, "CompactedEvent cf {}", event.cf()),
-            StoreMsg::ClearRegionSizeInRange {
-                ref start_key,
-                ref end_key,
-            } => write!(
-                fmt,
-                "Clear Region size in range {:?} to {:?}",
-                start_key, end_key
-            ),
-            StoreMsg::Tick(tick) => write!(fmt, "StoreTick {:?}", tick),
-            StoreMsg::Start { ref store } => write!(fmt, "Start store {:?}", store),
-            StoreMsg::UpdateReplicationMode(_) => write!(fmt, "UpdateReplicationMode"),
-            StoreMsg::LatencyInspect { .. } => write!(fmt, "LatencyInspect"),
-            StoreMsg::UnsafeRecoveryReport(..) => write!(fmt, "UnsafeRecoveryReport"),
-            StoreMsg::UnsafeRecoveryCreatePeer { .. } => {
-                write!(fmt, "UnsafeRecoveryCreatePeer")
-            }
-            StoreMsg::GcSnapshotFinish => write!(fmt, "GcSnapshotFinish"),
-            StoreMsg::AwakenRegions { .. } => write!(fmt, "AwakenRegions"),
-            #[cfg(any(test, feature = "testexport"))]
-            StoreMsg::Validate(_) => write!(fmt, "Validate config"),
-        }
+pub struct Validate1 {
+    pub f: Option<Box<dyn FnOnce(&crate::store::Config) + Send>>,
+}
+
+impl Clone for Validate1 {
+    fn clone(&self) -> Self {
+        Validate1 { f: None }
     }
 }
+
+impl fmt::Debug for Validate1 {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(fmt, "Validate(...)")
+    }
+}
+
+// impl<EK> fmt::Debug for StoreMsg<EK>
+// where
+//     EK: KvEngine,
+// {
+//     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         match *self {
+//             StoreMsg::RaftMessage(_) => write!(fmt, "Raft Message"),
+//             StoreMsg::StoreUnreachable { store_id } => {
+//                 write!(fmt, "Store {}  is unreachable", store_id)
+//             }
+//             StoreMsg::CompactedEvent(ref event) => write!(fmt,
+// "CompactedEvent cf {}", event.cf()),             
+// StoreMsg::ClearRegionSizeInRange {                 ref start_key,
+//                 ref end_key,
+//             } => write!(
+//                 fmt,
+//                 "Clear Region size in range {:?} to {:?}",
+//                 start_key, end_key
+//             ),
+//             StoreMsg::Tick(tick) => write!(fmt, "StoreTick {:?}", tick),
+//             StoreMsg::Start { ref store } => write!(fmt, "Start store {:?}",
+// store),             StoreMsg::UpdateReplicationMode(_) => write!(fmt,
+// "UpdateReplicationMode"),             StoreMsg::LatencyInspect { .. } =>
+// write!(fmt, "LatencyInspect"),             StoreMsg::UnsafeRecoveryReport(..)
+// => write!(fmt, "UnsafeRecoveryReport"),             
+// StoreMsg::UnsafeRecoveryCreatePeer { .. } => {                 write!(fmt,
+// "UnsafeRecoveryCreatePeer")             }
+//             StoreMsg::GcSnapshotFinish => write!(fmt, "GcSnapshotFinish"),
+//             StoreMsg::AwakenRegions { .. } => write!(fmt, "AwakenRegions"),
+//             #[cfg(any(test, feature = "testexport"))]
+//             StoreMsg::Validate(_) => write!(fmt, "Validate config"),
+//         }
+//     }
+// }
 
 impl<EK: KvEngine> StoreMsg<EK> {
     pub fn discriminant(&self) -> usize {

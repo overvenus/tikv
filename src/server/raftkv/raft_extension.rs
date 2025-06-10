@@ -15,11 +15,11 @@ use raft::SnapshotStatus;
 use raftstore::{
     router::RaftStoreRouter,
     store::{
+        msg::AccessPeer,
         region_meta::{RaftStateRole, RegionMeta},
         CasualMessage,
     },
 };
-use raftstore::store::msg::AccessPeer;
 use tikv_util::future::paired_future_callback;
 
 use crate::storage::kv;

@@ -137,7 +137,7 @@ pub struct RangeOffsets {
     pub keys: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct RangeProperties {
     pub offsets: Vec<(Vec<u8>, RangeOffsets)>,
 }

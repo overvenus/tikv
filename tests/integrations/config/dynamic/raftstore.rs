@@ -15,6 +15,7 @@ use raftstore::{
     store::{
         config::{Config, RaftstoreConfigManager},
         fsm::{StoreMeta, *},
+        msg::Validate1,
         AutoSplitController, DiskCheckRunner, SnapManager, StoreMsg, Transport,
     },
     Result,
@@ -137,10 +138,12 @@ where
 {
     let (tx, rx) = mpsc::channel();
     router
-        .send_control(StoreMsg::Validate(Box::new(move |cfg: &Config| {
-            f(cfg);
-            tx.send(()).unwrap();
-        })))
+        .send_control(StoreMsg::Validate(Validate1 {
+            f: Some(Box::new(move |cfg: &Config| {
+                f(cfg);
+                tx.send(()).unwrap();
+            })),
+        }))
         .unwrap();
     rx.recv_timeout(Duration::from_secs(3)).unwrap();
 }

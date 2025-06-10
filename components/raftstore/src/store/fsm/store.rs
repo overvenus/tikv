@@ -828,8 +828,19 @@ impl<'a, EK: KvEngine + 'static, ER: RaftEngine + 'static, T: Transport>
         let count = msgs.len();
         #[allow(const_evaluatable_unchecked)]
         let mut distribution = [0; StoreMsg::<EK>::COUNT];
+        let mut last_msg: Option<(StoreMsg<EK>, Instant)> = None;
         for m in msgs.drain(..) {
             distribution[m.discriminant()] += 1;
+            let now = Instant::now();
+            if let Some((msg, t)) = last_msg {
+                if now.saturating_duration_since(t) > Duration::from_millis(2) {
+                    warn!("dbg slow store message handling";
+                        "msg" => ?msg,
+                        "elapsed" => ?now.saturating_duration_since(t),
+                    );
+                }
+            }
+            last_msg = Some((m.clone(), now));
             match m {
                 StoreMsg::Tick(tick) => self.on_tick(tick),
                 StoreMsg::RaftMessage(msg) => {
@@ -863,7 +874,11 @@ impl<'a, EK: KvEngine + 'static, ER: RaftEngine + 'static, T: Transport>
                 StoreMsg::Start { store } => self.start(store),
                 StoreMsg::UpdateReplicationMode(status) => self.on_update_replication_mode(status),
                 #[cfg(any(test, feature = "testexport"))]
-                StoreMsg::Validate(f) => f(&self.ctx.cfg),
+                StoreMsg::Validate(mut f) => {
+                    if let Some(f) = f.f.take() {
+                        f(&self.ctx.cfg);
+                    }
+                }
                 StoreMsg::LatencyInspect {
                     factor,
                     send_time,
@@ -901,6 +916,17 @@ impl<'a, EK: KvEngine + 'static, ER: RaftEngine + 'static, T: Transport>
                 }
             }
         }
+
+        let now = Instant::now();
+        if let Some((msg, t)) = last_msg {
+            if now.saturating_duration_since(t) > Duration::from_millis(2) {
+                warn!("dbg slow store message handling";
+                    "msg" => ?msg,
+                    "elapsed" => ?now.saturating_duration_since(t),
+                );
+            }
+        }
+
         slow_log!(
             T timer,
             "[store {}] handle {} store messages {:?}",

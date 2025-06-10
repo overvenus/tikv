@@ -2,7 +2,7 @@
 
 //! Functionality related to compaction
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use crate::{errors::Result, CfNamesExt};
 
@@ -76,7 +76,7 @@ pub trait CompactExt: CfNamesExt {
     fn check_in_range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Result<()>;
 }
 
-pub trait CompactedEvent: Send {
+pub trait CompactedEvent: Send + fmt::Debug + Clone {
     fn total_bytes_declined(&self) -> u64;
 
     fn is_size_declining_trivial(&self, split_check_diff: u64) -> bool;

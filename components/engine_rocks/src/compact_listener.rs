@@ -104,6 +104,7 @@ impl CompactionJobInfo for RocksCompactionJobInfo<'_> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct RocksCompactedEvent {
     pub cf: String,
     pub output_level: i32,

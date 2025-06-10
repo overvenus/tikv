@@ -344,13 +344,15 @@ impl<S: Snapshot> Clone for ExecResult<S> {
                 new_split_regions: new_split_regions.clone(),
                 share_source_region_size: *share_source_region_size,
             },
-            ExecResult::PrepareMerge { region, state } => {
-                ExecResult::PrepareMerge {
-                    region: region.clone(),
-                    state: state.clone(),
-                }
-            }
-            ExecResult::CommitMerge { index, region, source } => ExecResult::CommitMerge {
+            ExecResult::PrepareMerge { region, state } => ExecResult::PrepareMerge {
+                region: region.clone(),
+                state: state.clone(),
+            },
+            ExecResult::CommitMerge {
+                index,
+                region,
+                source,
+            } => ExecResult::CommitMerge {
                 index: *index,
                 region: region.clone(),
                 source: source.clone(),
@@ -360,7 +362,11 @@ impl<S: Snapshot> Clone for ExecResult<S> {
                 commit: *commit,
             },
             ExecResult::ComputeHash { .. } => ExecResult::TransferLeader { term: 0 },
-            ExecResult::VerifyHash { index, context, hash } => ExecResult::VerifyHash {
+            ExecResult::VerifyHash {
+                index,
+                context,
+                hash,
+            } => ExecResult::VerifyHash {
                 index: *index,
                 context: context.clone(),
                 hash: hash.clone(),
@@ -368,9 +374,7 @@ impl<S: Snapshot> Clone for ExecResult<S> {
             ExecResult::DeleteRange { ranges } => ExecResult::DeleteRange {
                 ranges: ranges.clone(),
             },
-            ExecResult::IngestSst { ssts } => ExecResult::IngestSst {
-                ssts: ssts.clone(),
-            },
+            ExecResult::IngestSst { ssts } => ExecResult::IngestSst { ssts: ssts.clone() },
             ExecResult::TransferLeader { term } => ExecResult::TransferLeader { term: *term },
             ExecResult::Flashback { region } => ExecResult::Flashback {
                 region: region.clone(),
@@ -378,9 +382,7 @@ impl<S: Snapshot> Clone for ExecResult<S> {
             ExecResult::BatchSwitchWitness(switches) => {
                 ExecResult::BatchSwitchWitness(switches.clone())
             }
-            ExecResult::HasPendingCompactCmd(b) => {
-                ExecResult::HasPendingCompactCmd(*b)
-            }
+            ExecResult::HasPendingCompactCmd(b) => ExecResult::HasPendingCompactCmd(*b),
         }
     }
 }

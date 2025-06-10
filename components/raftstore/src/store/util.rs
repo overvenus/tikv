@@ -1832,7 +1832,7 @@ impl RegionReadProgressCore {
 
 /// Represent the duration of all stages of raftstore recorded by one
 /// inspecting.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct RaftstoreDuration {
     pub store_wait_duration: Option<std::time::Duration>,
     pub store_process_duration: Option<std::time::Duration>,
@@ -1883,6 +1883,16 @@ pub struct LatencyInspector {
     id: u64,
     duration: RaftstoreDuration,
     cb: Box<dyn FnOnce(u64, RaftstoreDuration) + Send>,
+}
+
+impl Clone for LatencyInspector {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            duration: self.duration.clone(),
+            cb: Box::new(|_, _| {}),
+        }
+    }
 }
 
 impl Debug for LatencyInspector {
