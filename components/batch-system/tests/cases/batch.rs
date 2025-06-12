@@ -47,7 +47,8 @@ fn test_batch() {
         .unwrap();
     assert_eq!(rx.recv_timeout(Duration::from_secs(3)), Ok(2));
     system.shutdown();
-    expected_metrics.control = 1;
+    // control is handled after calling end(), so it should be 0.
+    expected_metrics.control = 0;
     expected_metrics.normal = 1;
     expected_metrics.begin = 2;
     assert_eq!(*metrics.lock().unwrap(), expected_metrics);

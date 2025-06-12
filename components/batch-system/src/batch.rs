@@ -401,15 +401,6 @@ impl<N: Fsm, C: Fsm, Handler: PollHandler<N, C>> Poller<N, C, Handler> {
             });
             max_batch_size = std::cmp::max(self.max_batch_size, batch.normals.len());
 
-            if batch.control.is_some() {
-                let len = self.handler.handle_control(batch.control.as_mut().unwrap());
-                if batch.control.as_ref().unwrap().is_stopped() {
-                    batch.remove_control(&self.router.control_box);
-                } else if let Some(len) = len {
-                    batch.release_control(&self.router.control_box, len);
-                }
-            }
-
             let mut hot_fsm_count = 0;
             for (i, p) in batch.normals.iter_mut().enumerate() {
                 let p = p.as_mut().unwrap();
@@ -432,6 +423,13 @@ impl<N: Fsm, C: Fsm, Handler: PollHandler<N, C>> Poller<N, C, Handler> {
                             continue;
                         }
                     }
+                    if batch.control.is_some() {
+                        // Handle control FSM may be time consuming, so we should
+                        // reschedule the FSM to avoid blocking other FSMs.
+                        p.policy = Some(ReschedulePolicy::Schedule);
+                        reschedule_fsms.push(i);
+                        continue;
+                    }
                     if let HandleResult::StopAt { progress, skip_end } = res {
                         p.policy = Some(ReschedulePolicy::Release(progress));
                         reschedule_fsms.push(i);
@@ -442,7 +440,7 @@ impl<N: Fsm, C: Fsm, Handler: PollHandler<N, C>> Poller<N, C, Handler> {
                 }
             }
             let mut fsm_cnt = batch.normals.len();
-            while batch.normals.len() < max_batch_size {
+            while batch.normals.len() < max_batch_size && batch.control.is_none() {
                 if let Ok(fsm) = self.fsm_receiver.try_recv() {
                     run = batch.push(fsm);
                 }
@@ -484,6 +482,18 @@ impl<N: Fsm, C: Fsm, Handler: PollHandler<N, C>> Poller<N, C, Handler> {
                 batch.swap_reclaim(*index);
             }
             reschedule_fsms.clear();
+
+            // Handle control FSM after all normal FSMs are handled and rescheduled.
+            // This is to ensure that slow control FSMs won't block the
+            // processing of normal FSMs.
+            if batch.control.is_some() {
+                let len = self.handler.handle_control(batch.control.as_mut().unwrap());
+                if batch.control.as_ref().unwrap().is_stopped() {
+                    batch.remove_control(&self.router.control_box);
+                } else if let Some(len) = len {
+                    batch.release_control(&self.router.control_box, len);
+                }
+            }
         }
         if let Some(fsm) = batch.control.take() {
             self.router.control_scheduler.schedule(fsm);
