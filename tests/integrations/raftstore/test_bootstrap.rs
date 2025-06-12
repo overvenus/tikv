@@ -15,7 +15,7 @@ use raftstore::{
     coprocessor::CoprocessorHost,
     store::{
         bootstrap_store, fsm, fsm::store::StoreMeta, AutoSplitController, DiskCheckRunner,
-        SnapManager,
+        InstrumentedMutex, SnapManager,
     },
 };
 use raftstore_v2::router::PeerMsg;
@@ -116,7 +116,7 @@ fn test_node_bootstrap_with_prepared_data() {
         simulate_trans,
         snap_mgr,
         pd_worker,
-        Arc::new(Mutex::new(StoreMeta::new(0))),
+        Arc::new(InstrumentedMutex::new(StoreMeta::new(0))),
         coprocessor_host,
         importer,
         split_check_scheduler,

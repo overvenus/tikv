@@ -5,6 +5,7 @@
 //! stores. They are mixed for now, will be separated in the future.
 
 pub mod apply;
+mod instrumented;
 pub mod life;
 mod metrics;
 mod peer;
@@ -17,6 +18,7 @@ pub use self::{
         ChangePeer, ExecResult, GenSnapTask, Msg as ApplyTask, Notifier as ApplyNotifier, Proposal,
         Registration, SwitchWitness, TaskRes as ApplyTaskRes,
     },
+    instrumented::InstrumentedMutex,
     metrics::{GlobalStoreStat, LocalStoreStat},
     peer::{
         new_admin_request, new_read_index_request, DestroyPeerJob, PeerFsm, MAX_PROPOSAL_SIZE_RATIO,

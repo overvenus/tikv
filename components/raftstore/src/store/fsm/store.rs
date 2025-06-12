@@ -72,6 +72,7 @@ use tikv_util::{
 };
 use time::{self, Timespec};
 
+use super::InstrumentedMutex;
 use crate::{
     bytes_capacity,
     coprocessor::{CoprocessorHost, RegionChangeEvent, RegionChangeReason},
@@ -558,7 +559,7 @@ where
     pub apply_router: ApplyRouter<EK>,
     pub router: RaftRouter<EK, ER>,
     pub importer: Arc<SstImporter>,
-    pub store_meta: Arc<Mutex<StoreMeta>>,
+    pub store_meta: Arc<InstrumentedMutex<StoreMeta>>,
     pub feature_gate: FeatureGate,
     /// region_id -> (peer_id, is_splitting)
     /// Used for handling race between splitting and creating new peer.
@@ -1274,7 +1275,7 @@ pub struct RaftPollerBuilder<EK: KvEngine, ER: RaftEngine, T> {
     apply_router: ApplyRouter<EK>,
     pub router: RaftRouter<EK, ER>,
     pub importer: Arc<SstImporter>,
-    pub store_meta: Arc<Mutex<StoreMeta>>,
+    pub store_meta: Arc<InstrumentedMutex<StoreMeta>>,
     pub pending_create_peers: Arc<Mutex<HashMap<u64, (u64, bool)>>>,
     snap_mgr: SnapManager,
     pub coprocessor_host: CoprocessorHost<EK>,
@@ -1662,7 +1663,7 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
         pd_client: Arc<C>,
         mgr: SnapManager,
         pd_worker: LazyWorker<PdTask<EK, ER>>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta>>,
         coprocessor_host: CoprocessorHost<EK>,
         importer: Arc<SstImporter>,
         split_check_scheduler: Scheduler<SplitCheckTask>,

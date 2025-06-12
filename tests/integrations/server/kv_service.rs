@@ -29,7 +29,9 @@ use pd_client::PdClient;
 use raft::eraftpb;
 use raftstore::{
     coprocessor::CoprocessorHost,
-    store::{fsm::store::StoreMeta, AutoSplitController, DiskCheckRunner, SnapManager},
+    store::{
+        fsm::store::StoreMeta, AutoSplitController, DiskCheckRunner, InstrumentedMutex, SnapManager,
+    },
 };
 use resource_metering::CollectorRegHandle;
 use service::service_manager::GrpcServiceManager;
@@ -1395,7 +1397,7 @@ fn test_double_run_node() {
     };
     let (split_check_scheduler, _) = dummy_scheduler();
 
-    let store_meta = Arc::new(Mutex::new(StoreMeta::new(20)));
+    let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(20)));
     let e = node
         .start(
             engines,

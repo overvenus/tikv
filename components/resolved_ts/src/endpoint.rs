@@ -24,6 +24,7 @@ use raftstore::{
         util::{
             self, ReadState, RegionReadProgress, RegionReadProgressCore, RegionReadProgressRegistry,
         },
+        InstrumentedMutex,
     },
 };
 use security::SecurityManager;
@@ -373,7 +374,7 @@ pub struct Endpoint<T, E: KvEngine, S> {
     cfg: ResolvedTsConfig,
     memory_quota: Arc<MemoryQuota>,
     advance_notify: Arc<Notify>,
-    store_meta: Arc<Mutex<S>>,
+    store_meta: Arc<InstrumentedMutex<S>>,
     region_read_progress: RegionReadProgressRegistry,
     regions: HashMap<u64, ObserveRegion>,
     scanner_pool: ScannerPool<T, E>,
@@ -650,7 +651,7 @@ where
         cfg: &ResolvedTsConfig,
         scheduler: Scheduler<Task>,
         cdc_handle: T,
-        store_meta: Arc<Mutex<S>>,
+        store_meta: Arc<InstrumentedMutex<S>>,
         pd_client: Arc<dyn PdClient>,
         concurrency_manager: ConcurrencyManager,
         env: Arc<Environment>,

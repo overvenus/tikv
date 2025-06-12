@@ -23,7 +23,8 @@ use raftstore::{
     errors::Error as RaftError,
     store::{
         config::RaftstoreConfigManager, AutoSplitController, GlobalReplicationState,
-        RegionSnapshot, SplitConfigManager, TabletSnapKey, TabletSnapManager, Transport,
+        InstrumentedMutex, RegionSnapshot, SplitConfigManager, TabletSnapKey, TabletSnapManager,
+        Transport,
     },
     Result,
 };
@@ -201,7 +202,7 @@ impl<EK: KvEngine> Simulator<EK> for NodeCluster<EK> {
         &mut self,
         node_id: u64,
         cfg: Config,
-        store_meta: Arc<Mutex<StoreMeta<EK>>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta<EK>>>,
         key_manager: Option<Arc<DataKeyManager>>,
         raft_engine: RaftTestEngine,
         tablet_registry: TabletRegistry<EK>,

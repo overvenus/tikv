@@ -12,7 +12,7 @@ use grpcio::{
     WriteFlags,
 };
 use kvproto::debugpb::{self, *};
-use raftstore::store::fsm::store::StoreRegionMeta;
+use raftstore::store::{fsm::store::StoreRegionMeta, InstrumentedMutex};
 use tikv_kv::RaftExtension;
 use tikv_util::{future::paired_future_callback, metrics};
 use tokio::runtime::Handle;
@@ -72,7 +72,7 @@ where
     pool: Handle,
     debugger: D,
     raft_router: T,
-    store_meta: Arc<Mutex<S>>,
+    store_meta: Arc<InstrumentedMutex<S>>,
     resolved_ts_scheduler: ScheduleResolvedTsTask,
 }
 
@@ -105,7 +105,7 @@ where
         debugger: D,
         pool: Handle,
         raft_router: T,
-        store_meta: Arc<Mutex<S>>,
+        store_meta: Arc<InstrumentedMutex<S>>,
         resolved_ts_scheduler: ScheduleResolvedTsTask,
     ) -> Self {
         Service {

@@ -8,7 +8,7 @@ use std::{
 
 use engine_rocks::RocksEngine;
 use fail::fail_point;
-use raftstore::store::fsm::StoreMeta;
+use raftstore::store::{fsm::StoreMeta, InstrumentedMutex};
 use tikv_util::{self, set_panic_mark, warn, worker::*};
 
 use crate::metric::*;
@@ -18,7 +18,7 @@ const MAX_DAMAGED_FILES_NUM: usize = 2;
 
 pub struct RecoveryRunner {
     db: RocksEngine,
-    store_meta: Arc<Mutex<StoreMeta>>,
+    store_meta: Arc<InstrumentedMutex<StoreMeta>>,
     // Considering that files will not be too much, it is enough to use `Vec`.
     damaged_files: Vec<FileInfo>,
     max_hang_duration: Duration,
@@ -69,7 +69,7 @@ impl RunnableWithTimer for RecoveryRunner {
 impl RecoveryRunner {
     pub fn new(
         db: RocksEngine,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta>>,
         max_hang_duration: Duration,
         check_duration: Duration,
     ) -> Self {
@@ -250,7 +250,7 @@ mod tests {
         add_region_to_store_meta(&mut store_meta, 4, b"7".to_vec());
         add_region_to_store_meta(&mut store_meta, 5, b"8".to_vec());
 
-        let meta = Arc::new(Mutex::new(store_meta));
+        let meta = Arc::new(InstrumentedMutex::new(store_meta));
         let runner = RecoveryRunner::new(
             db,
             meta.clone(),

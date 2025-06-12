@@ -80,7 +80,7 @@ pub trait Simulator {
         node_id: u64,
         cfg: Config,
         engines: Engines<RocksEngine, RaftTestEngine>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta>>,
         key_manager: Option<Arc<DataKeyManager>>,
         router: RaftRouter<RocksEngine, RaftTestEngine>,
         system: RaftBatchSystem<RocksEngine, RaftTestEngine>,
@@ -166,7 +166,7 @@ pub struct Cluster<T: Simulator> {
 
     pub paths: Vec<TempDir>,
     pub dbs: Vec<Engines<RocksEngine, RaftTestEngine>>,
-    pub store_metas: HashMap<u64, Arc<Mutex<StoreMeta>>>,
+    pub store_metas: HashMap<u64, Arc<InstrumentedMutex<StoreMeta>>>,
     key_managers: Vec<Option<Arc<DataKeyManager>>>,
     pub io_rate_limiter: Option<Arc<IoRateLimiter>>,
     pub engines: HashMap<u64, Engines<RocksEngine, RaftTestEngine>>,
@@ -290,7 +290,7 @@ impl<T: Simulator> Cluster<T> {
 
             let engines = self.dbs.last().unwrap().clone();
             let key_mgr = self.key_managers.last().unwrap().clone();
-            let store_meta = Arc::new(Mutex::new(StoreMeta::new(PENDING_MSG_CAP)));
+            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(PENDING_MSG_CAP)));
 
             let props = GroupProperties::default();
             tikv_util::thread_group::set_properties(Some(props.clone()));
@@ -369,7 +369,9 @@ impl<T: Simulator> Cluster<T> {
                 o.get().clone()
             }
             MapEntry::Vacant(v) => v
-                .insert(Arc::new(Mutex::new(StoreMeta::new(PENDING_MSG_CAP))))
+                .insert(Arc::new(InstrumentedMutex::new(StoreMeta::new(
+                    PENDING_MSG_CAP,
+                ))))
                 .clone(),
         };
         let props = GroupProperties::default();
@@ -668,7 +670,7 @@ impl<T: Simulator> Cluster<T> {
         for (i, engines) in self.dbs.iter().enumerate() {
             let id = i as u64 + 1;
             self.engines.insert(id, engines.clone());
-            let store_meta = Arc::new(Mutex::new(StoreMeta::new(PENDING_MSG_CAP)));
+            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(PENDING_MSG_CAP)));
             self.store_metas.insert(id, store_meta);
             self.key_managers_map
                 .insert(id, self.key_managers[i].clone());
@@ -702,7 +704,7 @@ impl<T: Simulator> Cluster<T> {
         for (i, engines) in self.dbs.iter().enumerate() {
             let id = i as u64 + 1;
             self.engines.insert(id, engines.clone());
-            let store_meta = Arc::new(Mutex::new(StoreMeta::new(PENDING_MSG_CAP)));
+            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(PENDING_MSG_CAP)));
             self.store_metas.insert(id, store_meta);
             self.key_managers_map
                 .insert(id, self.key_managers[i].clone());

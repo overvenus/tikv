@@ -39,8 +39,9 @@ use crate::{
         cmd_resp,
         fsm::store::StoreMeta,
         util::{self, LeaseState, RegionReadProgress, RemoteLease},
-        Callback, CasualMessage, CasualRouter, Peer, ProposalRouter, RaftCommand, ReadCallback,
-        ReadResponse, RegionSnapshot, RequestInspector, RequestPolicy, TxnExt,
+        Callback, CasualMessage, CasualRouter, InstrumentedMutex, Peer, ProposalRouter,
+        RaftCommand, ReadCallback, ReadResponse, RegionSnapshot, RequestInspector, RequestPolicy,
+        TxnExt,
     },
     Error, Result,
 };
@@ -303,7 +304,7 @@ pub struct StoreMetaDelegate<E>
 where
     E: KvEngine,
 {
-    store_meta: Arc<Mutex<StoreMeta>>,
+    store_meta: Arc<InstrumentedMutex<StoreMeta>>,
     kv_engine: E,
 }
 
@@ -311,7 +312,7 @@ impl<E> StoreMetaDelegate<E>
 where
     E: KvEngine,
 {
-    pub fn new(store_meta: Arc<Mutex<StoreMeta>>, kv_engine: E) -> Self {
+    pub fn new(store_meta: Arc<InstrumentedMutex<StoreMeta>>, kv_engine: E) -> Self {
         StoreMetaDelegate {
             store_meta,
             kv_engine,
@@ -324,7 +325,7 @@ where
     E: KvEngine,
 {
     type Executor = CachedReadDelegate<E>;
-    type StoreMeta = Arc<Mutex<StoreMeta>>;
+    type StoreMeta = Arc<InstrumentedMutex<StoreMeta>>;
 
     fn store_id(&self) -> Option<u64> {
         self.store_meta.as_ref().lock().unwrap().store_id
@@ -1273,7 +1274,7 @@ mod tests {
     use txn_types::WriteBatchFlags;
 
     use super::*;
-    use crate::store::{util::Lease, Callback};
+    use crate::store::{fsm::InstrumentedMutex, util::Lease, Callback};
 
     struct MockRouter {
         p_router: SyncSender<RaftCommand<KvTestSnapshot>>,
@@ -1319,7 +1320,7 @@ mod tests {
     fn new_reader(
         path: &str,
         store_id: u64,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta>>,
     ) -> (
         TempDir,
         LocalReader<KvTestEngine, MockRouter>,
@@ -1386,7 +1387,7 @@ mod tests {
     #[test]
     fn test_read() {
         let store_id = 2;
-        let store_meta = Arc::new(Mutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
         let (_tmp, mut reader, rx) = new_reader("test-local-reader", store_id, store_meta.clone());
 
         // region: 1,
@@ -1727,7 +1728,7 @@ mod tests {
     #[test]
     fn test_read_delegate_cache_update() {
         let store_id = 2;
-        let store_meta = Arc::new(Mutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
         let (_tmp, mut reader, _) = new_reader("test-local-reader", store_id, store_meta.clone());
         let mut region = metapb::Region::default();
         region.set_id(1);
@@ -1806,8 +1807,10 @@ mod tests {
             .unwrap();
         let kv_engine =
             engine_test::kv::new_engine(path.path().to_str().unwrap(), ALL_CFS).unwrap();
-        let store_meta =
-            StoreMetaDelegate::new(Arc::new(Mutex::new(StoreMeta::new(0))), kv_engine.clone());
+        let store_meta = StoreMetaDelegate::new(
+            Arc::new(InstrumentedMutex::new(StoreMeta::new(0))),
+            kv_engine.clone(),
+        );
 
         {
             let mut meta = store_meta.store_meta.as_ref().lock().unwrap();
@@ -1842,7 +1845,7 @@ mod tests {
         term: u64,
         pr_ids: Vec<u64>,
         region_epoch: RegionEpoch,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta>>,
         max_lease: Duration,
     ) {
         let mut region = metapb::Region::default();
@@ -1887,7 +1890,7 @@ mod tests {
         term: u64,
         pr_ids: Vec<u64>,
         region_epoch: RegionEpoch,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta>>,
     ) {
         prepare_read_delegate_with_lease(
             store_id,
@@ -1903,7 +1906,7 @@ mod tests {
     #[test]
     fn test_snap_across_regions() {
         let store_id = 2;
-        let store_meta = Arc::new(Mutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
         let (_tmp, mut reader, rx) = new_reader("test-local-reader", store_id, store_meta.clone());
 
         let epoch13 = {
@@ -2080,7 +2083,7 @@ mod tests {
     #[test]
     fn test_snap_release_for_not_using_cache() {
         let store_id = 2;
-        let store_meta = Arc::new(Mutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
         let (_tmp, mut reader, rx) = new_reader("test-local-reader", store_id, store_meta.clone());
         reader.kv_engine.put(b"key", b"value").unwrap();
 
@@ -2171,7 +2174,7 @@ mod tests {
     #[test]
     fn test_stale_read_notify() {
         let store_id = 2;
-        let store_meta = Arc::new(Mutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
         let (_tmp, mut reader, rx) = new_reader("test-local-reader", store_id, store_meta.clone());
         reader.kv_engine.put(b"key", b"value").unwrap();
 
@@ -2270,7 +2273,7 @@ mod tests {
     #[test]
     fn test_stale_read_local_leader_fallback() {
         let store_id = 2;
-        let store_meta = Arc::new(Mutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
         let (_tmp, mut reader, rx) = new_reader(
             "test-stale-local-leader-fallback",
             store_id,

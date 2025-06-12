@@ -89,7 +89,7 @@ fn start_raftstore(
             .to_string();
         SnapManager::new(p)
     };
-    let store_meta = Arc::new(Mutex::new(StoreMeta::new(0)));
+    let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
     let cfg_track = Arc::new(VersionTrack::new(cfg.raft_store.clone()));
     let pd_worker = LazyWorker::new("store-config");
     let (split_check_scheduler, _) = dummy_scheduler();

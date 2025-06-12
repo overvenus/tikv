@@ -17,7 +17,7 @@ use raftstore::{
         propose_read_index, should_renew_lease,
         simple_write::SimpleWriteEncoder,
         util::{check_req_region_epoch, LeaseState},
-        ReadDelegate, ReadIndexRequest, ReadProgress, Transport,
+        InstrumentedMutex, ReadDelegate, ReadIndexRequest, ReadProgress, Transport,
     },
     Error, Result,
 };
@@ -240,7 +240,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     pub(crate) fn maybe_renew_leader_lease(
         &mut self,
         ts: Timespec,
-        store_meta: &Mutex<StoreMeta<EK>>,
+        store_meta: &InstrumentedMutex<StoreMeta<EK>>,
         progress: Option<ReadProgress>,
     ) {
         // A nonleader peer should never has leader lease.
@@ -271,7 +271,10 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     }
 
     // Expire lease and unset lease in read delegate on role changed to follower.
-    pub(crate) fn expire_lease_on_became_follower(&mut self, store_meta: &Mutex<StoreMeta<EK>>) {
+    pub(crate) fn expire_lease_on_became_follower(
+        &mut self,
+        store_meta: &InstrumentedMutex<StoreMeta<EK>>,
+    ) {
         self.leader_lease_mut().expire();
         let mut meta = store_meta.lock().unwrap();
         if let Some((reader, _)) = meta.readers.get_mut(&self.region_id()) {

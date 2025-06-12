@@ -2732,7 +2732,7 @@ mod tests {
     use tikv_util::worker::LazyWorker;
 
     use super::*;
-    use crate::store::{fsm::StoreMeta, util::build_key_range};
+    use crate::store::{fsm::StoreMeta, util::build_key_range, InstrumentedMutex};
 
     const DEFAULT_TEST_STORE_ID: u64 = 1;
 
@@ -2743,7 +2743,7 @@ mod tests {
 
         use engine_test::{kv::KvTestEngine, raft::RaftTestEngine};
 
-        use crate::store::fsm::StoreMeta;
+        use crate::store::{fsm::StoreMeta, InstrumentedMutex};
 
         struct RunnerTest {
             store_stat: Arc<Mutex<StoreStat>>,
@@ -2763,7 +2763,7 @@ mod tests {
                     Duration::default(),
                     WrappedScheduler(scheduler),
                 );
-                let store_meta = Arc::new(Mutex::new(StoreMeta::new(0)));
+                let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
                 let region_read_progress = store_meta.lock().unwrap().region_read_progress.clone();
                 if let Err(e) = stats_monitor.start(
                     AutoSplitController::default(),
@@ -3017,7 +3017,7 @@ mod tests {
             Duration::default(),
             WrappedScheduler(pd_worker.scheduler()),
         );
-        let store_meta = Arc::new(Mutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
         let region_read_progress = store_meta.lock().unwrap().region_read_progress.clone();
         stats_monitor
             .start(

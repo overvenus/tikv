@@ -31,7 +31,10 @@ use pd_client::{Feature, PdClient};
 use raftstore::{
     coprocessor::{CmdBatch, ObserveId},
     router::CdcHandle,
-    store::fsm::{store::StoreRegionMeta, ChangeObserver},
+    store::{
+        fsm::{store::StoreRegionMeta, ChangeObserver},
+        InstrumentedMutex,
+    },
 };
 use resolved_ts::{resolve_by_raft, LeadershipResolver, Resolver};
 use security::SecurityManager;
@@ -373,7 +376,7 @@ pub struct Endpoint<T, E, S> {
     pd_client: Arc<dyn PdClient>,
     timer: SteadyTimer,
     tso_worker: Runtime,
-    store_meta: Arc<StdMutex<S>>,
+    store_meta: Arc<InstrumentedMutex<S>>,
     /// The concurrency manager for transactions. It's needed for CDC to check
     /// locks when calculating resolved_ts.
     concurrency_manager: ConcurrencyManager,
@@ -421,7 +424,7 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
         cdc_handle: T,
         tablets: LocalTablets<E>,
         observer: CdcObserver,
-        store_meta: Arc<StdMutex<S>>,
+        store_meta: Arc<InstrumentedMutex<S>>,
         concurrency_manager: ConcurrencyManager,
         env: Arc<Environment>,
         security_mgr: Arc<SecurityManager>,
@@ -1548,7 +1551,7 @@ mod tests {
                     .unwrap()
             })),
             CdcObserver::new(task_sched),
-            Arc::new(StdMutex::new(store_meta)),
+            Arc::new(InstrumentedMutex::new(store_meta)),
             ConcurrencyManager::new(1.into()),
             env,
             security_mgr,

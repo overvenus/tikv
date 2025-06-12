@@ -21,7 +21,8 @@ use raftstore::{
         self,
         fsm::{store::StoreMeta, ApplyRouter, RaftBatchSystem, RaftRouter},
         initial_region, AutoSplitController, Config as StoreConfig, DiskCheckRunner,
-        GlobalReplicationState, PdTask, RefreshConfigTask, SnapManager, SplitCheckTask, Transport,
+        GlobalReplicationState, InstrumentedMutex, PdTask, RefreshConfigTask, SnapManager,
+        SplitCheckTask, Transport,
     },
 };
 use resource_metering::CollectorRegHandle;
@@ -165,7 +166,7 @@ where
         trans: T,
         snap_mgr: SnapManager,
         pd_worker: LazyWorker<PdTask<EK, ER>>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta>>,
         coprocessor_host: CoprocessorHost<EK>,
         importer: Arc<SstImporter>,
         split_check_scheduler: Scheduler<SplitCheckTask>,
@@ -455,7 +456,7 @@ where
         trans: T,
         snap_mgr: SnapManager,
         pd_worker: LazyWorker<PdTask<EK, ER>>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta>>,
         coprocessor_host: CoprocessorHost<EK>,
         importer: Arc<SstImporter>,
         split_check_scheduler: Scheduler<SplitCheckTask>,

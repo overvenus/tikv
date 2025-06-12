@@ -12,14 +12,14 @@ use tikv_util::worker::Runnable;
 
 use crate::{
     coprocessor::CoprocessorHost,
-    store::{fsm::store::StoreRegionMeta, util::RegionReadProgressRegistry},
+    store::{fsm::store::StoreRegionMeta, util::RegionReadProgressRegistry, InstrumentedMutex},
 };
 
 pub struct Runner<S, E>
 where
     E: KvEngine,
 {
-    store_meta: Arc<Mutex<S>>,
+    store_meta: Arc<InstrumentedMutex<S>>,
     region_read_progress: RegionReadProgressRegistry,
     coprocessor: CoprocessorHost<E>,
 }
@@ -58,7 +58,7 @@ where
     S: StoreRegionMeta,
     E: KvEngine,
 {
-    pub fn new(store_meta: Arc<Mutex<S>>, coprocessor: CoprocessorHost<E>) -> Self {
+    pub fn new(store_meta: Arc<InstrumentedMutex<S>>, coprocessor: CoprocessorHost<E>) -> Self {
         let region_read_progress = store_meta.lock().unwrap().region_read_progress().clone();
         Runner {
             region_read_progress,
@@ -136,11 +136,19 @@ mod tests {
     use kvproto::metapb::Region;
 
     use super::*;
-    use crate::store::{fsm::StoreMeta, util::RegionReadProgress};
+    use crate::store::{
+        fsm::{InstrumentedMutex, StoreMeta},
+        util::RegionReadProgress,
+    };
 
     #[test]
     fn test_get_range_min_safe_ts() {
-        fn add_region(meta: &Arc<Mutex<StoreMeta>>, id: u64, kr: KeyRange, safe_ts: u64) {
+        fn add_region(
+            meta: &Arc<InstrumentedMutex<StoreMeta>>,
+            id: u64,
+            kr: KeyRange,
+            safe_ts: u64,
+        ) {
             let mut meta = meta.lock().unwrap();
             let mut region = Region::default();
             region.set_id(id);
@@ -162,7 +170,7 @@ mod tests {
             kr
         }
 
-        let meta = Arc::new(Mutex::new(StoreMeta::new(0)));
+        let meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
         let coprocessor_host = CoprocessorHost::<KvTestEngine>::default();
         let runner = Runner::new(meta.clone(), coprocessor_host);
         assert_eq!(0, runner.get_range_safe_ts(key_range(b"", b"")));

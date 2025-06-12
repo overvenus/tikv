@@ -19,9 +19,10 @@ use kvproto::{
 use raftstore::{
     router::CdcHandle,
     store::{
-        fsm::ChangeObserver, AsyncReadNotifier, Callback, FetchedLogs, GenSnapRes, RegionSnapshot,
-        UnsafeRecoveryExecutePlanSyncer, UnsafeRecoveryFillOutReportSyncer,
-        UnsafeRecoveryForceLeaderSyncer, UnsafeRecoveryHandle, UnsafeRecoveryWaitApplySyncer,
+        fsm::ChangeObserver, AsyncReadNotifier, Callback, FetchedLogs, GenSnapRes,
+        InstrumentedMutex, RegionSnapshot, UnsafeRecoveryExecutePlanSyncer,
+        UnsafeRecoveryFillOutReportSyncer, UnsafeRecoveryForceLeaderSyncer, UnsafeRecoveryHandle,
+        UnsafeRecoveryWaitApplySyncer,
     },
 };
 use slog::warn;
@@ -136,7 +137,7 @@ where
 
 impl<EK: KvEngine, ER: RaftEngine> RaftRouter<EK, ER> {
     pub fn new(store_id: u64, router: StoreRouter<EK, ER>) -> Self {
-        let store_meta = Arc::new(Mutex::new(StoreMeta::new(store_id)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(store_id)));
 
         let logger = router.logger().clone();
         RaftRouter {
@@ -158,7 +159,7 @@ impl<EK: KvEngine, ER: RaftEngine> RaftRouter<EK, ER> {
         self.router.check_send(addr, msg)
     }
 
-    pub fn store_meta(&self) -> &Arc<Mutex<StoreMeta<EK>>> {
+    pub fn store_meta(&self) -> &Arc<InstrumentedMutex<StoreMeta<EK>>> {
         self.local_reader.store_meta()
     }
 
@@ -181,7 +182,7 @@ impl<EK: KvEngine, ER: RaftEngine> RaftRouter<EK, ER> {
     #[cfg(any(test, feature = "testexport"))]
     pub fn new_with_store_meta(
         router: StoreRouter<EK, ER>,
-        store_meta: Arc<Mutex<StoreMeta<EK>>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta<EK>>>,
     ) -> Self {
         let logger = router.logger().clone();
         RaftRouter {

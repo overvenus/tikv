@@ -908,7 +908,7 @@ impl<EK: KvEngine> Clone for CasualMessage<EK> {
 //             },
 //             CasualMessage::RegionOverlapped => write!(fmt,
 // "RegionOverlapped"),             CasualMessage::SnapshotGenerated =>
-// write!(fmt, "SnapshotGenerated"),             
+// write!(fmt, "SnapshotGenerated"),
 // CasualMessage::ForceCompactRaftLogs => write!(fmt, "ForceCompactRaftLogs"),
 //             CasualMessage::AccessPeer(_) => write!(fmt, "AccessPeer"),
 //             CasualMessage::QueryRegionLeaderResp { .. } => write!(fmt,
@@ -1194,7 +1194,7 @@ impl fmt::Debug for Validate1 {
 //                 write!(fmt, "Store {}  is unreachable", store_id)
 //             }
 //             StoreMsg::CompactedEvent(ref event) => write!(fmt,
-// "CompactedEvent cf {}", event.cf()),             
+// "CompactedEvent cf {}", event.cf()),
 // StoreMsg::ClearRegionSizeInRange {                 ref start_key,
 //                 ref end_key,
 //             } => write!(
@@ -1207,7 +1207,7 @@ impl fmt::Debug for Validate1 {
 // store),             StoreMsg::UpdateReplicationMode(_) => write!(fmt,
 // "UpdateReplicationMode"),             StoreMsg::LatencyInspect { .. } =>
 // write!(fmt, "LatencyInspect"),             StoreMsg::UnsafeRecoveryReport(..)
-// => write!(fmt, "UnsafeRecoveryReport"),             
+// => write!(fmt, "UnsafeRecoveryReport"),
 // StoreMsg::UnsafeRecoveryCreatePeer { .. } => {                 write!(fmt,
 // "UnsafeRecoveryCreatePeer")             }
 //             StoreMsg::GcSnapshotFinish => write!(fmt, "GcSnapshotFinish"),

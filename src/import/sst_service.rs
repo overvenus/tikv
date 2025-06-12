@@ -32,7 +32,7 @@ use kvproto::{
 };
 use raftstore::{
     coprocessor::{RegionInfo, RegionInfoProvider},
-    store::util::is_epoch_stale,
+    store::{util::is_epoch_stale, InstrumentedMutex},
     RegionInfoAccessor,
 };
 use raftstore_v2::StoreMeta;
@@ -139,7 +139,7 @@ pub struct ImportSstService<E: Engine> {
     writer: raft_writer::ThrottledTlsEngineWriter,
 
     // it's some iff multi-rocksdb is enabled
-    store_meta: Option<Arc<Mutex<StoreMeta<E::Local>>>>,
+    store_meta: Option<Arc<InstrumentedMutex<StoreMeta<E::Local>>>>,
     resource_manager: Option<Arc<ResourceGroupManager>>,
 
     // When less than now, don't accept any requests.
@@ -188,8 +188,8 @@ impl RequestCollector {
     }
 
     fn accept_kv(&mut self, cf: &str, is_delete: bool, k: Vec<u8>, v: Vec<u8>) {
-        debug!("Accepting KV."; "cf" => %cf, 
-            "key" => %log_wrappers::Value::key(&k), 
+        debug!("Accepting KV."; "cf" => %cf,
+            "key" => %log_wrappers::Value::key(&k),
             "value" => %log_wrappers::Value::key(&v));
         // Need to skip the empty key/value that could break the transaction or cause
         // data corruption. see details at https://github.com/pingcap/tiflow/issues/5468.
@@ -327,7 +327,7 @@ impl<E: Engine> ImportSstService<E> {
         engine: E,
         tablets: LocalTablets<E::Local>,
         importer: Arc<SstImporter>,
-        store_meta: Option<Arc<Mutex<StoreMeta<E::Local>>>>,
+        store_meta: Option<Arc<InstrumentedMutex<StoreMeta<E::Local>>>>,
         resource_manager: Option<Arc<ResourceGroupManager>>,
         region_info_accessor: Arc<RegionInfoAccessor>,
     ) -> Self {
@@ -1435,7 +1435,7 @@ impl<E: Engine> ImportSst for ImportSstService<E> {
             ctx.spawn(async move {
                 send_rpc_response!(Err(Error::Io(
                     std::io::Error::new(std::io::ErrorKind::InvalidInput,
-                        format!("you are going to suspend the import RPCs too long. (for {} seconds, max acceptable duration is {} seconds)", 
+                        format!("you are going to suspend the import RPCs too long. (for {} seconds, max acceptable duration is {} seconds)",
                         req.get_duration_in_secs(), SUSPEND_REQUEST_MAX_SECS)))), sink, label, timer);
             });
             return;

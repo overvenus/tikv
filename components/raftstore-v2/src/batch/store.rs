@@ -33,9 +33,9 @@ use raftstore::{
         },
         local_metrics::RaftMetrics,
         util::LatencyInspector,
-        AutoSplitController, Config, ReadRunner, ReadTask, RefreshConfigTask, SplitCheckRunner,
-        SplitCheckTask, StoreWriters, StoreWritersContext, TabletSnapManager, Transport,
-        WriteRouterContext, WriteSenders, WriterContoller,
+        AutoSplitController, Config, InstrumentedMutex, ReadRunner, ReadTask, RefreshConfigTask,
+        SplitCheckRunner, SplitCheckTask, StoreWriters, StoreWritersContext, TabletSnapManager,
+        Transport, WriteRouterContext, WriteSenders, WriterContoller,
     },
 };
 use resource_control::ResourceController;
@@ -89,7 +89,7 @@ pub struct StoreContext<EK: KvEngine, ER: RaftEngine, T> {
     /// The precise timer for scheduling tick.
     pub timer: SteadyTimer,
     pub schedulers: Schedulers<EK, ER>,
-    pub store_meta: Arc<Mutex<StoreMeta<EK>>>,
+    pub store_meta: Arc<InstrumentedMutex<StoreMeta<EK>>>,
     pub shutdown: Arc<AtomicBool>,
     pub engine: ER,
     pub tablet_registry: TabletRegistry<EK>,
@@ -362,7 +362,7 @@ struct StorePollerBuilder<EK: KvEngine, ER: RaftEngine, T> {
     apply_pool: FuturePool,
     high_priority_pool: FuturePool,
     logger: Logger,
-    store_meta: Arc<Mutex<StoreMeta<EK>>>,
+    store_meta: Arc<InstrumentedMutex<StoreMeta<EK>>>,
     shutdown: Arc<AtomicBool>,
     snap_mgr: TabletSnapManager,
     global_stat: GlobalStoreStat,
@@ -382,7 +382,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
         schedulers: Schedulers<EK, ER>,
         high_priority_pool: FuturePool,
         logger: Logger,
-        store_meta: Arc<Mutex<StoreMeta<EK>>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta<EK>>>,
         shutdown: Arc<AtomicBool>,
         snap_mgr: TabletSnapManager,
         coprocessor_host: CoprocessorHost<EK>,
@@ -685,7 +685,7 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
         trans: T,
         pd_client: Arc<C>,
         router: &StoreRouter<EK, ER>,
-        store_meta: Arc<Mutex<StoreMeta<EK>>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta<EK>>>,
         snap_mgr: TabletSnapManager,
         concurrency_manager: ConcurrencyManager,
         causal_ts_provider: Option<Arc<CausalTsProviderImpl>>, // used for rawkv apiv2

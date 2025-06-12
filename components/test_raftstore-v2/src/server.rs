@@ -34,8 +34,8 @@ use raftstore::{
     coprocessor::CoprocessorHost,
     errors::Error as RaftError,
     store::{
-        region_meta, AutoSplitController, CheckLeaderRunner, FlowStatsReporter, ReadStats,
-        RegionSnapshot, TabletSnapManager, WriteStats,
+        region_meta, AutoSplitController, CheckLeaderRunner, FlowStatsReporter, InstrumentedMutex,
+        ReadStats, RegionSnapshot, TabletSnapManager, WriteStats,
     },
     RegionInfoAccessor,
 };
@@ -350,7 +350,7 @@ impl<EK: KvEngine> ServerCluster<EK> {
         &mut self,
         node_id: u64,
         mut cfg: Config,
-        store_meta: Arc<Mutex<StoreMeta<EK>>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta<EK>>>,
         key_manager: Option<Arc<DataKeyManager>>,
         raft_engine: RaftTestEngine,
         tablet_registry: TabletRegistry<EK>,
@@ -808,7 +808,7 @@ impl<EK: KvEngine> Simulator<EK> for ServerCluster<EK> {
         &mut self,
         node_id: u64,
         cfg: Config,
-        store_meta: Arc<Mutex<StoreMeta<EK>>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta<EK>>>,
         key_manager: Option<Arc<DataKeyManager>>,
         raft_engine: RaftTestEngine,
         tablet_registry: TabletRegistry<EK>,

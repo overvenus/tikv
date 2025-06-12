@@ -37,8 +37,8 @@ use pd_client::PdClient;
 use raftstore::{
     store::{
         cmd_resp, initial_region, region_meta::RegionMeta, util::check_key_in_region, Bucket,
-        BucketRange, Callback, RaftCmdExtraOpts, RegionSnapshot, TabletSnapManager, WriteResponse,
-        INIT_EPOCH_CONF_VER, INIT_EPOCH_VER,
+        BucketRange, Callback, InstrumentedMutex, RaftCmdExtraOpts, RegionSnapshot,
+        TabletSnapManager, WriteResponse, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER,
     },
     Error, Result,
 };
@@ -86,7 +86,7 @@ pub trait Simulator<EK: KvEngine> {
         &mut self,
         node_id: u64,
         cfg: Config,
-        store_meta: Arc<Mutex<StoreMeta<EK>>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta<EK>>>,
         key_manager: Option<Arc<DataKeyManager>>,
         raft_engine: RaftTestEngine,
         tablet_registry: TabletRegistry<EK>,
@@ -350,7 +350,7 @@ pub struct Cluster<T: Simulator<EK>, EK: KvEngine> {
     pub engines: Vec<(TabletRegistry<EK>, RaftTestEngine)>,
     pub tablet_registries: HashMap<u64, TabletRegistry<EK>>,
     pub raft_engines: HashMap<u64, RaftTestEngine>,
-    pub store_metas: HashMap<u64, Arc<Mutex<StoreMeta<EK>>>>,
+    pub store_metas: HashMap<u64, Arc<InstrumentedMutex<StoreMeta<EK>>>>,
     key_managers: Vec<Option<Arc<DataKeyManager>>>,
     pub io_rate_limiter: Option<Arc<IoRateLimiter>>,
     key_managers_map: HashMap<u64, Option<Arc<DataKeyManager>>>,
@@ -511,7 +511,7 @@ impl<T: Simulator<EK>, EK: KvEngine> Cluster<T, EK> {
             let (tablet_registry, raft_engine) = self.engines.last().unwrap().clone();
 
             let key_mgr = self.key_managers.last().unwrap().clone();
-            let store_meta = Arc::new(Mutex::new(StoreMeta::new(id)));
+            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(id)));
 
             let props = GroupProperties::default();
             tikv_util::thread_group::set_properties(Some(props.clone()));
@@ -556,7 +556,7 @@ impl<T: Simulator<EK>, EK: KvEngine> Cluster<T, EK> {
                 o.get().clone()
             }
             MapEntry::Vacant(v) => v
-                .insert(Arc::new(Mutex::new(StoreMeta::new(node_id))))
+                .insert(Arc::new(InstrumentedMutex::new(StoreMeta::new(node_id))))
                 .clone(),
         };
 
@@ -628,7 +628,7 @@ impl<T: Simulator<EK>, EK: KvEngine> Cluster<T, EK> {
             let id = i as u64 + 1;
             self.tablet_registries.insert(id, tablet_registry.clone());
             self.raft_engines.insert(id, raft_engine.clone());
-            let store_meta = Arc::new(Mutex::new(StoreMeta::new(id)));
+            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(id)));
             self.store_metas.insert(id, store_meta);
             self.key_managers_map
                 .insert(id, self.key_managers[i].clone());
@@ -664,7 +664,7 @@ impl<T: Simulator<EK>, EK: KvEngine> Cluster<T, EK> {
             let id = i as u64 + 1;
             self.tablet_registries.insert(id, tablet_registry.clone());
             self.raft_engines.insert(id, raft_engine.clone());
-            let store_meta = Arc::new(Mutex::new(StoreMeta::new(id)));
+            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(id)));
             self.store_metas.insert(id, store_meta);
             self.key_managers_map
                 .insert(id, self.key_managers[i].clone());

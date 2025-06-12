@@ -227,7 +227,7 @@ impl Simulator for NodeCluster {
         node_id: u64,
         cfg: Config,
         engines: Engines<RocksEngine, RaftTestEngine>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<InstrumentedMutex<StoreMeta>>,
         key_manager: Option<Arc<DataKeyManager>>,
         router: RaftRouter<RocksEngine, RaftTestEngine>,
         system: RaftBatchSystem<RocksEngine, RaftTestEngine>,
