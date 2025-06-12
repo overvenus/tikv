@@ -1,9 +1,10 @@
 use std::{
+    ops::{Deref, DerefMut},
     panic::Location,
-    sync::{LockResult, Mutex},
+    sync::{LockResult, Mutex, PoisonError},
 };
 
-use tikv_util::warn;
+use tikv_util::{time::InstantExt, warn};
 
 // #[derive(Eq, Hash, PartialEq, Debug)]
 pub struct InstrumentedMutex<T> {
@@ -18,18 +19,56 @@ impl<T> InstrumentedMutex<T> {
     }
 
     #[track_caller]
-    pub fn lock(&self) -> LockResult<std::sync::MutexGuard<'_, T>> {
+    pub fn lock(&self) -> Result<MutexGuard<'_, T>, PoisonError<std::sync::MutexGuard<'_, T>>> {
+        let caller = Location::caller();
         let now = std::time::Instant::now();
-        let guard = self.inner.lock();
-        let elapsed = now.elapsed();
+        let guard = self.inner.lock()?;
+        let elapsed = now.saturating_elapsed();
         if elapsed.as_millis() > 2 {
-            let caller = Location::caller();
             warn!(
                 "dbg mutex lock took too long";
                 "elapsed" => ?elapsed,
                 "location" => %caller,
             );
         }
-        guard
+        Ok(MutexGuard {
+            guard,
+            location: caller,
+            start: std::time::Instant::now(),
+        })
+    }
+}
+
+pub struct MutexGuard<'a, T: ?Sized + 'a> {
+    guard: std::sync::MutexGuard<'a, T>,
+    location: &'a Location<'a>,
+    start: std::time::Instant,
+}
+
+impl<T: ?Sized> Drop for MutexGuard<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        let elapsed = self.start.saturating_elapsed();
+        if elapsed.as_millis() > 2 {
+            warn!(
+                "dbg mutex lock hold too long";
+                "elapsed" => ?elapsed,
+                "location" => %self.location,
+            );
+        }
+    }
+}
+
+impl<T: ?Sized> Deref for MutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &*self.guard
+    }
+}
+
+impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut *self.guard
     }
 }
