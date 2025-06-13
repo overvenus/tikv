@@ -142,6 +142,7 @@ fn run_impl<CER: ConfiguredRaftEngine, F: KvFormat>(
     config: TikvConfig,
     service_event_tx: TikvMpsc::Sender<ServiceEvent>,
     service_event_rx: TikvMpsc::Receiver<ServiceEvent>,
+    log_rotator: tikv_util::logger::AdHocRotator,
 ) {
     let mut tikv = TikvServer::<CER, F>::init(config, service_event_tx.clone());
     // Must be called after `TikvServer::init`.
@@ -163,7 +164,7 @@ fn run_impl<CER: ConfiguredRaftEngine, F: KvFormat>(
     tikv.init_storage_stats_task(engines);
     tikv.init_max_ts_updater();
     tikv.run_server(server_config);
-    tikv.run_status_server();
+    tikv.run_status_server(log_rotator);
     tikv.core.init_quota_tuning_task(tikv.quota_limiter.clone());
 
     // Build a background worker for handling signals.
@@ -208,7 +209,7 @@ pub fn run_tikv(
     // Sets the global logger ASAP.
     // It is okay to use the config w/o `validate()`,
     // because `initial_logger()` handles various conditions.
-    initial_logger(&config);
+    let log_rotator = initial_logger(&config);
 
     // Print version information.
     let build_timestamp = option_env!("TIKV_BUILD_TIME");
@@ -225,9 +226,9 @@ pub fn run_tikv(
 
     dispatch_api_version!(config.storage.api_version(), {
         if !config.raft_engine.enable {
-            run_impl::<RocksEngine, API>(config, service_event_tx, service_event_rx)
+            run_impl::<RocksEngine, API>(config, service_event_tx, service_event_rx, log_rotator)
         } else {
-            run_impl::<RaftLogEngine, API>(config, service_event_tx, service_event_rx)
+            run_impl::<RaftLogEngine, API>(config, service_event_tx, service_event_rx, log_rotator)
         }
     })
 }
@@ -1478,7 +1479,7 @@ where
             .unwrap_or_else(|e| fatal!("failed to start server: {}", e));
     }
 
-    fn run_status_server(&mut self) {
+    fn run_status_server(&mut self, rotator: tikv_util::logger::AdHocRotator) {
         // Create a status server.
         let status_enabled = !self.core.config.server.status_addr.is_empty();
         if status_enabled {
@@ -1490,6 +1491,7 @@ where
                 self.core.store_path.clone(),
                 self.resource_manager.clone(),
                 self.grpc_service_mgr.clone(),
+                rotator,
             ) {
                 Ok(status_server) => Box::new(status_server),
                 Err(e) => {

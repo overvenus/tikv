@@ -5,6 +5,10 @@ use std::{
     fs::{self, DirEntry, File, OpenOptions},
     io::{self, Error, ErrorKind, Write},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use chrono::{DateTime, Duration, Local};
@@ -196,6 +200,47 @@ impl Rotator for RotateBySize {
 
     fn on_rotate(&mut self) -> io::Result<()> {
         self.file_size = 0;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct AdHocRotator {
+    should_rotate: Arc<AtomicBool>,
+}
+
+impl AdHocRotator {
+    pub fn new() -> Self {
+        AdHocRotator {
+            should_rotate: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Set the rotation flag to true.
+    pub fn trigger_rotation(&self) {
+        self.should_rotate.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Rotator for AdHocRotator {
+    fn is_enabled(&self) -> bool {
+        self.should_rotate.load(Ordering::Relaxed)
+    }
+
+    fn prepare(&mut self, _: &File) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn should_rotate(&self) -> bool {
+        self.should_rotate.load(Ordering::Relaxed)
+    }
+
+    fn on_write(&mut self, _: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn on_rotate(&mut self) -> io::Result<()> {
+        self.should_rotate.store(false, Ordering::Relaxed);
         Ok(())
     }
 }

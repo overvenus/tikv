@@ -94,6 +94,7 @@ pub struct StatusServer<R> {
     store_path: PathBuf,
     resource_manager: Option<Arc<ResourceGroupManager>>,
     grpc_service_mgr: GrpcServiceManager,
+    log_rotator: tikv_util::logger::AdHocRotator,
 }
 
 impl<R> StatusServer<R>
@@ -108,6 +109,7 @@ where
         store_path: PathBuf,
         resource_manager: Option<Arc<ResourceGroupManager>>,
         grpc_service_mgr: GrpcServiceManager,
+        log_rotator: tikv_util::logger::AdHocRotator,
     ) -> Result<Self> {
         let thread_pool = Builder::new_multi_thread()
             .enable_all()
@@ -131,6 +133,7 @@ where
             store_path,
             resource_manager,
             grpc_service_mgr,
+            log_rotator,
         })
     }
 
@@ -695,6 +698,7 @@ where
         let store_path = self.store_path.clone();
         let resource_manager = self.resource_manager.clone();
         let grpc_service_mgr = self.grpc_service_mgr.clone();
+        let log_rotator = self.log_rotator.clone();
         // Start to serve.
         let server = builder.serve(make_service_fn(move |conn: &C| {
             let x509 = conn.get_x509();
@@ -704,6 +708,7 @@ where
             let store_path = store_path.clone();
             let resource_manager = resource_manager.clone();
             let grpc_service_mgr = grpc_service_mgr.clone();
+            let log_rotator = log_rotator.clone();
             async move {
                 // Create a status service.
                 Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
@@ -714,6 +719,7 @@ where
                     let store_path = store_path.clone();
                     let resource_manager = resource_manager.clone();
                     let grpc_service_mgr = grpc_service_mgr.clone();
+                    let log_rotator = log_rotator.clone();
                     async move {
                         let path = req.uri().path().to_owned();
                         let method = req.method().to_owned();
@@ -795,6 +801,10 @@ where
                             }
                             (Method::PUT, path) if path.starts_with("/log-level") => {
                                 Self::change_log_level(req).await
+                            }
+                            (Method::PUT, path) if path.starts_with("/log-rotate") => {
+                                log_rotator.trigger_rotation();
+                                Ok(Response::new(Body::empty()))
                             }
                             (Method::GET, "/resource_groups") => {
                                 Self::handle_get_all_resource_groups(resource_manager.as_ref())
@@ -1230,6 +1240,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             None,
             GrpcServiceManager::dummy(),
+            tikv_util::logger::AdHocRotator::new(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1280,6 +1291,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             None,
             GrpcServiceManager::dummy(),
+            tikv_util::logger::AdHocRotator::new(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1333,6 +1345,7 @@ mod tests {
                 temp_dir.path().to_path_buf(),
                 None,
                 GrpcServiceManager::dummy(),
+                tikv_util::logger::AdHocRotator::new(),
             )
             .unwrap();
             let addr = "127.0.0.1:0".to_owned();
@@ -1397,6 +1410,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             None,
             GrpcServiceManager::dummy(),
+            tikv_util::logger::AdHocRotator::new(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1515,6 +1529,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             None,
             GrpcServiceManager::dummy(),
+            tikv_util::logger::AdHocRotator::new(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1561,6 +1576,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             None,
             GrpcServiceManager::dummy(),
+            tikv_util::logger::AdHocRotator::new(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1599,6 +1615,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             None,
             GrpcServiceManager::dummy(),
+            tikv_util::logger::AdHocRotator::new(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1674,6 +1691,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             None,
             GrpcServiceManager::dummy(),
+            tikv_util::logger::AdHocRotator::new(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1706,6 +1724,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             None,
             GrpcServiceManager::dummy(),
+            tikv_util::logger::AdHocRotator::new(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1741,6 +1760,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             None,
             GrpcServiceManager::dummy(),
+            tikv_util::logger::AdHocRotator::new(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1794,6 +1814,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             None,
             GrpcServiceManager::dummy(),
+            tikv_util::logger::AdHocRotator::new(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1851,6 +1872,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             None,
             GrpcServiceManager::dummy(),
+            tikv_util::logger::AdHocRotator::new(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1907,6 +1929,7 @@ mod tests {
                 temp_dir.path().to_path_buf(),
                 None,
                 GrpcServiceManager::dummy(),
+                tikv_util::logger::AdHocRotator::new(),
             )
             .unwrap();
             let addr = "127.0.0.1:0".to_owned();
@@ -1946,6 +1969,7 @@ mod tests {
                 temp_dir.path().to_path_buf(),
                 None,
                 GrpcServiceManager::dummy(),
+                tikv_util::logger::AdHocRotator::new(),
             )
             .unwrap();
             let addr = "127.0.0.1:0".to_owned();

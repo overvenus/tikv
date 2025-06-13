@@ -20,7 +20,8 @@ pub use slog::{FilterFn, Level};
 use slog_async::{Async, AsyncGuard, OverflowStrategy};
 use slog_term::{Decorator, PlainDecorator, RecordDecorator};
 
-use self::file_log::{RotateBySize, RotatingFileLogger, RotatingFileLoggerBuilder};
+pub use self::file_log::AdHocRotator;
+use self::file_log::{RotateBySize, RotatingFileLogger, RotatingFileLoggerBuilder, Rotator};
 use crate::config::{ReadableDuration, ReadableSize};
 
 // Default is 128.
@@ -148,21 +149,26 @@ pub fn exit_process_gracefully(code: i32) -> ! {
 
 /// Constructs a new file writer which outputs log to a file at the specified
 /// path. The file writer rotates for the specified timespan.
-pub fn file_writer<N>(
+pub fn file_writer<N, R>(
     path: impl AsRef<Path>,
     rotation_size: u64,
     max_backups: usize,
     max_age: u64,
     rename: N,
+    rotator: Option<R>,
 ) -> io::Result<BufWriter<RotatingFileLogger>>
 where
     N: 'static + Send + Fn(&Path) -> io::Result<PathBuf>,
+    R: Rotator + 'static,
 {
-    let logger = BufWriter::new(
+    let mut builder =
         RotatingFileLoggerBuilder::new(path, rename, max_backups, ReadableDuration::days(max_age))
-            .add_rotator(RotateBySize::new(ReadableSize::mb(rotation_size)))
-            .build()?,
-    );
+            .add_rotator(RotateBySize::new(ReadableSize::mb(rotation_size)));
+    if let Some(rotator) = rotator {
+        builder = builder.add_rotator(rotator);
+    }
+
+    let logger = BufWriter::new(builder.build()?);
     Ok(logger)
 }
 

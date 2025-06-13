@@ -159,7 +159,7 @@ fn run_impl<CER: ConfiguredRaftEngine, F: KvFormat>(
     tikv.init_storage_stats_task();
     tikv.init_max_ts_updater();
     tikv.run_server(server_config);
-    tikv.run_status_server();
+    tikv.run_status_server(None); // FIXME: pass a valid log rotator.
     tikv.core.init_quota_tuning_task(tikv.quota_limiter.clone());
 
     // Build a background worker for handling signals.
@@ -1305,7 +1305,7 @@ where
             .unwrap_or_else(|e| fatal!("failed to start server: {}", e));
     }
 
-    fn run_status_server(&mut self) {
+    fn run_status_server(&mut self, rotator: Option<tikv_util::logger::AdHocRotator>) {
         // Create a status server.
         let status_enabled = !self.core.config.server.status_addr.is_empty();
         if status_enabled {
@@ -1317,6 +1317,7 @@ where
                 self.core.store_path.clone(),
                 self.resource_manager.clone(),
                 self.grpc_service_mgr.clone(),
+                rotator.unwrap(),
             ) {
                 Ok(status_server) => Box::new(status_server),
                 Err(e) => {

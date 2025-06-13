@@ -12,7 +12,10 @@ use clap::ArgMatches;
 use collections::HashMap;
 use fail;
 use tikv::config::{check_critical_config, persist_config, MetricConfig, TikvConfig};
-use tikv_util::{self, config, logger};
+use tikv_util::{
+    self, config,
+    logger::{self, AdHocRotator},
+};
 
 // A workaround for checking if log is initialized.
 pub static LOG_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -75,10 +78,10 @@ fn make_engine_log_path(path: &str, sub_path: &str, filename: &str) -> String {
 }
 
 #[allow(dead_code)]
-pub fn initial_logger(config: &TikvConfig) {
-    fail::fail_point!("mock_force_uninitial_logger", |_| {
-        LOG_INITIALIZED.store(false, Ordering::SeqCst);
-    });
+pub fn initial_logger(config: &TikvConfig) -> AdHocRotator {
+    // fail::fail_point!("mock_force_uninitial_logger", |_| {
+    //     LOG_INITIALIZED.store(false, Ordering::SeqCst);
+    // });
     let rocksdb_info_log_path = if !config.rocksdb.info_log_dir.is_empty() {
         make_engine_log_path(&config.rocksdb.info_log_dir, "", DEFAULT_ROCKSDB_LOG_FILE)
     } else {
@@ -91,12 +94,14 @@ pub fn initial_logger(config: &TikvConfig) {
     } else {
         make_engine_log_path(&config.storage.data_dir, "", DEFAULT_RAFTDB_LOG_FILE)
     };
+
     let rocksdb = logger::file_writer(
         &rocksdb_info_log_path,
         config.log.file.max_size,
         config.log.file.max_backups,
         config.log.file.max_days,
         rename_by_timestamp,
+        None::<AdHocRotator>,
     )
     .unwrap_or_else(|e| {
         fatal!(
@@ -112,6 +117,7 @@ pub fn initial_logger(config: &TikvConfig) {
         config.log.file.max_backups,
         config.log.file.max_days,
         rename_by_timestamp,
+        None::<AdHocRotator>,
     )
     .unwrap_or_else(|e| {
         fatal!(
@@ -130,6 +136,7 @@ pub fn initial_logger(config: &TikvConfig) {
             config.log.file.max_backups,
             config.log.file.max_days,
             rename_by_timestamp,
+            None::<AdHocRotator>,
         )
         .unwrap_or_else(|e| {
             fatal!(
@@ -185,6 +192,7 @@ pub fn initial_logger(config: &TikvConfig) {
         };
     }
 
+    let rotator = AdHocRotator::new();
     if config.log.file.filename.is_empty() {
         let log = logger::term_writer();
         do_build!(
@@ -201,6 +209,7 @@ pub fn initial_logger(config: &TikvConfig) {
             config.log.file.max_backups,
             config.log.file.max_days,
             rename_by_timestamp,
+            Some(rotator.clone()),
         )
         .unwrap_or_else(|e| {
             fatal!(
@@ -223,6 +232,7 @@ pub fn initial_logger(config: &TikvConfig) {
     log_wrappers::set_redact_info_log(redact_info_log);
 
     LOG_INITIALIZED.store(true, Ordering::SeqCst);
+    rotator
 }
 
 #[allow(dead_code)]
