@@ -12,6 +12,7 @@ use std::{
 
 use collections::HashMap;
 use crossbeam::channel::{SendError, TrySendError};
+use tikv_sync::InstrumentedMutex;
 use tikv_util::{debug, info, lru::LruCache, time::Instant, Either};
 
 use crate::{
@@ -54,7 +55,7 @@ enum CheckDoResult<T> {
 /// Normal FSM and control FSM can have different scheduler, but this is not
 /// required.
 pub struct Router<N: Fsm, C: Fsm, Ns, Cs> {
-    normals: Arc<Mutex<NormalMailMap<N>>>,
+    normals: Arc<InstrumentedMutex<NormalMailMap<N>>>,
     caches: Cell<LruCache<u64, BasicMailbox<N>>>,
     pub(super) control_box: BasicMailbox<C>,
     // TODO: These two schedulers should be unified as single one. However
@@ -85,7 +86,7 @@ where
         state_cnt: Arc<AtomicUsize>,
     ) -> Router<N, C, Ns, Cs> {
         Router {
-            normals: Arc::new(Mutex::new(NormalMailMap {
+            normals: Arc::new(InstrumentedMutex::new(NormalMailMap {
                 map: HashMap::default(),
                 alive_cnt: Arc::default(),
             })),
