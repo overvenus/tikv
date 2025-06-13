@@ -703,11 +703,9 @@ pub fn create_system<N: Fsm, C: Fsm>(
     let (low_sender, low_receiver) = unbounded(None); // no resource control for low fsm
     let normal_scheduler = NormalScheduler {
         sender: sender.clone(),
-        low_sender,
+        low_sender: low_sender.clone(),
     };
-    let control_scheduler = ControlScheduler {
-        sender: sender.clone(),
-    };
+    let control_scheduler = ControlScheduler { sender: low_sender };
     let pool_state_builder = PoolStateBuilder {
         max_batch_size: cfg.max_batch_size(),
         reschedule_duration: cfg.reschedule_duration.0,

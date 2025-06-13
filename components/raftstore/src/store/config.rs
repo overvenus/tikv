@@ -863,9 +863,9 @@ impl Config {
                 limit
             ));
         }
-        if self.store_batch_system.low_priority_pool_size > 0 {
-            // The store thread pool doesn't need a low-priority thread currently.
-            self.store_batch_system.low_priority_pool_size = 0;
+        if self.store_batch_system.low_priority_pool_size == 0 {
+            // Store fsm is polled in low priority pool, so it should be at least 1.
+            self.store_batch_system.low_priority_pool_size = 1;
         }
         if let Some(size) = self.store_batch_system.max_batch_size {
             if size == 0 || size > 10240 {
