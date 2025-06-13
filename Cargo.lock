@@ -4465,6 +4465,7 @@ dependencies = [
  "thiserror",
  "tidb_query_datatype",
  "tikv_alloc",
+ "tikv_sync",
  "tikv_util",
  "time 0.1.42",
  "tokio",
@@ -6820,6 +6821,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tikv_sync"
+version = "0.1.0"
+dependencies = [
+ "slog",
+ "slog-global",
+]
+
+[[package]]
 name = "tikv_util"
 version = "0.1.0"
 dependencies = [
@@ -7228,6 +7237,7 @@ dependencies = [
  "pin-project",
  "prometheus",
  "slab",
+ "tikv_sync",
 ]
 
 [[package]]

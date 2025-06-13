@@ -257,6 +257,7 @@ members = [
   "components/cloud/gcp",
   "components/codec",
   "components/collections",
+  "components/tikv_sync",
   "components/concurrency_manager",
   "components/coprocessor_plugin_api",
   "components/encryption",
@@ -385,6 +386,7 @@ tikv = { path = ".", default-features = false }
 tikv_alloc = { path = "components/tikv_alloc" }
 tikv_kv = { path = "components/tikv_kv", default-features = false }
 tikv_util = { path = "components/tikv_util" }
+tikv_sync = { path = "components/tikv_sync" }
 tipb_helper = { path = "components/tipb_helper" }
 tracker = { path = "components/tracker" }
 txn_types = { path = "components/txn_types" }

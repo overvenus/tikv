@@ -39,7 +39,7 @@ crc32fast = "1.2"
 crossbeam = "0.8"
 derivative = "2"
 encryption = { workspace = true }
-engine_rocks = { workspace = true, optional = true } 
+engine_rocks = { workspace = true, optional = true }
 
 # Should be [dev-dependencies] but we need to control the features
 # https://github.com/rust-lang/cargo/issues/6915
@@ -89,6 +89,7 @@ thiserror = "1.0"
 tidb_query_datatype = { workspace = true }
 tikv_alloc = { workspace = true }
 tikv_util = { workspace = true }
+tikv_sync = { workspace = true }
 time = "0.1"
 tokio = { version = "1.5", features = ["sync", "rt-multi-thread"] }
 tracker = { workspace = true }

@@ -4,8 +4,8 @@ use std::{array, cell::Cell, fmt};
 
 use crossbeam_utils::CachePadded;
 use lazy_static::lazy_static;
-use parking_lot::Mutex;
 use slab::Slab;
+use tikv_sync::InstrumentedMutex;
 
 use crate::{metrics::*, Tracker};
 
@@ -30,13 +30,13 @@ fn next_shard_id() -> usize {
 }
 
 pub struct ShardedSlab {
-    shards: [CachePadded<Mutex<TrackerSlab>>; SLAB_SHARD_COUNT],
+    shards: [CachePadded<InstrumentedMutex<TrackerSlab>>; SLAB_SHARD_COUNT],
 }
 
 impl ShardedSlab {
     pub fn new(capacity_per_shard: usize) -> ShardedSlab {
         let shards = array::from_fn(|shard_id| {
-            CachePadded::new(Mutex::new(TrackerSlab::with_capacity(
+            CachePadded::new(InstrumentedMutex::new(TrackerSlab::with_capacity(
                 shard_id as u32,
                 capacity_per_shard,
             )))
@@ -44,38 +44,46 @@ impl ShardedSlab {
         ShardedSlab { shards }
     }
 
+    #[track_caller]
     pub fn insert(&self, tracker: Tracker) -> TrackerToken {
         let shard_id = next_shard_id();
-        self.shards[shard_id].lock().insert(tracker)
+        self.shards[shard_id].lock().unwrap().insert(tracker)
     }
 
+    #[track_caller]
     pub fn remove(&self, token: TrackerToken) -> Option<Tracker> {
         if token != INVALID_TRACKER_TOKEN {
             let shard_id = token.shard_id();
-            self.shards[shard_id as usize].lock().remove(token)
+            self.shards[shard_id as usize].lock().unwrap().remove(token)
         } else {
             None
         }
     }
 
+    #[track_caller]
     pub fn with_tracker<F, T>(&self, token: TrackerToken, f: F) -> Option<T>
     where
         F: FnOnce(&mut Tracker) -> T,
     {
         if token != INVALID_TRACKER_TOKEN {
             let shard_id = token.shard_id();
-            self.shards[shard_id as usize].lock().get_mut(token).map(f)
+            self.shards[shard_id as usize]
+                .lock()
+                .unwrap()
+                .get_mut(token)
+                .map(f)
         } else {
             None
         }
     }
 
+    #[track_caller]
     pub fn for_each<F>(&self, mut f: F)
     where
         F: FnMut(&mut Tracker),
     {
         for shard in &self.shards {
-            for (_, tracker) in shard.lock().slab.iter_mut() {
+            for (_, tracker) in shard.lock().unwrap().slab.iter_mut() {
                 f(&mut tracker.tracker)
             }
         }
@@ -265,6 +273,7 @@ mod tests {
         for shard in &slab.shards {
             let mut v: Vec<_> = shard
                 .lock()
+                .unwrap()
                 .slab
                 .iter()
                 .map(|(_, entry)| entry.tracker.req_info.task_id)
