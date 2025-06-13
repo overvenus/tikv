@@ -232,7 +232,11 @@ impl Rotator for AdHocRotator {
     }
 
     fn should_rotate(&self) -> bool {
-        self.should_rotate.load(Ordering::Relaxed)
+        let should_rotate = self.should_rotate.load(Ordering::Relaxed);
+        if should_rotate {
+            info!("should rotate log file");
+        }
+        should_rotate
     }
 
     fn on_write(&mut self, _: &[u8]) -> io::Result<()> {
@@ -240,6 +244,7 @@ impl Rotator for AdHocRotator {
     }
 
     fn on_rotate(&mut self) -> io::Result<()> {
+        info!("log file rotated");
         self.should_rotate.store(false, Ordering::Relaxed);
         Ok(())
     }

@@ -804,6 +804,7 @@ where
                             }
                             (Method::PUT, path) if path.starts_with("/log-rotate") => {
                                 log_rotator.trigger_rotation();
+                                info!("log rotation triggered");
                                 Ok(Response::new(Body::empty()))
                             }
                             (Method::GET, "/resource_groups") => {
