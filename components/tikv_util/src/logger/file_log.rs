@@ -224,7 +224,7 @@ impl AdHocRotator {
 
 impl Rotator for AdHocRotator {
     fn is_enabled(&self) -> bool {
-        self.should_rotate.load(Ordering::Relaxed)
+        true
     }
 
     fn prepare(&mut self, _: &File) -> io::Result<()> {
