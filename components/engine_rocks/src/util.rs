@@ -17,6 +17,9 @@ use crate::{
     rocks_metrics_defs::*, RocksStatistics,
 };
 
+// A lock-free way to get the size of all live data in a column family.
+const ESTIMATE_LIVE_DATA_SIZE: &str = "rocksdb.estimate-live-data-size";
+
 pub fn new_temp_engine(path: &tempfile::TempDir) -> Engines<RocksEngine, RocksEngine> {
     let raft_path = path.path().join(std::path::Path::new("raft"));
     Engines::new(
@@ -176,12 +179,12 @@ pub fn range_to_rocks_range<'a>(range: &Range<'a>) -> RocksRange<'a> {
 
 pub fn get_engine_cf_used_size(engine: &DB, handle: &CFHandle) -> u64 {
     let mut cf_used_size = engine
-        .get_property_int_cf(handle, ROCKSDB_TOTAL_SST_FILES_SIZE)
+        .get_property_int_cf(handle, ESTIMATE_LIVE_DATA_SIZE)
         .expect("rocksdb is too old, missing total-sst-files-size property");
     // For memtable
-    if let Some(mem_table) = engine.get_property_int_cf(handle, ROCKSDB_CUR_SIZE_ALL_MEM_TABLES) {
-        cf_used_size += mem_table;
-    }
+    // if let Some(mem_table) = engine.get_property_int_cf(handle,
+    // ROCKSDB_CUR_SIZE_ALL_MEM_TABLES) {     cf_used_size += mem_table;
+    // }
     // For blob files
     if let Some(live_blob) = engine.get_property_int_cf(handle, ROCKSDB_TITANDB_LIVE_BLOB_FILE_SIZE)
     {

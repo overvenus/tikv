@@ -20,6 +20,9 @@ use crate::{
 
 pub const MAX_DELETE_COUNT_BY_KEY: usize = 2048;
 
+// A lock-free way to get the size of all live data in a column family.
+const ESTIMATE_LIVE_DATA_SIZE: &str = "rocksdb.estimate-live-data-size";
+
 impl RocksEngine {
     fn is_titan(&self) -> bool {
         self.as_inner().is_titan()
@@ -446,7 +449,7 @@ impl MiscExt for RocksEngine {
         let handle = util::get_cf_handle(self.as_inner(), cf)?;
         Ok(self
             .as_inner()
-            .get_property_int_cf(handle, ROCKSDB_TOTAL_SST_FILES_SIZE))
+            .get_property_int_cf(handle, ESTIMATE_LIVE_DATA_SIZE))
     }
 
     fn get_num_keys(&self) -> Result<u64> {
