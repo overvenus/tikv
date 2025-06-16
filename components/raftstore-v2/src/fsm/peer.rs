@@ -175,7 +175,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
         self.fsm.tick_registry[idx] = true;
         let logger = self.fsm.logger().clone();
         // TODO: perhaps following allocation can be removed.
-        let cb = Box::new(move || {
+        let _cb = Box::new(move || {
             // This can happen only when the peer is about to be destroyed
             // or the node is shutting down. So it's OK to not to clean up
             // registry.
@@ -188,7 +188,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
                 );
             }
         });
-        self.store_ctx.tick_batch[idx].ticks.push(cb);
+        // self.store_ctx.tick_batch[idx].ticks.push(cb);
     }
 
     fn on_start(&mut self, watch: Option<Arc<ReplayWatch>>) {
