@@ -641,7 +641,6 @@ dependencies = [
  "slog",
  "slog-global",
  "tikv_alloc",
- "tikv_sync",
  "tikv_util",
 ]
 

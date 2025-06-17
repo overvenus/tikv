@@ -25,7 +25,6 @@ slog = { workspace = true }
 slog-global = { workspace = true }
 tikv_alloc = { workspace = true }
 tikv_util = { workspace = true }
-tikv_sync = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.3"
