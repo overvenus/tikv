@@ -7,11 +7,11 @@ use std::sync::{
 };
 
 use crossbeam::channel::{SendError, TrySendError};
-use dashmap::DashMap;
 use tikv_util::{debug, info, time::Instant, Either};
 
 use crate::{
     fsm::{Fsm, FsmScheduler},
+    instrumented::InstrumentedDashMap,
     mailbox::{BasicMailbox, Mailbox},
     metrics::*,
 };
@@ -46,7 +46,7 @@ const ROUTER_SHRINK_SIZE: usize = 1000;
 /// Normal FSM and control FSM can have different scheduler, but this is not
 /// required.
 pub struct Router<N: Fsm, C: Fsm, Ns, Cs> {
-    normals: Arc<DashMap<u64, BasicMailbox<N>>>,
+    normals: Arc<InstrumentedDashMap<u64, BasicMailbox<N>>>,
     pub(super) control_box: BasicMailbox<C>,
     // TODO: These two schedulers should be unified as single one. However
     // it's not possible to write FsmScheduler<Fsm=C> + FsmScheduler<Fsm=N>
@@ -76,7 +76,7 @@ where
         state_cnt: Arc<AtomicUsize>,
     ) -> Router<N, C, Ns, Cs> {
         Router {
-            normals: Arc::new(DashMap::default()),
+            normals: Arc::new(InstrumentedDashMap::new()),
             control_box,
             normal_scheduler,
             control_scheduler,

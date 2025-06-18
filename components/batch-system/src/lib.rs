@@ -3,6 +3,7 @@
 mod batch;
 mod config;
 mod fsm;
+mod instrumented;
 mod mailbox;
 mod metrics;
 mod router;
