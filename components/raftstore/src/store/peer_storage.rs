@@ -694,6 +694,8 @@ where
             .mut_truncated_state()
             .set_term(snap_term);
 
+        self.set_snapshot_index_term(snap_index, snap_term);
+
         // `region` will be updated after persisting.
         // Although there is an interval that other metadata are updated while `region`
         // is not after handing snapshot from ready, at the time of writing, it's no

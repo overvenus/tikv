@@ -651,12 +651,22 @@ impl<EK: KvEngine, ER: RaftEngine> EntryStorage<EK, ER> {
         }
         let last_term = init_last_term(&raft_engine, region, &raft_state, &apply_state)?;
         let applied_term = init_applied_term(&raft_engine, region, &apply_state)?;
+        let mut term_cache = TermCache::new();
+        let timer = raft_metrics.io_read_init_term_cache.start_timer();
+        for idx in first_index(&apply_state)..=last_index(&raft_state) {
+            let entry = raft_engine
+                .get_entry(region.get_id(), idx)
+                .unwrap()
+                .unwrap();
+            term_cache.insert(idx, entry.get_term());
+        }
+        drop(timer);
         Ok(Self {
             region_id: region.id,
             peer_id,
             raft_engine,
             cache: EntryCache::default(),
-            term_cache: TermCache::new(),
+            term_cache,
             raft_state,
             apply_state,
             last_term,
@@ -951,6 +961,11 @@ impl<EK: KvEngine, ER: RaftEngine> EntryStorage<EK, ER> {
         if let Some(e) = self.cache.entry(idx) {
             Ok(e.get_term())
         } else {
+            if let Some(term) = self.term_cache.get(idx) {
+                return Ok(term);
+            } else {
+                warn!("bug term_cache"; "apply_state" => ?self.apply_state, "term_cache" => ?self.term_cache, "index" => idx);
+            };
             let _timer = self.io_read_raft_term.start_timer();
             Ok(self
                 .raft_engine
@@ -1002,6 +1017,12 @@ impl<EK: KvEngine, ER: RaftEngine> EntryStorage<EK, ER> {
     }
 
     #[inline]
+    pub fn set_snapshot_index_term(&mut self, index: u64, term: u64) {
+        self.term_cache = TermCache::new();
+        self.term_cache.insert(index, term);
+    }
+
+    #[inline]
     pub fn applied_term(&self) -> u64 {
         self.applied_term
     }
@@ -1023,6 +1044,10 @@ impl<EK: KvEngine, ER: RaftEngine> EntryStorage<EK, ER> {
 
     #[inline]
     pub fn set_apply_state(&mut self, apply_state: RaftApplyState) {
+        let truncated_state = apply_state.get_truncated_state();
+        if truncated_state != self.apply_state.get_truncated_state() {
+            self.term_cache.truncate(truncated_state.index);
+        }
         self.apply_state = apply_state;
     }
 
@@ -1082,6 +1107,9 @@ impl<EK: KvEngine, ER: RaftEngine> EntryStorage<EK, ER> {
         };
 
         self.cache.append(self.region_id, self.peer_id, &entries);
+        for entry in &entries {
+            self.term_cache.insert(entry.get_index(), entry.get_term());
+        }
 
         // Delete any previously appended log entries which never committed.
         task.set_append(Some(prev_last_index + 1), entries);

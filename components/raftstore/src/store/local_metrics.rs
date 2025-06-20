@@ -181,6 +181,7 @@ pub struct RaftMetrics {
     pub io_read_peer_snapshot_read: LocalHistogram,
     pub io_read_v2_compatible_learner: LocalHistogram,
     pub io_read_raft_term: LocalHistogram,
+    pub io_read_init_term_cache: LocalHistogram,
     pub io_read_raft_fetch_log: LocalHistogram,
 
     // waterfall metrics
@@ -258,6 +259,9 @@ impl RaftMetrics {
             io_read_raft_term: STORE_IO_DURATION_HISTOGRAM
                 .with_label_values(&["read", "raft_term"])
                 .local(),
+            io_read_init_term_cache: STORE_IO_DURATION_HISTOGRAM
+                .with_label_values(&["read", "init_term_cache"])
+                .local(),
             io_read_raft_fetch_log: STORE_IO_DURATION_HISTOGRAM
                 .with_label_values(&["read", "raft_fetch_log"])
                 .local(),
@@ -311,6 +315,7 @@ impl RaftMetrics {
         self.io_read_peer_snapshot_read.flush();
         self.io_read_v2_compatible_learner.flush();
         self.io_read_raft_term.flush();
+        self.io_read_init_term_cache.flush();
         self.io_read_raft_fetch_log.flush();
 
         if self.waterfall_metrics {
