@@ -25,6 +25,7 @@ mod region_snapshot;
 mod replication_mode;
 pub mod simple_write;
 pub mod snap;
+pub mod term_cache;
 mod txn_ext;
 mod unsafe_recovery;
 mod worker;

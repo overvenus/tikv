@@ -5401,6 +5401,7 @@ dependencies = [
  "grpcio",
  "grpcio-health",
  "hex 0.4.2",
+ "hyper",
  "keys",
  "kvproto",
  "libc 0.2.146",

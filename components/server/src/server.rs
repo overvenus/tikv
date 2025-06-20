@@ -28,6 +28,7 @@ use backup_stream::{
 };
 use causal_ts::CausalTsProviderImpl;
 use cdc::CdcConfigManager;
+use collections::HashMap as THashMap;
 use concurrency_manager::{
     ActionOnInvalidMaxTs, ConcurrencyManager, DEFAULT_MAX_TS_DRIFT_ALLOWANCE,
     DEFAULT_MAX_TS_SYNC_INTERVAL, LIMIT_VALID_TIME_MULTIPLIER,
@@ -42,6 +43,7 @@ use file_system::{get_io_rate_limiter, BytesFetcher, MetricsManager as IoMetrics
 use futures::executor::block_on;
 use grpcio::{EnvBuilder, Environment};
 use grpcio_health::HealthService;
+use hyper::{Body, Request};
 use kvproto::{
     brpb::create_backup, cdcpb::create_change_data, deadlock::create_deadlock,
     debugpb::create_debug, diagnosticspb::create_diagnostics, import_sstpb::create_import_sst,
@@ -161,10 +163,23 @@ fn run_impl<CER: ConfiguredRaftEngine, F: KvFormat>(
     let server_config = tikv.init_servers();
     tikv.register_services();
     tikv.init_metrics_flusher(fetcher, engines_info);
-    tikv.init_storage_stats_task(engines);
+    tikv.init_storage_stats_task(engines.clone());
     tikv.init_max_ts_updater();
     tikv.run_server(server_config);
-    tikv.run_status_server(log_rotator);
+
+    let mut debug_adhoc_apis: THashMap<
+        String,
+        Box<dyn Fn(&Request<Body>) + 'static + Send + Sync>,
+    > = HashMap::default();
+    debug_adhoc_apis.insert(
+        "get_sst_key_ranges".to_owned(),
+        Box::new(move |_: &Request<Body>| {
+            let _ = engines.kv.get_sst_key_ranges("write", 0);
+        }),
+    );
+    let debug_adhoc_apis = Arc::new(debug_adhoc_apis);
+
+    tikv.run_status_server(log_rotator, debug_adhoc_apis);
     tikv.core.init_quota_tuning_task(tikv.quota_limiter.clone());
 
     // Build a background worker for handling signals.
@@ -1480,7 +1495,13 @@ where
             .unwrap_or_else(|e| fatal!("failed to start server: {}", e));
     }
 
-    fn run_status_server(&mut self, rotator: tikv_util::logger::AdHocRotator) {
+    fn run_status_server(
+        &mut self,
+        rotator: tikv_util::logger::AdHocRotator,
+        debug_adhoc_apis: Arc<
+            THashMap<String, Box<dyn Fn(&Request<Body>) + 'static + Send + Sync>>,
+        >,
+    ) {
         // Create a status server.
         let status_enabled = !self.core.config.server.status_addr.is_empty();
         if status_enabled {
@@ -1493,6 +1514,7 @@ where
                 self.resource_manager.clone(),
                 self.grpc_service_mgr.clone(),
                 rotator,
+                debug_adhoc_apis,
             ) {
                 Ok(status_server) => Box::new(status_server),
                 Err(e) => {

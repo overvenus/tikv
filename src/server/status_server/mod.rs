@@ -95,6 +95,7 @@ pub struct StatusServer<R> {
     resource_manager: Option<Arc<ResourceGroupManager>>,
     grpc_service_mgr: GrpcServiceManager,
     log_rotator: tikv_util::logger::AdHocRotator,
+    debug_adhoc_apis: Arc<HashMap<String, Box<dyn Fn(&Request<Body>) + 'static + Send + Sync>>>,
 }
 
 impl<R> StatusServer<R>
@@ -110,6 +111,7 @@ where
         resource_manager: Option<Arc<ResourceGroupManager>>,
         grpc_service_mgr: GrpcServiceManager,
         log_rotator: tikv_util::logger::AdHocRotator,
+        debug_adhoc_apis: Arc<HashMap<String, Box<dyn Fn(&Request<Body>) + 'static + Send + Sync>>>,
     ) -> Result<Self> {
         let thread_pool = Builder::new_multi_thread()
             .enable_all()
@@ -134,6 +136,7 @@ where
             resource_manager,
             grpc_service_mgr,
             log_rotator,
+            debug_adhoc_apis,
         })
     }
 
@@ -699,6 +702,7 @@ where
         let resource_manager = self.resource_manager.clone();
         let grpc_service_mgr = self.grpc_service_mgr.clone();
         let log_rotator = self.log_rotator.clone();
+        let debug_adhoc_apis = self.debug_adhoc_apis.clone();
         // Start to serve.
         let server = builder.serve(make_service_fn(move |conn: &C| {
             let x509 = conn.get_x509();
@@ -709,6 +713,7 @@ where
             let resource_manager = resource_manager.clone();
             let grpc_service_mgr = grpc_service_mgr.clone();
             let log_rotator = log_rotator.clone();
+            let debug_adhoc_apis = debug_adhoc_apis.clone();
             async move {
                 // Create a status service.
                 Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
@@ -720,6 +725,7 @@ where
                     let resource_manager = resource_manager.clone();
                     let grpc_service_mgr = grpc_service_mgr.clone();
                     let log_rotator = log_rotator.clone();
+                    let debug_adhoc_apis = debug_adhoc_apis.clone();
                     async move {
                         let path = req.uri().path().to_owned();
                         let method = req.method().to_owned();
@@ -794,6 +800,14 @@ where
                                 info!("debug fail point API start");
                                 fail_point!("debug_fail_point");
                                 info!("debug fail point API finish");
+                                Ok(Response::default())
+                            }
+                            (Method::GET, "/debug/adhoc/get_sst_key_ranges") => {
+                                let Some(api) = debug_adhoc_apis.get("get_sst_key_ranges") else {
+                                    warn!("debug adhoc API not found"; "api" => "get_sst_key_ranges");
+                                    return Ok(make_response(StatusCode::NOT_FOUND, "path not found"));
+                                };
+                                api(&req);
                                 Ok(Response::default())
                             }
                             (Method::GET, path) if path.starts_with("/region") => {
@@ -1242,6 +1256,7 @@ mod tests {
             None,
             GrpcServiceManager::dummy(),
             tikv_util::logger::AdHocRotator::new(),
+            Arc::default(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1293,6 +1308,7 @@ mod tests {
             None,
             GrpcServiceManager::dummy(),
             tikv_util::logger::AdHocRotator::new(),
+            Arc::default(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1347,6 +1363,7 @@ mod tests {
                 None,
                 GrpcServiceManager::dummy(),
                 tikv_util::logger::AdHocRotator::new(),
+                Arc::default(),
             )
             .unwrap();
             let addr = "127.0.0.1:0".to_owned();
@@ -1412,6 +1429,7 @@ mod tests {
             None,
             GrpcServiceManager::dummy(),
             tikv_util::logger::AdHocRotator::new(),
+            Arc::default(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1531,6 +1549,7 @@ mod tests {
             None,
             GrpcServiceManager::dummy(),
             tikv_util::logger::AdHocRotator::new(),
+            Arc::default(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1578,6 +1597,7 @@ mod tests {
             None,
             GrpcServiceManager::dummy(),
             tikv_util::logger::AdHocRotator::new(),
+            Arc::default(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1617,6 +1637,7 @@ mod tests {
             None,
             GrpcServiceManager::dummy(),
             tikv_util::logger::AdHocRotator::new(),
+            Arc::default(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1693,6 +1714,7 @@ mod tests {
             None,
             GrpcServiceManager::dummy(),
             tikv_util::logger::AdHocRotator::new(),
+            Arc::default(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1726,6 +1748,7 @@ mod tests {
             None,
             GrpcServiceManager::dummy(),
             tikv_util::logger::AdHocRotator::new(),
+            Arc::default(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1762,6 +1785,7 @@ mod tests {
             None,
             GrpcServiceManager::dummy(),
             tikv_util::logger::AdHocRotator::new(),
+            Arc::default(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1816,6 +1840,7 @@ mod tests {
             None,
             GrpcServiceManager::dummy(),
             tikv_util::logger::AdHocRotator::new(),
+            Arc::default(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1874,6 +1899,7 @@ mod tests {
             None,
             GrpcServiceManager::dummy(),
             tikv_util::logger::AdHocRotator::new(),
+            Arc::default(),
         )
         .unwrap();
         let addr = "127.0.0.1:0".to_owned();
@@ -1931,6 +1957,7 @@ mod tests {
                 None,
                 GrpcServiceManager::dummy(),
                 tikv_util::logger::AdHocRotator::new(),
+                Arc::default(),
             )
             .unwrap();
             let addr = "127.0.0.1:0".to_owned();
@@ -1971,6 +1998,7 @@ mod tests {
                 None,
                 GrpcServiceManager::dummy(),
                 tikv_util::logger::AdHocRotator::new(),
+                Arc::default(),
             )
             .unwrap();
             let addr = "127.0.0.1:0".to_owned();

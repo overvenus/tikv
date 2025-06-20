@@ -28,8 +28,8 @@ use tikv_alloc::TraceEvent;
 use tikv_util::{box_err, debug, error, info, time::Instant, warn, worker::Scheduler};
 
 use super::{
-    local_metrics::RaftMetrics, metrics::*, peer_storage::storage_error, WriteTask,
-    MEMTRACE_ENTRY_CACHE, RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM,
+    local_metrics::RaftMetrics, metrics::*, peer_storage::storage_error, term_cache::TermCache,
+    WriteTask, MEMTRACE_ENTRY_CACHE, RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM,
 };
 use crate::{bytes_capacity, store::ReadTask, Result};
 
@@ -617,6 +617,7 @@ pub struct EntryStorage<EK: KvEngine, ER> {
     peer_id: u64,
     raft_engine: ER,
     cache: EntryCache,
+    term_cache: TermCache,
     raft_state: RaftLocalState,
     apply_state: RaftApplyState,
     last_term: u64,
@@ -655,6 +656,7 @@ impl<EK: KvEngine, ER: RaftEngine> EntryStorage<EK, ER> {
             peer_id,
             raft_engine,
             cache: EntryCache::default(),
+            term_cache: TermCache::new(),
             raft_state,
             apply_state,
             last_term,

@@ -49,6 +49,7 @@ fn test_region_meta_endpoint() {
         None,
         GrpcServiceManager::dummy(),
         tikv_util::logger::AdHocRotator::new(),
+        Arc::default(),
     )
     .unwrap();
     let addr = format!("127.0.0.1:{}", test_util::alloc_port());
