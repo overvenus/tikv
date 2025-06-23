@@ -2234,38 +2234,35 @@ where
         self.fsm.tick_registry[idx] = true;
 
         let region_id = self.region_id();
-        // let mb = self.fsm.mailbox.clone().unwrap();
-        // let mb = match self.ctx.router.mailbox(region_id) {
-        //     Some(mb) => mb,
-        //     None => {
-        //         self.fsm.tick_registry[idx] = false;
-        //         error!(
-        //             "failed to get mailbox";
-        //             "region_id" => self.fsm.region_id(),
-        //             "peer_id" => self.fsm.peer_id(),
-        //             "tick" => ?tick,
-        //         );
-        //         return;
-        //     }
-        // };
-        // let peer_id = self.fsm.peer.peer_id();
-        // let cb = Box::new(move || {
-        //     // This can happen only when the peer is about to be destroyed
-        //     // or the node is shutting down. So it's OK to not to clean up
-        //     // registry.
-        //     if let Err(e) = mb.force_send(PeerMsg::Tick(tick)) {
-        //         debug!(
-        //             "failed to schedule peer tick";
-        //             "region_id" => region_id,
-        //             "peer_id" => peer_id,
-        //             "tick" => ?tick,
-        //             "err" => %e,
-        //         );
-        //     }
-        // });
-        self.ctx.tick_batch[idx]
-            .ticks
-            .push((PeerMsg::Tick(tick), region_id));
+        let mb = match self.ctx.router.mailbox(region_id) {
+            Some(mb) => mb,
+            None => {
+                self.fsm.tick_registry[idx] = false;
+                error!(
+                    "failed to get mailbox";
+                    "region_id" => self.fsm.region_id(),
+                    "peer_id" => self.fsm.peer_id(),
+                    "tick" => ?tick,
+                );
+                return;
+            }
+        };
+        let peer_id = self.fsm.peer.peer_id();
+        let cb = Box::new(move || {
+            // This can happen only when the peer is about to be destroyed
+            // or the node is shutting down. So it's OK to not to clean up
+            // registry.
+            if let Err(e) = mb.force_send(PeerMsg::Tick(tick)) {
+                debug!(
+                    "failed to schedule peer tick";
+                    "region_id" => region_id,
+                    "peer_id" => peer_id,
+                    "tick" => ?tick,
+                    "err" => %e,
+                );
+            }
+        });
+        self.ctx.tick_batch[idx].ticks.push(cb);
     }
 
     fn register_raft_base_tick(&mut self) {

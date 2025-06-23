@@ -85,7 +85,7 @@ pub struct StoreContext<EK: KvEngine, ER: RaftEngine, T> {
     pub router: StoreRouter<EK, ER>,
     /// The tick batch for delay ticking. It will be flushed at the end of every
     /// round.
-    pub tick_batch: Vec<PeerTickBatch<EK, ER>>,
+    pub tick_batch: Vec<PeerTickBatch>,
     /// The precise timer for scheduling tick.
     pub timer: SteadyTimer,
     pub schedulers: Schedulers<EK, ER>,
@@ -556,7 +556,7 @@ where
             raft_metrics: RaftMetrics::new(cfg.waterfall_metrics),
             cfg,
             router: self.router.clone(),
-            tick_batch: vec![],
+            tick_batch: vec![PeerTickBatch::default(); PeerTick::VARIANT_COUNT],
             timer: SteadyTimer::default(),
             schedulers: self.schedulers.clone(),
             store_meta: self.store_meta.clone(),

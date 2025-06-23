@@ -509,68 +509,33 @@ where
     }
 }
 
-pub struct PeerTickBatch<EK, ER>
-where
-    EK: KvEngine,
-    ER: RaftEngine,
-{
-    pub ticks: Vec<(PeerMsg<EK>, u64)>,
+#[derive(Default)]
+pub struct PeerTickBatch {
+    pub ticks: Vec<Box<dyn FnOnce() + Send>>,
     pub wait_duration: Duration,
-    pub router: RaftRouter<EK, ER>,
 }
 
-impl<EK, ER> PeerTickBatch<EK, ER>
-where
-    EK: KvEngine,
-    ER: RaftEngine,
-{
-    pub fn new(router: RaftRouter<EK, ER>) -> PeerTickBatch<EK, ER> {
-        PeerTickBatch {
-            ticks: vec![],
-            wait_duration: Duration::ZERO,
-            router,
-        }
-    }
-
+impl PeerTickBatch {
     #[inline]
     pub fn schedule(&mut self, timer: &SteadyTimer) {
         if self.ticks.is_empty() {
             return;
         }
-        let mut peer_ticks = Vec::with_capacity(self.ticks.len());
-        mem::swap(&mut self.ticks, &mut peer_ticks);
-        let router = self.router.clone();
-        // let peer_ticks = mem::take(&mut self.ticks);
+        let peer_ticks = mem::take(&mut self.ticks);
         let f = timer.delay(self.wait_duration).compat().map(move |_| {
-            // for tick in peer_ticks {
-            //     tick();
-            // }
-            for (tick, region_id) in peer_ticks {
-                // This can happen only when the peer is about to be destroyed
-                // or the node is shutting down. So it's OK to not to clean up
-                // registry.
-                if let Err(e) = router.force_send(region_id, tick) {
-                    debug!(
-                        "failed to schedule peer tick";
-                        "err" => %e,
-                    );
-                }
+            for tick in peer_ticks {
+                tick();
             }
         });
         poll_future_notify(f);
     }
 }
 
-impl<EK, ER> Clone for PeerTickBatch<EK, ER>
-where
-    EK: KvEngine,
-    ER: RaftEngine,
-{
-    fn clone(&self) -> PeerTickBatch<EK, ER> {
+impl Clone for PeerTickBatch {
+    fn clone(&self) -> PeerTickBatch {
         PeerTickBatch {
             ticks: vec![],
             wait_duration: self.wait_duration,
-            router: self.router.clone(),
         }
     }
 }
@@ -630,7 +595,7 @@ where
     pub unsafe_vote_deadline: Option<Timespec>,
     pub raft_perf_context: ER::PerfContext,
     pub kv_perf_context: EK::PerfContext,
-    pub tick_batch: Vec<PeerTickBatch<EK, ER>>,
+    pub tick_batch: Vec<PeerTickBatch>,
     /// Disk usage for the store itself.
     pub self_disk_usage: DiskUsage,
 
@@ -1581,7 +1546,7 @@ where
                 self.cfg.value().perf_level,
                 PerfContextKind::RaftstoreStore,
             ),
-            tick_batch: vec![PeerTickBatch::new(self.router.clone()); PeerTick::VARIANT_COUNT],
+            tick_batch: vec![PeerTickBatch::default(); PeerTick::VARIANT_COUNT],
             feature_gate: self.feature_gate.clone(),
             self_disk_usage: DiskUsage::Normal,
             store_disk_usages: Default::default(),
