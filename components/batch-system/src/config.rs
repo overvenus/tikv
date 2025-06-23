@@ -14,6 +14,8 @@ pub struct Config {
     pub reschedule_duration: ReadableDuration,
     #[online_config(skip)]
     pub low_priority_pool_size: usize,
+    #[online_config(skip)]
+    pub router_shard_amount: Option<usize>,
 }
 
 impl Config {
@@ -30,6 +32,7 @@ impl Default for Config {
             pool_size: 2,
             reschedule_duration: ReadableDuration::secs(5),
             low_priority_pool_size: 1,
+            router_shard_amount: None,
         }
     }
 }

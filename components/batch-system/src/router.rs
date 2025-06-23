@@ -14,6 +14,7 @@ use crate::{
     instrumented::InstrumentedDashMap,
     mailbox::{BasicMailbox, Mailbox},
     metrics::*,
+    Config,
 };
 
 /// A struct that traces the approximate memory usage of router.
@@ -70,13 +71,14 @@ where
     Cs: FsmScheduler<Fsm = C> + Clone,
 {
     pub(super) fn new(
+        cfg: &Config,
         control_box: BasicMailbox<C>,
         normal_scheduler: Ns,
         control_scheduler: Cs,
         state_cnt: Arc<AtomicUsize>,
     ) -> Router<N, C, Ns, Cs> {
         Router {
-            normals: Arc::new(InstrumentedDashMap::new()),
+            normals: Arc::new(InstrumentedDashMap::new(cfg.router_shard_amount)),
             control_box,
             normal_scheduler,
             control_scheduler,
@@ -102,7 +104,7 @@ where
     where
         F: FnMut(&BasicMailbox<N>) -> Option<R>,
     {
-        let mailbox = match self.normals.get_mut(&addr) {
+        let mailbox = match self.normals.get(&addr) {
             Some(mailbox) => mailbox,
             None => {
                 return CheckDoResult::NotExist;

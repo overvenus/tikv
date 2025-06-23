@@ -25,9 +25,14 @@ pub struct InstrumentedDashMap<K, V, S = RandomState> {
 }
 
 impl<'a, K: 'a + Eq + Hash, V: 'a> InstrumentedDashMap<K, V, RandomState> {
-    pub fn new() -> Self {
+    pub fn new(shard_amount: Option<usize>) -> Self {
+        // A power of two is required by DashMap otherwise it will panic.
+        let shard_amount = shard_amount
+            .unwrap_or_else(|| num_cpus::get() * 4)
+            .next_power_of_two();
+
         InstrumentedDashMap {
-            inner: DashMap::new(),
+            inner: DashMap::with_shard_amount(shard_amount),
         }
     }
 }

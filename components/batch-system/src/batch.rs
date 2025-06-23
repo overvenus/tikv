@@ -713,7 +713,13 @@ pub fn create_system<N: Fsm, C: Fsm>(
         fsm_sender: sender,
         pool_size: cfg.pool_size,
     };
-    let router = Router::new(control_box, normal_scheduler, control_scheduler, state_cnt);
+    let router = Router::new(
+        cfg,
+        control_box,
+        normal_scheduler,
+        control_scheduler,
+        state_cnt,
+    );
     let system = BatchSystem {
         name_prefix: None,
         router: router.clone(),

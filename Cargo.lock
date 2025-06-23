@@ -633,6 +633,7 @@ dependencies = [
  "file_system",
  "kvproto",
  "lazy_static",
+ "num_cpus",
  "online_config",
  "prometheus",
  "prometheus-static-metric",
