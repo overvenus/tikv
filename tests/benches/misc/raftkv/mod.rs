@@ -53,13 +53,15 @@ impl SyncBenchRouter {
         cmd_resp::bind_term(&mut response, 1);
         match cmd.callback {
             Callback::Read { cb, .. } => {
-                let snapshot = self.db.snapshot();
-                let region = Arc::new(self.region.to_owned());
-                cb(ReadResponse {
-                    response,
-                    snapshot: Some(RegionSnapshot::from_snapshot(Arc::new(snapshot), region)),
-                    txn_extra_op: TxnExtraOp::Noop,
-                })
+                if let Some(cb) = cb {
+                    let snapshot = self.db.snapshot();
+                    let region = Arc::new(self.region.to_owned());
+                    cb(ReadResponse {
+                        response,
+                        snapshot: Some(RegionSnapshot::from_snapshot(Arc::new(snapshot), region)),
+                        txn_extra_op: TxnExtraOp::Noop,
+                    })
+                }
             }
             Callback::Write { cb, .. } => {
                 let mut resp = Response::default();

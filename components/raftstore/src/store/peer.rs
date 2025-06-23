@@ -3370,12 +3370,16 @@ where
                     }
                     _ => {}
                 }
-                cb.invoke_read(self.handle_read(ctx, req, true, read_index));
+                // Skip snapshot if callback is none.
+                let skip_snapshot = cb.is_none_read();
+                cb.invoke_read(self.handle_read(ctx, req, true, read_index, skip_snapshot));
                 continue;
             }
             if req.get_header().get_replica_read() {
+                // Skip snapshot if callback is none.
+                let skip_snapshot = cb.is_none_read();
                 // We should check epoch since the range could be changed.
-                cb.invoke_read(self.handle_read(ctx, req, true, read.read_index));
+                cb.invoke_read(self.handle_read(ctx, req, true, read.read_index, skip_snapshot));
             } else {
                 // The request could be proposed when the peer was leader.
                 // TODO: figure out that it's necessary to notify stale or not.
@@ -3929,7 +3933,15 @@ where
         cb: Callback<EK::Snapshot>,
     ) {
         ctx.raft_metrics.propose.local_read.inc();
-        cb.invoke_read(self.handle_read(ctx, req, false, Some(self.get_store().commit_index())))
+        // Skip snapshot if callback is none.
+        let skip_snapshot = cb.is_none_read();
+        cb.invoke_read(self.handle_read(
+            ctx,
+            req,
+            false,
+            Some(self.get_store().commit_index()),
+            skip_snapshot,
+        ));
     }
 
     pub fn pre_read_index(&self) -> Result<()> {
@@ -4941,6 +4953,7 @@ where
         req: RaftCmdRequest,
         check_epoch: bool,
         read_index: Option<u64>,
+        skip_snapshot: bool,
     ) -> ReadResponse<EK::Snapshot> {
         let region = self.region().clone();
         if check_epoch {
@@ -4988,7 +5001,7 @@ where
         let mut resp = {
             let _timer = ctx.raft_metrics.io_read_peer_snapshot_read.start_timer();
             let reader = ctx;
-            reader.execute(&req, &Arc::new(region), read_index, None)
+            reader.execute(&req, &Arc::new(region), read_index, None, skip_snapshot)
         };
         if let Some(snap) = resp.snapshot.as_mut() {
             snap.txn_ext = Some(self.txn_ext.clone());

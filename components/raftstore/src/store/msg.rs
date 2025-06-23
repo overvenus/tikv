@@ -96,7 +96,7 @@ pub enum Callback<S: Snapshot> {
     None,
     /// Read callback.
     Read {
-        cb: BoxReadCallback<S>,
+        cb: Option<BoxReadCallback<S>>,
 
         tracker: TrackerToken,
     },
@@ -134,7 +134,15 @@ where
 {
     pub fn read(cb: BoxReadCallback<S>) -> Self {
         let tracker = get_tls_tracker_token();
-        Callback::Read { cb, tracker }
+        Callback::Read {
+            cb: Some(cb),
+            tracker,
+        }
+    }
+
+    pub fn none_read() -> Self {
+        let tracker = get_tls_tracker_token();
+        Callback::Read { cb: None, tracker }
     }
 
     pub fn write(cb: BoxWriteCallback) -> Self {
@@ -165,7 +173,9 @@ where
                     snapshot: None,
                     txn_extra_op: TxnExtraOp::Noop,
                 };
-                cb(resp);
+                if let Some(cb) = cb {
+                    cb(resp);
+                }
             }
             Callback::Write { cb, .. } => {
                 let resp = WriteResponse { response: resp };
@@ -197,7 +207,11 @@ where
 
     pub fn invoke_read(self, args: ReadResponse<S>) {
         match self {
-            Callback::Read { cb, .. } => cb(args),
+            Callback::Read { cb, .. } => {
+                if let Some(cb) = cb {
+                    cb(args);
+                }
+            }
             other => panic!("expect Callback::read(..), got {:?}", other),
         }
     }
@@ -210,6 +224,13 @@ where
     pub fn take_committed_cb(&mut self) -> Option<ExtCallback> {
         let Callback::Write { committed_cb, .. } = self else { return None; };
         committed_cb.take()
+    }
+
+    pub fn is_none_read(&self) -> bool {
+        match self {
+            Callback::Read { cb, .. } => cb.is_none(),
+            _ => false,
+        }
     }
 }
 

@@ -111,6 +111,7 @@ pub trait ReadExecutor {
         region: &Arc<metapb::Region>,
         read_index: Option<u64>,
         local_read_ctx: Option<LocalReadContext<'_, Self::Tablet>>,
+        skip_snapshot: bool,
     ) -> ReadResponse<<Self::Tablet as KvEngine>::Snapshot> {
         let requests = msg.get_requests();
         let mut response = ReadResponse {
@@ -134,11 +135,13 @@ pub trait ReadExecutor {
                     }
                 },
                 CmdType::Snap => {
-                    let snapshot = RegionSnapshot::from_snapshot(
-                        self.get_snapshot(&local_read_ctx),
-                        region.clone(),
-                    );
-                    response.snapshot = Some(snapshot);
+                    if !skip_snapshot {
+                        let snapshot = RegionSnapshot::from_snapshot(
+                            self.get_snapshot(&local_read_ctx),
+                            region.clone(),
+                        );
+                        response.snapshot = Some(snapshot);
+                    }
                     Response::default()
                 }
                 CmdType::ReadIndex => {
@@ -988,6 +991,7 @@ where
         read_id: Option<ThreadReadId>,
         snap_updated: &mut bool,
         last_valid_ts: Timespec,
+        skip_snapshot: bool,
     ) -> Option<ReadResponse<E::Snapshot>> {
         let mut local_read_ctx = LocalReadContext::new(&mut self.snap_cache, read_id);
 
@@ -1000,7 +1004,8 @@ where
         }
 
         let region = Arc::clone(&delegate.region);
-        let mut response = delegate.execute(req, &region, None, Some(local_read_ctx));
+        let mut response =
+            delegate.execute(req, &region, None, Some(local_read_ctx), skip_snapshot);
         if let Some(snap) = response.snapshot.as_mut() {
             snap.bucket_meta = delegate.bucket_meta.clone();
         }
@@ -1018,6 +1023,7 @@ where
         delegate: &mut CachedReadDelegate<E>,
         snap_updated: &mut bool,
         last_valid_ts: Timespec,
+        skip_snapshot: bool,
     ) -> std::result::Result<ReadResponse<E::Snapshot>, RaftCmdResponse> {
         let read_ts = decode_u64(&mut req.get_header().get_flag_data()).unwrap();
         delegate.check_stale_read_safe(read_ts)?;
@@ -1029,7 +1035,8 @@ where
 
         let region = Arc::clone(&delegate.region);
         // Getting the snapshot
-        let mut response = delegate.execute(req, &region, None, Some(local_read_ctx));
+        let mut response =
+            delegate.execute(req, &region, None, Some(local_read_ctx), skip_snapshot);
         if let Some(snap) = response.snapshot.as_mut() {
             snap.bucket_meta = delegate.bucket_meta.clone();
         }
@@ -1060,6 +1067,7 @@ where
                             read_id,
                             &mut snap_updated,
                             last_valid_ts,
+                            cb.is_none_read(),
                         ) {
                             read_resp
                         } else {
@@ -1076,6 +1084,7 @@ where
                             &mut delegate,
                             &mut snap_updated,
                             last_valid_ts,
+                            cb.is_none_read(),
                         ) {
                             Ok(read_resp) => read_resp,
                             Err(err_resp) => {
@@ -1106,6 +1115,7 @@ where
                                     None,
                                     &mut snap_updated,
                                     last_valid_ts,
+                                    cb.is_none_read(),
                                 ) {
                                     TLS_LOCAL_READ_METRICS.with(|m| {
                                         m.borrow_mut()

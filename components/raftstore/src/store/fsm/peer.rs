@@ -2586,7 +2586,7 @@ where
             cmd.mut_header().set_read_quorum(true);
             self.propose_raft_command_internal(
                 cmd,
-                Callback::read(Box::new(|_| ())),
+                Callback::none_read(),
                 DiskFullOpt::AllowedOnAlmostFull,
             );
         }
