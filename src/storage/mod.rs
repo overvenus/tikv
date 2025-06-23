@@ -99,6 +99,7 @@ use tikv_util::{
     quota_limiter::QuotaLimiter,
     time::{duration_to_ms, duration_to_sec, Instant, ThreadReadId},
 };
+use tokio::sync::Semaphore;
 use tracker::{
     clear_tls_tracker_token, set_tls_tracker_token, with_tls_tracker, TrackedFuture, TrackerToken,
 };
@@ -213,6 +214,7 @@ pub struct Storage<E: Engine, L: LockManager, F: KvFormat> {
     quota_limiter: Arc<QuotaLimiter>,
     resource_manager: Option<Arc<ResourceGroupManager>>,
 
+    scan_lock_concurrency_semaphore: Arc<Semaphore>,
     _phantom: PhantomData<F>,
 }
 
@@ -237,6 +239,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Clone for Storage<E, L, F> {
             resource_tag_factory: self.resource_tag_factory.clone(),
             quota_limiter: self.quota_limiter.clone(),
             resource_manager: self.resource_manager.clone(),
+            scan_lock_concurrency_semaphore: self.scan_lock_concurrency_semaphore.clone(),
             _phantom: PhantomData,
         }
     }
@@ -295,6 +298,15 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             resource_manager.clone(),
         );
 
+        // TiDB sets scan lock concurrency to the number of alive
+        // TiKV nodes[^1] which means it tends to scan lock 1 region at a time
+        // for each TiKV nodes.
+        //
+        // We harden the limit by setting a concurrency semaphore.
+        //
+        // [^1]: https://github.com/pingcap/tidb/blob/v8.5.0/pkg/store/gcworker/gc_worker.go#L603-L639
+        let scan_lock_concurrency_semaphore = Arc::new(Semaphore::new(1));
+
         info!("Storage started.");
 
         Ok(Storage {
@@ -309,6 +321,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             resource_tag_factory,
             quota_limiter,
             resource_manager,
+            scan_lock_concurrency_semaphore,
             _phantom: PhantomData,
         })
     }
@@ -1373,11 +1386,13 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             )],
         );
         let concurrency_manager = self.concurrency_manager.clone();
+        let scan_lock_concurrency_semaphore = self.scan_lock_concurrency_semaphore.clone();
         // Do not allow replica read for scan_lock.
         ctx.set_replica_read(false);
 
         let res = self.read_pool.spawn_handle(
             async move {
+                let scan_lock_permit = scan_lock_concurrency_semaphore.acquire_owned();
                 if let Some(start_key) = &start_key {
                     let end_key = match &end_key {
                         Some(k) => k.as_encoded().as_slice(),
@@ -1486,6 +1501,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         now.saturating_duration_since(command_duration),
                     ));
 
+                    drop(scan_lock_permit);
                     Ok(locks)
                 })
             }
