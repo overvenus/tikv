@@ -67,7 +67,7 @@ use tracker::GLOBAL_TRACKERS;
 use txn_types::WriteBatchFlags;
 
 use self::memtrace::*;
-use super::life::forward_destroy_to_source_peer;
+use super::{life::forward_destroy_to_source_peer, RaftRouter};
 #[cfg(any(test, feature = "testexport"))]
 use crate::store::PeerInternalStat;
 use crate::{
@@ -145,6 +145,56 @@ pub struct DestroyPeerJob {
     pub peer: metapb::Peer,
 }
 
+struct TickFactory {
+    factory: Option<Box<dyn Fn(PeerTick) -> Box<dyn FnOnce() + Send> + Send>>,
+}
+
+impl TickFactory {
+    fn new() -> TickFactory {
+        TickFactory { factory: None }
+    }
+
+    fn create_tick<EK, ER>(
+        &mut self,
+        tick: PeerTick,
+        peer_id: u64,
+        region_id: u64,
+        router: &RaftRouter<EK, ER>,
+    ) -> Option<Box<dyn FnOnce() + Send>>
+    where
+        EK: KvEngine,
+        ER: RaftEngine,
+    {
+        if self.factory.is_none() {
+            let mb = match router.mailbox(region_id) {
+                Some(mb) => mb,
+                None => {
+                    return None;
+                }
+            };
+            self.factory = Some(Box::new(move |t| {
+                let mb = mb.clone();
+
+                Box::new(move || {
+                    // This can happen only when the peer is about to be destroyed
+                    // or the node is shutting down. So it's OK to not to clean up
+                    // registry.
+                    if let Err(e) = mb.force_send(PeerMsg::Tick(t)) {
+                        debug!(
+                            "failed to schedule peer tick";
+                            "region_id" => region_id,
+                            "peer_id" => peer_id,
+                            "tick" => ?t,
+                            "err" => %e,
+                        );
+                    }
+                })
+            }));
+        }
+        Some((self.factory.as_ref().unwrap())(tick))
+    }
+}
+
 pub struct PeerFsm<EK, ER>
 where
     EK: KvEngine,
@@ -154,6 +204,7 @@ where
     /// A registry for all scheduled ticks. This can avoid scheduling ticks
     /// twice accidentally.
     tick_registry: [bool; PeerTick::VARIANT_COUNT],
+    tick_factory: TickFactory,
     /// Ticks for speed up campaign in chaos state.
     ///
     /// Followers will keep ticking in Idle mode to measure how many ticks have
@@ -298,6 +349,7 @@ where
                     raft_metrics,
                 )?,
                 tick_registry: [false; PeerTick::VARIANT_COUNT],
+                tick_factory: TickFactory::new(),
                 missing_ticks: 0,
                 hibernate_state: HibernateState::ordered(),
                 stopped: false,
@@ -360,6 +412,7 @@ where
                     raft_metrics,
                 )?,
                 tick_registry: [false; PeerTick::VARIANT_COUNT],
+                tick_factory: TickFactory::new(),
                 missing_ticks: 0,
                 hibernate_state: HibernateState::ordered(),
                 stopped: false,
@@ -2234,8 +2287,13 @@ where
         self.fsm.tick_registry[idx] = true;
 
         let region_id = self.region_id();
-        let mb = match self.ctx.router.mailbox(region_id) {
-            Some(mb) => mb,
+        let peer_id = self.fsm.peer.peer_id();
+        let cb = match self
+            .fsm
+            .tick_factory
+            .create_tick(tick, peer_id, region_id, &self.ctx.router)
+        {
+            Some(cb) => cb,
             None => {
                 self.fsm.tick_registry[idx] = false;
                 error!(
@@ -2247,21 +2305,6 @@ where
                 return;
             }
         };
-        let peer_id = self.fsm.peer.peer_id();
-        let cb = Box::new(move || {
-            // This can happen only when the peer is about to be destroyed
-            // or the node is shutting down. So it's OK to not to clean up
-            // registry.
-            if let Err(e) = mb.force_send(PeerMsg::Tick(tick)) {
-                debug!(
-                    "failed to schedule peer tick";
-                    "region_id" => region_id,
-                    "peer_id" => peer_id,
-                    "tick" => ?tick,
-                    "err" => %e,
-                );
-            }
-        });
         self.ctx.tick_batch[idx].ticks.push(cb);
     }
 

@@ -145,3 +145,16 @@ where
         self.mailbox.try_send(msg, &self.scheduler)
     }
 }
+
+impl<Owner, Scheduler> Clone for Mailbox<Owner, Scheduler>
+where
+    Owner: Fsm,
+    Scheduler: FsmScheduler<Fsm = Owner> + Clone,
+{
+    fn clone(&self) -> Self {
+        Mailbox {
+            mailbox: self.mailbox.clone(),
+            scheduler: self.scheduler.clone(),
+        }
+    }
+}
