@@ -69,6 +69,7 @@ impl<Owner: Fsm> BasicMailbox<Owner> {
     }
 
     /// Force sending a message despite the capacity limit on channel.
+    #[track_caller]
     #[inline]
     pub fn force_send<S: FsmScheduler<Fsm = Owner>>(
         &self,
@@ -84,6 +85,7 @@ impl<Owner: Fsm> BasicMailbox<Owner> {
     /// Try to send a message to the mailbox.
     ///
     /// If there are too many pending messages, function may fail.
+    #[track_caller]
     #[inline]
     pub fn try_send<S: FsmScheduler<Fsm = Owner>>(
         &self,
@@ -134,12 +136,14 @@ where
     }
 
     /// Force sending a message despite channel capacity limit.
+    #[track_caller]
     #[inline]
     pub fn force_send(&self, msg: Owner::Message) -> Result<(), SendError<Owner::Message>> {
         self.mailbox.force_send(msg, &self.scheduler)
     }
 
     /// Try to send a message.
+    #[track_caller]
     #[inline]
     pub fn try_send(&self, msg: Owner::Message) -> Result<(), TrySendError<Owner::Message>> {
         self.mailbox.try_send(msg, &self.scheduler)

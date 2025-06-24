@@ -99,6 +99,7 @@ where
     /// Some(None) means there is expected mailbox inside the normal registry
     /// but it returns None after apply the given function. Some(Some) means
     /// the given function returns Some.
+    #[track_caller]
     #[inline]
     fn check_do<F, R>(&self, addr: u64, mut f: F) -> CheckDoResult<R>
     where
@@ -126,6 +127,7 @@ where
     /// Same as send a message and then register the mailbox.
     ///
     /// The mailbox will not be registered if the message can't be sent.
+    #[track_caller]
     pub fn send_and_register(
         &self,
         addr: u64,
@@ -151,6 +153,7 @@ where
     }
 
     /// Get the mailbox of specified address.
+    #[track_caller]
     pub fn mailbox(&self, addr: u64) -> Option<Mailbox<N, Ns>> {
         let res = self.check_do(addr, |mailbox| {
             if mailbox.is_connected() {
@@ -175,6 +178,7 @@ where
     /// If Either::Left is returned, then the message is sent. Otherwise,
     /// it indicates mailbox is not found.
     #[inline]
+    #[track_caller]
     pub fn try_send(
         &self,
         addr: u64,
@@ -205,6 +209,7 @@ where
     }
 
     /// Send the message to specified address.
+    #[track_caller]
     #[inline]
     pub fn send(&self, addr: u64, msg: N::Message) -> Result<(), TrySendError<N::Message>> {
         match self.try_send(addr, msg) {
@@ -215,6 +220,7 @@ where
 
     /// Force sending message to specified address despite the capacity
     /// limit of mailbox.
+    #[track_caller]
     #[inline]
     pub fn force_send(&self, addr: u64, msg: N::Message) -> Result<(), SendError<N::Message>> {
         match self.send(addr, msg) {
@@ -235,6 +241,7 @@ where
     }
 
     /// Sending message to control FSM.
+    #[track_caller]
     #[inline]
     pub fn send_control(&self, msg: C::Message) -> Result<(), TrySendError<C::Message>> {
         match self.control_box.try_send(msg, &self.control_scheduler) {
@@ -250,12 +257,14 @@ where
     }
 
     /// Force sending message to control FSM.
+    #[track_caller]
     #[inline]
     pub fn force_send_control(&self, msg: C::Message) -> Result<(), SendError<C::Message>> {
         self.control_box.force_send(msg, &self.control_scheduler)
     }
 
     /// Try to notify all normal FSMs a message.
+    #[track_caller]
     pub fn broadcast_normal(&self, mut msg_gen: impl FnMut() -> N::Message) {
         let timer = Instant::now_coarse();
         self.normals.iter().for_each(|mailbox| {
