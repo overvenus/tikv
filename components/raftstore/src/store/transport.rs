@@ -127,6 +127,7 @@ where
     EK: KvEngine,
     ER: RaftEngine,
 {
+    #[track_caller]
     #[inline]
     fn send(
         &self,

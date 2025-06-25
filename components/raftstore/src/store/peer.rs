@@ -3465,6 +3465,7 @@ where
         }
     }
 
+    #[track_caller]
     fn send_read_command<T>(
         &self,
         ctx: &mut PollContext<EK, ER, T>,

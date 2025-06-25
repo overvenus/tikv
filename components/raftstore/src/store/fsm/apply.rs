@@ -4907,6 +4907,7 @@ impl<EK> ApplyRouter<EK>
 where
     EK: KvEngine,
 {
+    #[track_caller]
     pub fn schedule_task(&self, region_id: u64, msg: Msg<EK>) {
         let reg = match self.try_send(region_id, Box::new(msg)) {
             Either::Left(Ok(())) => return,

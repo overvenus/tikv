@@ -370,6 +370,7 @@ where
     EK: KvEngine,
     ER: RaftEngine,
 {
+    #[track_caller]
     fn notify(&self, apply_res: Vec<ApplyRes<EK::Snapshot>>) {
         for r in apply_res {
             let region_id = r.region_id;
@@ -397,6 +398,7 @@ where
     EK: KvEngine,
     ER: RaftEngine,
 {
+    #[track_caller]
     pub fn send_raft_message(
         &self,
         msg: RaftMessage,
@@ -451,6 +453,7 @@ where
         }
     }
 
+    #[track_caller]
     #[inline]
     pub fn send_raft_command(
         &self,
