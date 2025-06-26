@@ -2331,15 +2331,18 @@ where
             return;
         }
 
+        let sw = tikv_sync::StopWatch::new("on_raft_base_tick");
         // Update the state whether the peer is pending on applying raft
         // logs if necesssary.
         self.on_check_peer_complete_apply_logs();
+        sw.lap();
 
         // If the peer is busy on apply and missing the last leader committed index,
         // it should propose a read index to check whether its lag is behind the leader.
         // It won't generate flooding fetching messages. This proposal will only be sent
         // out before it gets response and updates the `last_leader_committed_index`.
         self.try_to_fetch_committed_index();
+        sw.lap();
 
         // When having pending snapshot, if election timeout is met, it can't pass
         // the pending conf change check because first index has been updated to
@@ -2506,6 +2509,7 @@ where
 
     fn on_apply_res(&mut self, res: Box<ApplyTaskRes<EK::Snapshot>>) {
         fail_point!("on_apply_res", |_| {});
+        let sw = tikv_sync::StopWatch::new("on_apply_res");
         match *res {
             ApplyTaskRes::Apply(mut res) => {
                 debug!(
@@ -2518,6 +2522,7 @@ where
                     return;
                 }
                 self.on_ready_result(&mut res.exec_res, &res.metrics);
+                sw.lap();
                 if self.fsm.stopped {
                     return;
                 }
@@ -2540,6 +2545,7 @@ where
                     self.register_split_region_check_tick();
                     self.retry_pending_prepare_merge(applied_index);
                 }
+                sw.lap();
             }
             ApplyTaskRes::Destroy {
                 region_id,
@@ -2565,6 +2571,7 @@ where
                         .unwrap();
                     *is_ready = true;
                 }
+                sw.lap();
             }
         }
         if self.fsm.peer.unsafe_recovery_state.is_some() {
@@ -2737,8 +2744,11 @@ where
         if self.fsm.peer.pending_remove || self.fsm.stopped {
             return Ok(());
         }
+        let sw = tikv_sync::StopWatch::new("on_raft_message");
 
         self.handle_reported_disk_usage(&msg);
+
+        sw.lap();
 
         if matches!(self.ctx.self_disk_usage, DiskUsage::AlreadyFull)
             && MessageType::MsgTimeoutNow == msg_type
@@ -2765,6 +2775,7 @@ where
         if !self.validate_raft_msg(&msg) {
             return Ok(());
         }
+        sw.lap();
 
         if msg.get_is_tombstone() {
             // we receive a message tells us to remove ourself.
@@ -2783,6 +2794,7 @@ where
         if self.check_msg(&msg) {
             return Ok(());
         }
+        sw.lap();
 
         // If this peer is restarting, it may lose some logs, so it should update
         // the `last_leader_committed_idx` with the commited index of the first
@@ -2834,6 +2846,7 @@ where
 
         let from_peer_id = msg.get_from_peer().get_id();
         self.fsm.peer.insert_peer_cache(msg.take_from_peer());
+        sw.lap();
 
         let result = if msg_type == MessageType::MsgTransferLeader {
             self.on_transfer_leader_msg(msg.get_message(), peer_disk_usage);
@@ -2874,6 +2887,7 @@ where
         result?;
 
         self.check_uncampaigned_regions();
+        sw.lap();
 
         if self.fsm.peer.any_new_peer_catch_up(from_peer_id) {
             self.fsm.peer.heartbeat_pd(self.ctx);
@@ -5785,6 +5799,7 @@ where
             }
         }
 
+        let sw = tikv_sync::StopWatch::new("propose_raft_command_internal");
         match self.pre_propose_raft_command(&msg) {
             Ok(Some(resp)) => {
                 cb.invoke_with_response(resp);
@@ -5806,6 +5821,7 @@ where
             }
             _ => (),
         }
+        sw.lap();
 
         if let Err(e) = self.check_merge_proposal(&mut msg) {
             warn!(
@@ -5843,10 +5859,12 @@ where
                 "admin_cmd_type" => ?admin_cmd_type,
             );
         }
+        sw.lap();
 
         if self.fsm.peer.should_wake_up {
             self.reset_raft_tick(GroupState::Ordered);
         }
+        sw.lap();
 
         self.register_pd_heartbeat_tick();
 
@@ -5908,6 +5926,7 @@ where
             // when the role becomes follower.
             return;
         }
+        let sw = tikv_sync::StopWatch::new("on_raft_gc_log_tick");
         if !self.fsm.peer.get_store().is_entry_cache_empty() || !self.ctx.cfg.hibernate_regions {
             self.register_raft_gc_log_tick();
         }
@@ -5974,13 +5993,14 @@ where
             );
             REGION_MAX_LOG_LAG.observe((last_idx - replicated_idx) as f64);
         }
-
+        sw.lap();
         // leader may call `get_term()` on the latest replicated index, so compact
         // entries before `alive_cache_idx` instead of `alive_cache_idx + 1`.
         self.fsm
             .peer
             .mut_store()
             .compact_entry_cache(std::cmp::min(alive_cache_idx, applied_idx + 1));
+        sw.lap();
         if needs_evict_entry_cache(self.ctx.cfg.evict_cache_on_memory_ratio) {
             self.fsm.peer.mut_store().evict_entry_cache(true);
             if !self.fsm.peer.get_store().is_entry_cache_empty() {
@@ -6166,6 +6186,7 @@ where
         if !self.fsm.peer.is_leader() {
             return;
         }
+        let sw = tikv_sync::StopWatch::new("on_split_region_check_tick");
 
         // When restart, the may_skip_split_check will be false. The split check will
         // first check the region size, and then check whether the region should split.
@@ -6185,7 +6206,7 @@ where
 
         fail_point!("on_split_region_check_tick", |_| {});
         self.register_split_region_check_tick();
-
+        sw.lap();
         // To avoid frequent scan, we only add new scan tasks if all previous tasks
         // have finished.
         // TODO: check whether a gc progress has been started.

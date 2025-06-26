@@ -242,6 +242,7 @@ impl<EK: KvEngine, ER: RaftEngine> SignificantRouter<EK> for ServerRaftStoreRout
 }
 
 impl<EK: KvEngine, ER: RaftEngine> RaftStoreRouter<EK> for ServerRaftStoreRouter<EK, ER> {
+    #[track_caller]
     fn send_raft_msg(&self, msg: RaftMessage) -> RaftStoreResult<()> {
         RaftStoreRouter::send_raft_msg(&self.router, msg)
     }

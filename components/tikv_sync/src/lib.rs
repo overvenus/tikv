@@ -82,3 +82,51 @@ impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
         &mut *self.guard
     }
 }
+
+pub struct StopWatch {
+    caller: &'static str,
+    location: &'static Location<'static>,
+    timer: std::cell::Cell<std::time::Instant>,
+}
+
+impl StopWatch {
+    #[track_caller]
+    pub fn new(caller: &'static str) -> Self {
+        StopWatch {
+            location: Location::caller(),
+            timer: std::cell::Cell::new(std::time::Instant::now()),
+            caller,
+        }
+    }
+
+    #[track_caller]
+    pub fn lap(&self) {
+        let now = std::time::Instant::now();
+        let elapsed = now.saturating_duration_since(self.timer.get());
+        if elapsed.as_millis() > 2 {
+            let location = Location::caller();
+            slog_global::warn!(
+                "dbg stopwatch lap hold too long";
+                "elapsed" => ?elapsed,
+                "location" => %location,
+                "caller" => %self.caller,
+            );
+        }
+        self.timer.set(now);
+    }
+}
+
+impl Drop for StopWatch {
+    #[inline]
+    fn drop(&mut self) {
+        let elapsed = self.timer.get().saturating_elapsed();
+        if elapsed.as_millis() > 2 {
+            slog_global::warn!(
+                "dbg span took too long";
+                "elapsed" => ?elapsed,
+                "location" => %self.location,
+                "caller" => %self.caller,
+            );
+        }
+    }
+}

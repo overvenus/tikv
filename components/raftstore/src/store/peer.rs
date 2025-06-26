@@ -3718,6 +3718,7 @@ where
 
         ctx.raft_metrics.propose.all.inc();
 
+        let sw = tikv_sync::StopWatch::new("propose");
         let req_admin_cmd_type = if !req.has_admin_request() {
             None
         } else {
@@ -3747,6 +3748,8 @@ where
             Err(e) => Err(e),
         };
         fail_point!("after_propose");
+
+        sw.lap();
 
         match res {
             Err(e) => {
@@ -4025,6 +4028,7 @@ where
         mut err_resp: RaftCmdResponse,
         cb: Callback<EK::Snapshot>,
     ) -> bool {
+        let sw = tikv_sync::StopWatch::new("read_index");
         if let Err(e) = self.pre_read_index() {
             debug!(
                 "prevents unsafe read index";
@@ -4534,6 +4538,7 @@ where
             ));
         }
 
+        let sw = tikv_sync::StopWatch::new("propose_normal");
         // TODO: validate request for unexpected changes.
         let ctx = match self.pre_propose(poll_ctx, &mut req) {
             Ok(ctx) => ctx,
@@ -4552,6 +4557,7 @@ where
                 return Err(e);
             }
         };
+        sw.lap();
 
         let data = req.write_to_bytes()?;
         poll_ctx
@@ -4836,6 +4842,7 @@ where
         ctx: &mut PollContext<EK, ER, T>,
         mut req: RaftCmdRequest,
     ) -> Result<Either<u64, u64>> {
+        let sw = tikv_sync::StopWatch::new("propose_conf_change");
         if self.pending_merge_state.is_some() {
             return Err(Error::ProposalInMergingMode(self.region_id));
         }
@@ -4956,6 +4963,7 @@ where
         read_index: Option<u64>,
         skip_snapshot: bool,
     ) -> ReadResponse<EK::Snapshot> {
+        let sw = tikv_sync::StopWatch::new("handle_read");
         let region = self.region().clone();
         if check_epoch {
             if let Err(e) = check_req_region_epoch(&req, &region, true) {
@@ -5196,6 +5204,7 @@ where
         ctx: &mut PollContext<EK, ER, T>,
         disk_full_opt: DiskFullOpt,
     ) -> Result<()> {
+        let sw = tikv_sync::StopWatch::new("check_normal_proposal_with_disk_full_opt");
         let leader_allowed = match ctx.self_disk_usage {
             DiskUsage::Normal => true,
             DiskUsage::AlmostFull => !matches!(disk_full_opt, DiskFullOpt::NotAllowedOnFull),
