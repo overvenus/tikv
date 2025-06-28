@@ -2354,10 +2354,13 @@ where
             self.register_raft_base_tick();
             return;
         }
+        sw.lap();
 
         self.fsm.peer.retry_pending_reads(&self.ctx.cfg);
+        sw.lap();
 
         self.check_force_leader();
+        sw.lap();
 
         let mut res = None;
         if self.ctx.cfg.hibernate_regions {
@@ -2402,12 +2405,14 @@ where
                 self.fsm.missing_ticks = 0;
             }
         }
+        sw.lap();
 
         // Tick the raft peer and update some states which can be changed in `tick`.
         if self.fsm.peer.raft_group.tick() {
             self.fsm.has_ready = true;
         }
         self.fsm.peer.post_raft_group_tick();
+        sw.lap();
 
         self.fsm.peer.mut_store().flush_entry_cache_metrics();
 
@@ -2422,6 +2427,7 @@ where
             self.register_pd_heartbeat_tick();
             return;
         }
+        sw.lap();
 
         debug!("stop ticking"; "res" => ?res,
             "region_id" => self.region_id(),
@@ -2542,7 +2548,9 @@ where
                 // get fair schedule.
                 if self.fsm.peer.is_leader() {
                     self.register_pd_heartbeat_tick();
+                    sw.lap();
                     self.register_split_region_check_tick();
+                    sw.lap();
                     self.retry_pending_prepare_merge(applied_index);
                 }
                 sw.lap();
@@ -2864,6 +2872,7 @@ where
             }
             self.fsm.peer.step(self.ctx, msg.take_message())
         };
+        sw.lap();
 
         stepped.set(result.is_ok());
 
@@ -3151,14 +3160,20 @@ where
             "region_id"=> self.fsm.region_id(),
             "peer_id" => self.fsm.peer_id(),
         );
+        let sw = tikv_sync::StopWatch::new("reset_raft_tick");
         self.fsm.reset_hibernate_state(state);
+        sw.lap();
         self.fsm.missing_ticks = 0;
         self.fsm.peer.should_wake_up = false;
         self.register_raft_base_tick();
+        sw.lap();
         if self.fsm.peer.is_leader() {
             self.register_check_leader_lease_tick();
+            sw.lap();
             self.register_report_region_buckets_tick();
+            sw.lap();
             self.register_check_long_uncommitted_tick();
+            sw.lap();
         }
     }
 

@@ -106,7 +106,7 @@ impl StopWatch {
         if elapsed.as_millis() > 2 {
             let location = Location::caller();
             slog_global::warn!(
-                "dbg stopwatch lap hold too long";
+                "dbg stopwatch lap too long";
                 "elapsed" => ?elapsed,
                 "location" => %location,
                 "caller" => %self.caller,
@@ -122,7 +122,7 @@ impl Drop for StopWatch {
         let elapsed = self.timer.get().saturating_elapsed();
         if elapsed.as_millis() > 2 {
             slog_global::warn!(
-                "dbg span took too long";
+                "dbg stopwatch lap (drop) too long";
                 "elapsed" => ?elapsed,
                 "location" => %self.location,
                 "caller" => %self.caller,

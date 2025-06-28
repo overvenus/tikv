@@ -1853,6 +1853,7 @@ where
         ctx: &mut PollContext<EK, ER, T>,
         mut m: eraftpb::Message,
     ) -> Result<()> {
+        let sw = tikv_sync::StopWatch::new("Peer::step");
         fail_point!(
             "step_message_3_1",
             self.peer.get_store_id() == 3 && self.region_id == 1,
@@ -1871,6 +1872,7 @@ where
             fail_point!("on_step_read_index_msg");
             ctx.coprocessor_host
                 .on_step_read_index(&mut m, self.get_role());
+            sw.lap();
             // Must use the commit index of `PeerStorage` instead of the commit index
             // in raft-rs which may be greater than the former one.
             // For more details, see the annotations above `on_leader_commit_idx_changed`.
@@ -1892,9 +1894,11 @@ where
                     resp.set_entries(m.take_entries());
 
                     self.raft_group.raft.msgs.push(resp);
+                    sw.lap();
                     return Ok(());
                 }
                 self.should_wake_up = state == LeaseState::Expired;
+                sw.lap();
             }
         } else if util::is_vote_msg(&m) {
             // Only by passing an election timeout can peers handle request vote safely.
@@ -1914,8 +1918,11 @@ where
         let from_id = m.get_from();
         let has_snap_task = self.get_store().has_gen_snap_task();
         let pre_commit_index = self.raft_group.raft.raft_log.committed;
+        sw.lap();
         self.raft_group.step(m)?;
+        sw.lap();
         self.report_commit_log_duration(pre_commit_index, &ctx.raft_metrics);
+        sw.lap();
 
         let mut for_balance = false;
         if !has_snap_task && self.get_store().has_gen_snap_task() {
@@ -3546,6 +3553,7 @@ where
         apply_metrics: &ApplyMetrics,
     ) -> bool {
         let mut has_ready = false;
+        let sw = tikv_sync::StopWatch::new("post_apply");
 
         if self.is_handling_snapshot() {
             panic!("{} should not applying snapshot.", self.tag);
@@ -3553,6 +3561,7 @@ where
 
         let applied_index = apply_state.get_applied_index();
         self.raft_group.advance_apply_to(applied_index);
+        sw.lap();
 
         self.cmd_epoch_checker.advance_apply(
             applied_index,
@@ -3561,8 +3570,10 @@ where
         );
 
         if !self.is_leader() {
+            sw.lap();
             self.mut_store()
                 .compact_entry_cache(apply_state.applied_index + 1);
+            sw.lap();
         }
 
         let progress_to_be_updated = self.mut_store().applied_term() != applied_term;
@@ -3579,16 +3590,21 @@ where
             has_ready = true;
         }
         if !self.is_leader() {
-            self.post_pending_read_index_on_replica(ctx)
+            sw.lap();
+            self.post_pending_read_index_on_replica(ctx);
+            sw.lap();
         } else if self.ready_to_handle_read() {
+            sw.lap();
             while let Some(mut read) = self.pending_reads.pop_front() {
                 self.response_read(&mut read, ctx, false);
             }
+            sw.lap();
         }
         self.pending_reads.gc();
 
         self.read_progress
             .update_applied(applied_index, &ctx.coprocessor_host);
+        sw.lap();
 
         // Only leaders need to update applied_term.
         if progress_to_be_updated && self.is_leader() {
@@ -4494,6 +4510,7 @@ where
         poll_ctx: &mut PollContext<EK, ER, T>,
         mut req: RaftCmdRequest,
     ) -> Result<Either<u64, u64>> {
+        let sw = tikv_sync::StopWatch::new("propose_normal");
         // Should not propose normal in force leader state.
         // In `pre_propose_raft_command`, it rejects all the requests expect conf-change
         // if in force leader state.
@@ -4538,7 +4555,6 @@ where
             ));
         }
 
-        let sw = tikv_sync::StopWatch::new("propose_normal");
         // TODO: validate request for unexpected changes.
         let ctx = match self.pre_propose(poll_ctx, &mut req) {
             Ok(ctx) => ctx,
@@ -4557,9 +4573,9 @@ where
                 return Err(e);
             }
         };
-        sw.lap();
 
         let data = req.write_to_bytes()?;
+        sw.lap();
         poll_ctx
             .raft_metrics
             .propose_log_size
@@ -4580,7 +4596,9 @@ where
 
         fail_point!("raft_propose", |_| Ok(Either::Right(0)));
         let propose_index = self.next_proposal_index();
+        sw.lap();
         self.raft_group.propose(ctx.to_vec(), data)?;
+        sw.lap();
         if self.next_proposal_index() == propose_index {
             // The message is dropped silently, this usually due to leader absence
             // or transferring leader. Both cases can be considered as NotLeader error.
@@ -4852,11 +4870,13 @@ where
                 "region_id" => self.region_id,
                 "peer_id" => self.peer.get_id(),
             );
+            sw.lap();
             return Err(box_err!(
                 "{} there is a pending conf change, try later",
                 self.tag
             ));
         }
+        sw.lap();
         // Actually, according to the implementation of conf change in raft-rs, this
         // check must be passed if the previous check that `pending_conf_index`
         // should be less than or equal to `self.get_store().applied_index()` is
@@ -4882,6 +4902,7 @@ where
                 err
             ));
         }
+        sw.lap();
 
         if let Some(index) = self
             .cmd_epoch_checker

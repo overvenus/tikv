@@ -234,6 +234,7 @@ impl EntryCache {
         }
 
         let mut mem_size_change = 0;
+        let sw = tikv_sync::StopWatch::new("compact_to");
 
         // Clean cached entries which have been already sent to apply threads. For
         // example, if entries [1, 10), [10, 20), [20, 30) are sent to apply threads and
@@ -255,10 +256,12 @@ impl EntryCache {
         }
         let new_trace_cap = self.trace.capacity();
         mem_size_change += Self::trace_vec_mem_size_change(new_trace_cap, old_trace_cap);
+        sw.lap();
 
         let cache_first_idx = self.first_index().unwrap_or(u64::MAX);
         if cache_first_idx >= idx {
             self.flush_mem_size_change(mem_size_change);
+            sw.lap();
             assert!(mem_size_change <= 0);
             return -mem_size_change as u64;
         }
@@ -270,6 +273,7 @@ impl EntryCache {
         for e in self.cache.drain(..compact_to) {
             mem_size_change -= (bytes_capacity(&e.data) + bytes_capacity(&e.context)) as i64
         }
+        sw.lap();
 
         mem_size_change += self.shrink_if_necessary();
         self.flush_mem_size_change(mem_size_change);
