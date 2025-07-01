@@ -2241,6 +2241,7 @@ where
     fn on_role_changed<T>(&mut self, ctx: &mut PollContext<EK, ER, T>, ready: &Ready) {
         // Update leader lease when the Raft state changes.
         if let Some(ss) = ready.ss() {
+            let sw = tikv_sync::StopWatch::ready("on_role_changed");
             match ss.raft_state {
                 StateRole::Leader => {
                     // The local read can only be performed after a new leader has applied
@@ -2253,6 +2254,7 @@ where
                     // it has no impact on the correctness.
                     let progress_term = ReadProgress::term(self.term());
                     self.maybe_renew_leader_lease(monotonic_raw_now(), ctx, Some(progress_term));
+                    sw.lap();
                     debug!(
                         "becomes leader with lease";
                         "region_id" => self.region_id,
@@ -2274,9 +2276,11 @@ where
                     // A more recent read may happen on the old leader. So max ts should
                     // be updated after a peer becomes leader.
                     self.require_updating_max_ts(&ctx.pd_scheduler);
+                    sw.lap();
                     // Init the in-memory pessimistic lock table when the peer becomes leader.
                     self.activate_in_memory_pessimistic_locks();
                     // Exit entry cache warmup state when the peer becomes leader.
+                    sw.lap();
                     self.mut_store().clear_entry_cache_warmup_state();
 
                     if !ctx.store_disk_usages.is_empty() {
@@ -2306,8 +2310,10 @@ where
                 }
                 StateRole::Follower => {
                     self.leader_lease.expire();
+                    sw.lap();
                     self.mut_store().cancel_generating_snap(None);
                     self.clear_disk_full_peers(ctx);
+                    sw.lap();
                     self.clear_in_memory_pessimistic_locks();
                     if self.peer.is_witness && self.delay_clean_data {
                         let _ = self.get_store().clear_data();
@@ -2318,7 +2324,9 @@ where
                 }
                 _ => {}
             }
+            sw.lap();
             self.on_leader_changed(ss.leader_id, self.term());
+            sw.lap();
             ctx.coprocessor_host.on_role_change(
                 self.region(),
                 RoleChange {
@@ -2330,6 +2338,7 @@ where
                     peer_id: self.peer.get_id(),
                 },
             );
+            sw.lap();
             self.cmd_epoch_checker.maybe_update_term(self.term());
         } else if let Some(hs) = ready.hs() {
             if hs.get_term() != self.get_store().hard_state().get_term() {
@@ -2533,6 +2542,7 @@ where
             }
         }
 
+        let sw = tikv_sync::StopWatch::ready("check_snap_status");
         match self.mut_store().check_applying_snap() {
             CheckApplyingSnapStatus::Applying => {
                 // If this peer is applying snapshot, we should not get a new ready.
@@ -2551,6 +2561,7 @@ where
                     "region_id" => self.region_id,
                     "peer_id" => self.peer.get_id(),
                 );
+                sw.lap();
                 return false;
             }
             CheckApplyingSnapStatus::Success => {
@@ -2568,11 +2579,13 @@ where
                     fail_point!("raft_before_follower_send");
                     let msgs = self.build_raft_messages(ctx, snap_ctx.msgs);
                     self.send_raft_messages(ctx, msgs);
+                    sw.lap();
 
                     // Snapshot has been applied.
                     self.last_applying_idx = self.get_store().truncated_index();
                     self.last_compacted_idx = self.last_applying_idx + 1;
                     self.raft_group.advance_apply_to(self.last_applying_idx);
+                    sw.lap();
                     self.cmd_epoch_checker.advance_apply(
                         self.last_applying_idx,
                         self.term(),
@@ -2594,11 +2607,14 @@ where
 
                 // Note that this function must be called after applied index is updated,
                 // i.e. call `RawNode::advance_apply_to`.
+                sw.lap();
                 self.post_pending_read_index_on_replica(ctx);
                 // Resume `read_progress`
+                sw.lap();
                 self.update_read_progress(ctx, ReadProgress::WaitData(false));
                 self.read_progress.resume();
                 // Update apply index to `last_applying_idx`
+                sw.lap();
                 self.read_progress
                     .update_applied(self.last_applying_idx, &ctx.coprocessor_host);
                 if self.wait_data {
@@ -2649,11 +2665,13 @@ where
         &mut self,
         ctx: &mut PollContext<EK, ER, T>,
     ) -> Option<ReadyResult> {
+        let sw = tikv_sync::StopWatch::ready("handle_raft_ready_append");
         if self.pending_remove {
             return None;
         }
 
         if !self.check_snap_status(ctx) {
+            sw.lap();
             return None;
         }
 
@@ -2683,6 +2701,7 @@ where
             }
 
             let meta = ctx.store_meta.lock().unwrap();
+            sw.lap();
             // For merge process, the stale source peer is destroyed asynchronously when
             // applying snapshot or creating new peer. So here checks whether there is any
             // overlap, if so, wait and do not handle raft ready.
@@ -2710,8 +2729,10 @@ where
             if let Some(gen_task) = self.mut_store().take_gen_snap_task() {
                 self.pending_request_snapshot_count
                     .fetch_add(1, Ordering::SeqCst);
+                sw.lap();
                 ctx.apply_router
                     .schedule_task(self.region_id, ApplyTask::Snapshot(gen_task));
+                sw.lap();
             }
             return None;
         }
@@ -2738,7 +2759,9 @@ where
             "peer_id" => self.peer.get_id(),
         );
 
+        sw.lap();
         let mut ready = self.raft_group.ready();
+        sw.lap();
 
         self.add_ready_metric(&ready, &mut ctx.raft_metrics);
 
@@ -2763,7 +2786,9 @@ where
             assert!(ready.snapshot().is_empty());
         }
 
+        sw.lap();
         self.on_role_changed(ctx, &ready);
+        sw.lap();
 
         if let Some(hs) = ready.hs() {
             let pre_commit_index = self.get_store().commit_index();
@@ -2776,14 +2801,19 @@ where
 
         if !ready.messages().is_empty() {
             assert!(self.is_leader());
+            sw.lap();
             let raft_msgs = self.build_raft_messages(ctx, ready.take_messages());
+            sw.lap();
             self.send_raft_messages(ctx, raft_msgs);
+            sw.lap();
         }
 
         self.apply_reads(ctx, &ready);
+        sw.lap();
 
         if !ready.committed_entries().is_empty() {
             self.handle_raft_committed_entries(ctx, ready.take_committed_entries());
+            sw.lap();
         }
         // Check whether there is a pending generate snapshot task, the task
         // needs to be sent to the apply system.
@@ -2792,8 +2822,10 @@ where
         if let Some(gen_task) = self.mut_store().take_gen_snap_task() {
             self.pending_request_snapshot_count
                 .fetch_add(1, Ordering::SeqCst);
+            sw.lap();
             ctx.apply_router
                 .schedule_task(self.region_id, ApplyTask::Snapshot(gen_task));
+            sw.lap();
         }
 
         let state_role = ready.ss().map(|ss| ss.raft_state);
@@ -2814,6 +2846,7 @@ where
                 }
             }
         }
+        sw.lap();
         let (res, mut task) = match self
             .mut_store()
             .handle_raft_ready(&mut ready, destroy_regions)
@@ -2825,6 +2858,7 @@ where
                 panic!("{} failed to handle raft ready: {:?}", self.tag, e)
             }
         };
+        sw.lap();
 
         let ready_number = ready.number();
         let persisted_msgs = ready.take_persisted_messages();
@@ -2833,6 +2867,7 @@ where
             HandleReadyResult::SendIoTask | HandleReadyResult::Snapshot { .. } => {
                 if !persisted_msgs.is_empty() {
                     task.messages = self.build_raft_messages(ctx, persisted_msgs);
+                    sw.lap();
                 }
 
                 if !trackers.is_empty() {
@@ -2840,17 +2875,21 @@ where
                 }
 
                 if let Some(write_worker) = &mut ctx.sync_write_worker {
+                    sw.lap();
                     write_worker.handle_write_task(task);
+                    sw.lap();
 
                     assert_eq!(self.unpersisted_ready, None);
                     self.unpersisted_ready = Some(ready);
                     has_write_ready = true;
                 } else {
+                    sw.lap();
                     self.write_router.send_write_msg(
                         ctx,
                         self.unpersisted_readies.back().map(|r| r.number),
                         WriteMsg::WriteTask(task),
                     );
+                    sw.lap();
 
                     self.unpersisted_readies.push_back(UnpersistedReady {
                         number: ready_number,
@@ -2859,9 +2898,11 @@ where
                     });
 
                     self.raft_group.advance_append_async(ready);
+                    sw.lap();
                 }
             }
             HandleReadyResult::NoIoTask => {
+                sw.lap();
                 if let Some(last) = self.unpersisted_readies.back_mut() {
                     // Attach to the last unpersisted ready so that it can be considered to be
                     // persisted with the last ready at the same time.
@@ -2876,6 +2917,7 @@ where
                     if !persisted_msgs.is_empty() {
                         self.unpersisted_message_count += persisted_msgs.capacity();
                         last.raft_msgs.push(persisted_msgs);
+                        sw.lap();
                     }
                 } else {
                     // If this ready don't need to be persisted and there is no previous unpersisted
@@ -2885,15 +2927,19 @@ where
 
                     if !persisted_msgs.is_empty() {
                         fail_point!("raft_before_follower_send");
+                        sw.lap();
                         let msgs = self.build_raft_messages(ctx, persisted_msgs);
                         self.send_raft_messages(ctx, msgs);
+                        sw.lap();
                     }
 
                     // The commit index and messages of light ready should be empty because no data
                     // needs to be persisted.
                     let mut light_rd = self.raft_group.advance_append(ready);
+                    sw.lap();
 
                     self.add_light_ready_metric(&light_rd, &mut ctx.raft_metrics);
+                    sw.lap();
 
                     if let Some(idx) = light_rd.commit_index() {
                         panic!(
@@ -2911,7 +2957,9 @@ where
                     // The committed entries may not be empty when the size is too large to
                     // be fetched in the previous ready.
                     if !light_rd.committed_entries().is_empty() {
+                        sw.lap();
                         self.handle_raft_committed_entries(ctx, light_rd.take_committed_entries());
+                        sw.lap();
                     }
                 }
             }
@@ -2957,11 +3005,15 @@ where
                 // up. This is a best effort, if TiKV is shutdown before the task is
                 // handled, there can still be stale logs not being deleted until next
                 // log gc command is executed. This will delete range [0, last_first_index).
+                sw.lap();
                 self.schedule_raftlog_gc(ctx, last_first_index);
                 self.last_compacted_idx = last_first_index;
+                sw.lap();
             }
+            sw.lap();
             // Pause `read_progress` to prevent serving stale read while applying snapshot
             self.read_progress.pause();
+            sw.lap();
         }
 
         Some(ReadyResult {

@@ -2190,17 +2190,26 @@ where
 
     fn on_role_changed(&mut self, role: Option<StateRole>) {
         // Update leader lease when the Raft state changes.
+        let sw = tikv_sync::StopWatch::ready("on_role_changed");
         if let Some(r) = role {
             if StateRole::Leader == r {
                 self.fsm.missing_ticks = 0;
                 self.register_split_region_check_tick();
+                sw.lap();
                 self.fsm.peer.heartbeat_pd(self.ctx);
+                sw.lap();
                 self.register_pd_heartbeat_tick();
+                sw.lap();
                 self.register_raft_gc_log_tick();
+                sw.lap();
                 self.register_check_leader_lease_tick();
+                sw.lap();
                 self.register_report_region_buckets_tick();
+                sw.lap();
                 self.register_check_peers_availability_tick();
+                sw.lap();
                 self.register_check_long_uncommitted_tick();
+                sw.lap();
             }
 
             if self.fsm.peer.is_in_force_leader() && r != StateRole::Leader {
@@ -2270,11 +2279,14 @@ where
 
     #[inline]
     fn schedule_tick(&mut self, tick: PeerTick) {
+        let sw = tikv_sync::StopWatch::new("on_raft_base_tick");
         let idx = tick as usize;
         if self.fsm.tick_registry[idx] {
+            sw.lap();
             return;
         }
         if is_zero_duration(&self.ctx.tick_batch[idx].wait_duration) {
+            sw.lap();
             return;
         }
         trace!(
@@ -2302,10 +2314,13 @@ where
                     "peer_id" => self.fsm.peer_id(),
                     "tick" => ?tick,
                 );
+                sw.lap();
                 return;
             }
         };
+        sw.lap();
         self.ctx.tick_batch[idx].ticks.push(cb);
+        sw.lap();
     }
 
     fn register_raft_base_tick(&mut self) {
@@ -2434,12 +2449,15 @@ where
             "peer_id" => self.fsm.peer_id(),
             "election_elapsed" => self.fsm.peer.raft_group.raft.election_elapsed);
         self.fsm.reset_hibernate_state(GroupState::Idle);
+        sw.lap();
         // Followers will stop ticking at L789. Keep ticking for followers
         // to allow it to campaign quickly when abnormal situation is detected.
         if !self.fsm.peer.is_leader() {
             self.register_raft_base_tick();
+            sw.lap();
         } else {
             self.register_pd_heartbeat_tick();
+            sw.lap();
         }
     }
 

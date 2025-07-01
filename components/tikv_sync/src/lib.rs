@@ -87,6 +87,7 @@ pub struct StopWatch {
     caller: &'static str,
     location: &'static Location<'static>,
     timer: std::cell::Cell<std::time::Instant>,
+    tag: &'static str,
 }
 
 impl StopWatch {
@@ -96,6 +97,16 @@ impl StopWatch {
             location: Location::caller(),
             timer: std::cell::Cell::new(std::time::Instant::now()),
             caller,
+            tag: "msg",
+        }
+    }
+
+    pub fn ready(caller: &'static str) -> Self {
+        StopWatch {
+            location: Location::caller(),
+            timer: std::cell::Cell::new(std::time::Instant::now()),
+            caller,
+            tag: "ready",
         }
     }
 
@@ -110,6 +121,7 @@ impl StopWatch {
                 "elapsed" => ?elapsed,
                 "location" => %location,
                 "caller" => %self.caller,
+                "tag" => %self.tag,
             );
         }
         self.timer.set(now);
@@ -126,6 +138,7 @@ impl Drop for StopWatch {
                 "elapsed" => ?elapsed,
                 "location" => %self.location,
                 "caller" => %self.caller,
+                "tag" => %self.tag,
             );
         }
     }

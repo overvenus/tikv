@@ -933,6 +933,7 @@ where
         ready: &mut Ready,
         destroy_regions: Vec<metapb::Region>,
     ) -> Result<(HandleReadyResult, WriteTask<EK, ER>)> {
+        let sw = tikv_sync::StopWatch::ready("handle_raft_ready");
         let region_id = self.get_region_id();
         let prev_raft_state = self.raft_state().clone();
 
@@ -943,8 +944,10 @@ where
         } else {
             fail_point!("raft_before_apply_snap");
             let last_first_index = self.first_index().unwrap();
+            sw.lap();
             let (snap_region, for_witness) =
                 self.apply_snapshot(ready.snapshot(), &mut write_task, &destroy_regions)?;
+            sw.lap();
 
             let res = HandleReadyResult::Snapshot(Box::new(HandleSnapshotResult {
                 msgs: ready.take_persisted_messages(),
@@ -958,7 +961,9 @@ where
         };
 
         if !ready.entries().is_empty() {
+            sw.lap();
             self.append(ready.take_entries(), &mut write_task);
+            sw.lap();
         }
 
         // Last index is 0 means the peer is created from raft message
@@ -979,11 +984,13 @@ where
             // but not write raft_local_state to raft db in time.
             // We write raft state to kv db, with last index set to snap index,
             // in case of recv raft log after snapshot.
+            sw.lap();
             self.save_snapshot_raft_state_to(
                 ready.snapshot().get_metadata().get_index(),
                 write_task.extra_write.v1_mut().unwrap(),
             )?;
             self.save_apply_state_to(write_task.extra_write.v1_mut().unwrap())?;
+            sw.lap();
         }
 
         if !write_task.has_data() {
