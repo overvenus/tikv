@@ -110,6 +110,15 @@ impl StopWatch {
         }
     }
 
+    pub fn end(caller: &'static str) -> Self {
+        StopWatch {
+            location: Location::caller(),
+            timer: std::cell::Cell::new(std::time::Instant::now()),
+            caller,
+            tag: "end",
+        }
+    }
+
     #[track_caller]
     pub fn lap(&self) {
         let now = std::time::Instant::now();

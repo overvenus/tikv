@@ -1127,27 +1127,36 @@ impl<EK: KvEngine, ER: RaftEngine, T: Transport> PollHandler<PeerFsm<EK, ER>, St
     }
 
     fn light_end(&mut self, peers: &mut [Option<impl DerefMut<Target = PeerFsm<EK, ER>>>]) {
+        let sw = tikv_sync::StopWatch::end("light_end");
         for peer in peers.iter_mut().flatten() {
             peer.update_memory_trace(&mut self.trace_event);
         }
-
+        sw.lap();
         if let Some(write_worker) = &mut self.poll_ctx.sync_write_worker {
             if self.poll_ctx.trans.need_flush() && !write_worker.is_empty() {
+                sw.lap();
                 self.poll_ctx.trans.flush();
+                sw.lap();
             }
 
+            sw.lap();
             self.flush_events();
+            sw.lap();
         } else {
             let now = TiInstant::now();
 
             if self.poll_ctx.trans.need_flush() {
+                sw.lap();
                 self.poll_ctx.trans.flush();
+                sw.lap();
             }
 
             if now.saturating_duration_since(self.last_flush_time) >= Duration::from_millis(1) {
                 self.last_flush_time = now;
                 self.need_flush_events = false;
+                sw.lap();
                 self.flush_events();
+                sw.lap();
             } else {
                 self.need_flush_events = true;
             }
@@ -1160,29 +1169,37 @@ impl<EK: KvEngine, ER: RaftEngine, T: Transport> PollHandler<PeerFsm<EK, ER>, St
             // the id of slow store in tests.
             fail_point!("on_raft_ready", self.poll_ctx.store_id() == 3, |_| {});
         }
+        let sw = tikv_sync::StopWatch::end("end");
         let mut latency_inspect = std::mem::take(&mut self.poll_ctx.pending_latency_inspect);
         let mut dur = self.timer.saturating_elapsed();
 
+        sw.lap();
         for inspector in &mut latency_inspect {
             inspector.record_store_process(dur);
         }
+        sw.lap();
         let write_begin = TiInstant::now();
         if let Some(write_worker) = &mut self.poll_ctx.sync_write_worker {
             if self.poll_ctx.has_ready {
+                sw.lap();
                 write_worker.write_to_db(false);
+                sw.lap();
 
                 for mut inspector in latency_inspect {
                     inspector.record_store_write(write_begin.saturating_elapsed());
                     inspector.finish();
                 }
+                sw.lap();
 
                 for peer in peers.iter_mut().flatten() {
                     PeerFsmDelegate::new(peer, &mut self.poll_ctx).post_raft_ready_append();
                 }
+                sw.lap();
             } else {
                 for inspector in latency_inspect {
                     inspector.finish();
                 }
+                sw.lap();
             }
         } else {
             // Use the valid size of async-ios for generating `writer_id` when the local
@@ -1192,6 +1209,7 @@ impl<EK: KvEngine, ER: RaftEngine, T: Transport> PollHandler<PeerFsm<EK, ER>, St
                     self.poll_ctx.cfg.store_io_pool_size,
                     self.poll_ctx.write_senders.size(),
                 );
+            sw.lap();
             if let Err(err) = self.poll_ctx.write_senders[writer_id].try_send(
                 WriteMsg::LatencyInspect {
                     send_time: write_begin,
@@ -1201,6 +1219,7 @@ impl<EK: KvEngine, ER: RaftEngine, T: Transport> PollHandler<PeerFsm<EK, ER>, St
             ) {
                 warn!("send latency inspecting to write workers failed"; "err" => ?err);
             }
+            sw.lap();
         }
         dur = self.timer.saturating_elapsed();
         if self.poll_ctx.has_ready {
