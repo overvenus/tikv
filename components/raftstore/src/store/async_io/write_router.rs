@@ -103,15 +103,21 @@ where
         last_unpersisted: Option<u64>,
         msg: WriteMsg<EK, ER>,
     ) {
+        let sw = tikv_sync::StopWatch::ready("send_write_msg");
         if last_unpersisted.is_none() {
             // reset when there is no pending write
             self.last_msg_priority = None;
         }
         if self.should_send(ctx, last_unpersisted) {
+            sw.lap();
             self.send(ctx, msg);
+            sw.lap();
         } else {
+            sw.lap();
             STORE_IO_RESCHEDULE_PENDING_TASKS_TOTAL_GAUGE.inc();
+            sw.lap();
             self.pending_write_msgs.push(msg);
+            sw.lap();
         }
     }
 

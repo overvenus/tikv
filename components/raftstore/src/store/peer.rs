@@ -3028,7 +3028,9 @@ where
         ctx: &mut PollContext<EK, ER, T>,
         committed_entries: Vec<Entry>,
     ) {
+        let sw = tikv_sync::StopWatch::ready("handle_raft_committed_entries");
         if committed_entries.is_empty() {
+            sw.lap();
             return;
         }
         fail_point!(
@@ -3060,7 +3062,9 @@ where
                     ctx.raft_metrics.commit_log.observe(duration_to_sec(
                         (ctx.current_time.unwrap() - propose_time).to_std().unwrap(),
                     ));
+                    sw.lap();
                     self.maybe_renew_leader_lease(propose_time, ctx, None);
+                    sw.lap();
                     lease_to_be_updated = false;
                 }
             }
@@ -3100,7 +3104,9 @@ where
                         p
                     })
                     .collect();
+                sw.lap();
                 self.proposals.gc();
+                sw.lap();
                 cbs
             } else {
                 vec![]
@@ -3113,7 +3119,9 @@ where
                 self.raft_group.raft.raft_log.committed,
                 self.raft_group.raft.raft_log.persisted,
             );
+            sw.lap();
             let commit_term = self.get_store().term(commit_index).unwrap();
+            sw.lap();
 
             let mut apply = Apply::new(
                 self.peer_id(),
@@ -3129,14 +3137,18 @@ where
                     .map(|b| b.meta.clone()),
             );
             apply.on_schedule(&ctx.raft_metrics);
+            sw.lap();
             self.mut_store()
                 .trace_cached_entries(apply.entries[0].clone());
+            sw.lap();
             if needs_evict_entry_cache(ctx.cfg.evict_cache_on_memory_ratio) {
                 // Compact all cached entries instead of half evict.
                 self.mut_store().evict_entry_cache(false);
+                sw.lap();
             }
             ctx.apply_router
                 .schedule_task(self.region_id, ApplyTask::apply(apply));
+            sw.lap();
         }
         fail_point!("after_send_to_apply_1003", self.peer_id() == 1003, |_| {});
     }
@@ -3556,6 +3568,7 @@ where
     }
 
     fn apply_reads<T>(&mut self, ctx: &mut PollContext<EK, ER, T>, ready: &Ready) {
+        let sw = tikv_sync::StopWatch::ready("apply_reads");
         let mut propose_time = None;
         let states = ready.read_states().iter().map(|state| {
             let read_index_ctx = ReadIndexContext::parse(state.request_ctx.as_slice()).unwrap();
@@ -3570,23 +3583,31 @@ where
             // was leader. They will be cleared in `clear_uncommitted_on_role_change` later
             // in the function.
             self.pending_reads.advance_replica_reads(states);
+            sw.lap();
             self.post_pending_read_index_on_replica(ctx);
+            sw.lap();
         } else {
             self.pending_reads.advance_leader_reads(states);
+            sw.lap();
             propose_time = self.pending_reads.last_ready().map(|r| r.propose_time);
             if self.ready_to_handle_read() {
+                sw.lap();
                 while let Some(mut read) = self.pending_reads.pop_front() {
                     self.response_read(&mut read, ctx, false);
                 }
+                sw.lap();
             }
         }
 
         // Note that only after handle read_states can we identify what requests are
         // actually stale.
         if ready.ss().is_some() {
+            sw.lap();
             let term = self.term();
+            sw.lap();
             // all uncommitted reads will be dropped silently in raft.
             self.pending_reads.clear_uncommitted_on_role_change(term);
+            sw.lap();
         }
 
         if let Some(propose_time) = propose_time {
@@ -3594,6 +3615,7 @@ where
                 return;
             }
             self.maybe_renew_leader_lease(propose_time, ctx, None);
+            sw.lap();
         }
     }
 
