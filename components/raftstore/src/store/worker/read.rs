@@ -754,27 +754,45 @@ where
     // required by `LocalReadRouter: Send`, use `Arc` will introduce extra cost but
     // make the logic clear
     pub fn get_delegate(&mut self, region_id: u64) -> Option<D> {
-        let rd = match self.delegates.get(&region_id) {
-            // The local `ReadDelegate` is up to date
-            Some(d) if !d.track_ver.any_new() => Some(d.clone()),
-            _ => {
-                debug!("update local read delegate"; "region_id" => region_id);
-                TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.cache_miss.inc());
-
-                let (meta_len, meta_reader) = { self.store_meta.get_executor_and_len(region_id) };
-
-                // Remove the stale delegate
-                self.delegates.remove(&region_id);
-                self.delegates.resize(meta_len);
-                match meta_reader {
-                    Some(reader) => {
-                        self.delegates.insert(region_id, reader.clone());
-                        Some(reader)
-                    }
-                    None => None,
-                }
+        let d = self.delegates.get(&region_id);
+        if let Some(d) = d {
+            // If the local `ReadDelegate` is up to date, return it
+            if !d.track_ver.any_new() {
+                return Some(d.clone());
+            } else {
+                TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.version_changed.inc());
             }
+        } else {
+            TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.cache_miss.inc());
+        }
+
+        debug!("update local read delegate"; "region_id" => region_id);
+
+        let (meta_len, meta_reader) = { self.store_meta.get_executor_and_len(region_id) };
+
+        // Remove the stale delegate
+        let old_len = self.delegates.len();
+        self.delegates.remove(&region_id);
+
+        let old_cap = self.delegates.capacity();
+        self.delegates.resize(meta_len);
+        let new_cap = self.delegates.capacity();
+        if new_cap != old_cap {
+            LOCAL_READ_CACHE_CAP.set(new_cap as i64);
+        }
+
+        let rd = match meta_reader {
+            Some(reader) => {
+                self.delegates.insert(region_id, reader.clone());
+                let new_len = self.delegates.len();
+                if new_len != old_len {
+                    LOCAL_READ_CACHE_LEN.set(new_len as i64);
+                }
+                Some(reader)
+            }
+            None => None,
         };
+
         // Return `None` if the read delegate is pending remove
         rd.filter(|r| !r.pending_remove)
     }

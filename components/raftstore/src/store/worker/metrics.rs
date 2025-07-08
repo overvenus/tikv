@@ -55,6 +55,7 @@ make_static_metric! {
         applied_term,
         channel_full,
         cache_miss,
+        version_changed,
         safe_ts,
         witness,
         flashback_not_prepared,
@@ -222,6 +223,16 @@ lazy_static! {
     pub static ref LOCAL_READ_EXECUTED_REPLICA_READ_REQUESTS: IntCounter = register_int_counter!(
         "tikv_raftstore_local_read_executed_replica_read_requests",
         "Total number of stale read requests directly executed by local reader."
+    )
+    .unwrap();
+    pub static ref LOCAL_READ_CACHE_LEN: IntGauge = register_int_gauge!(
+        "tikv_raftstore_local_read_cache_len",
+        "Total length of local reader cache."
+    )
+    .unwrap();
+    pub static ref LOCAL_READ_CACHE_CAP: IntGauge = register_int_gauge!(
+        "tikv_raftstore_local_read_cache_cap",
+        "Total capacity of local reader cache."
     )
     .unwrap();
     pub static ref RAFT_LOG_GC_WRITE_DURATION_HISTOGRAM: Histogram = register_histogram!(
