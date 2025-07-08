@@ -287,6 +287,7 @@ impl Drop for ReadDelegate {
     fn drop(&mut self) {
         // call `inc` to notify the source `ReadDelegate` is dropped
         self.track_ver.inc();
+        LOCAL_READ_UPDATE_DROP.inc();
     }
 }
 
@@ -497,17 +498,22 @@ impl ReadDelegate {
         match progress {
             Progress::Region(region) => {
                 self.region = Arc::new(region);
+                LOCAL_READ_UPDATE_REGION.inc();
             }
             Progress::Term(term) => {
                 self.term = term;
+                LOCAL_READ_UPDATE_TERM.inc();
             }
             Progress::AppliedTerm(applied_term) => {
                 self.applied_term = applied_term;
+                LOCAL_READ_UPDATE_APPLIED_TERM.inc();
             }
             Progress::LeaderLease(leader_lease) => {
                 self.leader_lease = leader_lease;
+                LOCAL_READ_UPDATE_LEADER_LEASE.inc();
             }
             Progress::RegionBuckets(bucket_meta) => {
+                LOCAL_READ_UPDATE_REGION_BUCKETS.inc();
                 if let Some(meta) = &self.bucket_meta {
                     if meta.version >= bucket_meta.version {
                         return;
@@ -517,6 +523,7 @@ impl ReadDelegate {
             }
             Progress::WaitData(wait_data) => {
                 self.wait_data = wait_data;
+                LOCAL_READ_UPDATE_WAIT_DURATION.inc();
             }
         }
     }

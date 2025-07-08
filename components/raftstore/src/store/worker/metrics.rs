@@ -235,6 +235,43 @@ lazy_static! {
         "Total capacity of local reader cache."
     )
     .unwrap();
+
+    pub static ref LOCAL_READ_UPDATE_REGION: IntGauge = register_int_gauge!(
+        "tikv_raftstore_local_read_update_region",
+        "Total number of local read update region."
+    )
+    .unwrap();
+    pub static ref LOCAL_READ_UPDATE_TERM: IntGauge = register_int_gauge!(
+        "tikv_raftstore_local_read_update_term",
+        "Total number of local read update term."
+    )
+    .unwrap();
+    pub static ref LOCAL_READ_UPDATE_APPLIED_TERM: IntGauge = register_int_gauge!(
+        "tikv_raftstore_local_read_update_applied_term",
+        "Total number of local read update applied term."
+    )
+    .unwrap();
+    pub static ref LOCAL_READ_UPDATE_LEADER_LEASE: IntGauge = register_int_gauge!(
+        "tikv_raftstore_local_read_update_leader_lease",
+        "Total number of local read update leader lease."
+    )
+    .unwrap();
+    pub static ref LOCAL_READ_UPDATE_REGION_BUCKETS: IntGauge = register_int_gauge!(
+        "tikv_raftstore_local_read_update_region_buckets",
+        "Total number of local read update region buckets."
+    )
+    .unwrap();
+    pub static ref LOCAL_READ_UPDATE_WAIT_DURATION: IntGauge = register_int_gauge!(
+        "tikv_raftstore_local_read_update_wait_duration",
+        "Total duration of local read update wait."
+    )
+    .unwrap();
+    pub static ref LOCAL_READ_UPDATE_DROP: IntGauge = register_int_gauge!(
+        "tikv_raftstore_local_read_update_drop",
+        "Total duration of local read drop."
+    )
+    .unwrap();
+
     pub static ref RAFT_LOG_GC_WRITE_DURATION_HISTOGRAM: Histogram = register_histogram!(
         "tikv_raftstore_raft_log_gc_write_duration_secs",
         "Bucketed histogram of write duration of raft log gc.",
