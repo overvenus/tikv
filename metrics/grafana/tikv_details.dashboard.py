@@ -126,6 +126,147 @@ def Templates() -> Templating:
     )
 
 
+def P99() -> Dashboard:
+    layout = Layout(title="TiKV P99 Dashboard")
+    layout.row(
+        [
+            graph_panel(
+                title=r"gRPC message duration" + OPTIONAL_QUANTILE_INPUT,
+                description=r"The "
+                + OPTIONAL_QUANTILE_INPUT
+                + " of execution time of gRPC message",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                targets=[
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "tikv_grpc_msg_duration_seconds",
+                            label_selectors=['type="kv_prewrite"'],
+                            by_labels=["type"],
+                            is_optional_quantile=True,
+                        ),
+                        legend_format="{{type}}-" + OPTIONAL_QUANTILE_INPUT,
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "tikv_grpc_msg_duration_seconds",
+                            label_selectors=['type!="kv_gc"'],
+                            by_labels=["type", "priority"],
+                            is_optional_quantile=True,
+                        ),
+                        legend_format="{{type}}-{{priority}}-"
+                        + OPTIONAL_QUANTILE_INPUT,
+                        hide=True,
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="gRPC message count",
+                description="The count of different kinds of gRPC message",
+                yaxes=yaxes(left_format=UNITS.REQUESTS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_grpc_msg_duration_seconds_count",
+                            label_selectors=['type="kv_prewrite"'],
+                            by_labels=["type"],
+                        ),
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_grpc_msg_duration_seconds_count",
+                            label_selectors=['type!="kv_gc"'],
+                            by_labels=["type", "priority"],
+                        ),
+                        hide=True,
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Local reader reject requests",
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_local_read_reject_total",
+                            by_labels=["instance", "reason"],
+                        ),
+                        legend_format="{{instance}}-reject-by-{{reason}}",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Vote",
+                description="The total number of vote messages that are sent in Raft",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_raft_sent_message_total",
+                            label_selectors=['type=~".*vote.*"'],
+                            by_labels=["instance", "type"],
+                        ),
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Propose wait duration",
+            heatmap_description="The wait time of each proposal",
+            graph_title="99% Propose wait duration per server",
+            graph_description="The wait time of each proposal in each TiKV instance",
+            graph_by_labels=["instance"],
+            graph_hides=["count", "avg"],
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_raftstore_request_wait_time_duration_secs",
+        )
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Storage async snapshot duration",
+            heatmap_description="The time consumed by processing asynchronous snapshot requests",
+            graph_title="Storage async snapshot duration",
+            graph_description="The storage async snapshot duration",
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_storage_engine_async_request_duration_seconds",
+            label_selectors=['type="snapshot"'],
+        ),
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Storage async snapshot duration (pure local read)",
+            heatmap_description="The storage async snapshot duration without the involving of raftstore",
+            graph_title="Storage async snapshot duration (pure local read)",
+            graph_description="The storage async snapshot duration without the involving of raftstore",
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_storage_engine_async_request_duration_seconds",
+            label_selectors=['type="snapshot_local_read"'],
+        ),
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Read index propose wait duration",
+            heatmap_description="Read index propose wait duration associated with async snapshot",
+            graph_title="Read index propose wait duration",
+            graph_description="Read index propose wait duration associated with async snapshot",
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_storage_engine_async_request_duration_seconds",
+            label_selectors=['type="snapshot_read_index_propose_wait"'],
+        ),
+    )
+    return layout.row_panel
+
+
 def Duration() -> RowPanel:
     layout = Layout(title="Duration")
     layout.row(
@@ -10319,6 +10460,7 @@ dashboard = Dashboard(
     editable=True,
     templating=Templates(),
     panels=[
+        P99(),
         # Overview
         Duration(),
         Cluster(),
