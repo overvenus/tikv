@@ -874,6 +874,7 @@ mod tests {
                 wait_data: false,
                 track_ver: TrackVer::new(),
                 bucket_meta: Some(bucket_meta.clone()),
+                location: std::panic::Location::caller(),
             };
             // create tablet with region_id 1 and prepare some data
             let ctx = TabletContext::new(&region1, Some(10));

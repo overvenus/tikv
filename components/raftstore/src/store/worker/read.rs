@@ -284,10 +284,12 @@ where
 }
 
 impl Drop for ReadDelegate {
+    #[track_caller]
     fn drop(&mut self) {
         // call `inc` to notify the source `ReadDelegate` is dropped
         self.track_ver.inc();
         LOCAL_READ_UPDATE_DROP.inc();
+        tikv_util::info!("dbg read delegate dropped"; "tag" => &self.tag, "location" => %self.location);
     }
 }
 
@@ -404,7 +406,7 @@ impl Clone for TrackVer {
 }
 
 /// #[RaftstoreCommon]: A read only delegate of `Peer`.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ReadDelegate {
     pub region: Arc<metapb::Region>,
     pub peer_id: u64,
@@ -425,9 +427,35 @@ pub struct ReadDelegate {
     // `track_ver` used to keep the local `ReadDelegate` in `LocalReader`
     // up-to-date with the global `ReadDelegate` stored at `StoreMeta`
     pub track_ver: TrackVer,
+
+    pub location: &'static std::panic::Location<'static>,
+}
+
+impl Clone for ReadDelegate {
+    #[track_caller]
+    fn clone(&self) -> Self {
+        ReadDelegate {
+            region: Arc::clone(&self.region),
+            peer_id: self.peer_id,
+            term: self.term,
+            applied_term: self.applied_term,
+            leader_lease: self.leader_lease.clone(),
+            last_valid_ts: self.last_valid_ts,
+            tag: self.tag.clone(),
+            bucket_meta: self.bucket_meta.clone(),
+            txn_extra_op: Arc::clone(&self.txn_extra_op),
+            txn_ext: Arc::clone(&self.txn_ext),
+            read_progress: Arc::clone(&self.read_progress),
+            pending_remove: self.pending_remove,
+            wait_data: self.wait_data,
+            track_ver: self.track_ver.clone(),
+            location: std::panic::Location::caller(),
+        }
+    }
 }
 
 impl ReadDelegate {
+    #[track_caller]
     pub fn from_peer<EK: KvEngine, ER: RaftEngine>(peer: &Peer<EK, ER>) -> Self {
         let region = peer.region().clone();
         let region_id = region.get_id();
@@ -451,9 +479,11 @@ impl ReadDelegate {
                 .as_ref()
                 .map(|b| b.meta.clone()),
             track_ver: TrackVer::new(),
+            location: std::panic::Location::caller(),
         }
     }
 
+    #[track_caller]
     pub fn new(
         peer_id: u64,
         term: u64,
@@ -480,6 +510,7 @@ impl ReadDelegate {
             wait_data: false,
             bucket_meta,
             track_ver: TrackVer::new(),
+            location: std::panic::Location::caller(),
         }
     }
 
@@ -628,6 +659,7 @@ impl ReadDelegate {
             wait_data: false,
             track_ver: TrackVer::new(),
             bucket_meta: None,
+            location: std::panic::Location::caller(),
         }
     }
 }
@@ -1491,6 +1523,7 @@ mod tests {
                 wait_data: false,
                 track_ver: TrackVer::new(),
                 bucket_meta: None,
+                location: std::panic::Location::caller(),
             };
             meta.readers.insert(1, read_delegate);
         }
@@ -1784,6 +1817,7 @@ mod tests {
                 pending_remove: false,
                 wait_data: false,
                 bucket_meta: None,
+                location: std::panic::Location::caller(),
             };
             meta.readers.insert(1, read_delegate);
         }
@@ -1914,6 +1948,7 @@ mod tests {
                 wait_data: false,
                 track_ver: TrackVer::new(),
                 bucket_meta: None,
+                location: std::panic::Location::caller(),
             };
             meta.readers.insert(region_id, read_delegate);
         }
