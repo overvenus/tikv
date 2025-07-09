@@ -204,6 +204,74 @@ def P99() -> Dashboard:
                 ],
             ),
             graph_panel(
+                title="Local reader update",
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_local_read_update_region",
+                        ),
+                        legend_format="region-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_local_read_update_term",
+                        ),
+                        legend_format="term-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_local_read_update_applied_term",
+                        ),
+                        legend_format="applied_term-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_local_read_update_leader_lease",
+                        ),
+                        legend_format="leader_lease-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_local_read_update_region_buckets",
+                        ),
+                        legend_format="region_buckets-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_local_read_update_wait_duration",
+                        ),
+                        legend_format="wait_data-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_local_read_update_drop",
+                        ),
+                        legend_format="drop-{{instance}}",
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Local reader cache size",
+                targets=[
+                    target(
+                        expr=expr_max(
+                            "tikv_raftstore_local_read_cache_len",
+                        ),
+                        legend_format="len-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_max(
+                            "tikv_raftstore_local_read_cache_cap",
+                        ),
+                        legend_format="cap-{{instance}}",
+                    ),
+                ],
+            ),
+            graph_panel(
                 title="Vote",
                 description="The total number of vote messages that are sent in Raft",
                 yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
