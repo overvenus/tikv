@@ -109,7 +109,7 @@ use crate::{
         },
         Callback, CasualMessage, CompactThreshold, GlobalReplicationState, InspectedRaftMessage,
         MergeResultKind, PdTask, PeerMsg, PeerTick, RaftCommand, SignificantMsg, SnapManager,
-        StoreMsg, StoreTick,
+        StoreMsg, StoreTick, TrackVer,
     },
     Error, Result,
 };
@@ -144,6 +144,33 @@ pub trait StoreRegionMeta: Send {
     fn search_region(&self, start_key: &[u8], end_key: &[u8], visitor: impl FnMut(&Region));
 }
 
+pub struct TrackVerWrapper {
+    track_ver: TrackVer,
+    tag: String,
+    location: &'static std::panic::Location<'static>,
+}
+
+impl TrackVerWrapper {
+    #[track_caller]
+    pub fn new(track_ver: TrackVer, tag: String) -> Self {
+        TrackVerWrapper {
+            track_ver,
+            tag,
+            location: std::panic::Location::caller(),
+        }
+    }
+}
+
+impl Drop for TrackVerWrapper {
+    fn drop(&mut self) {
+        use crate::store::worker_metrics::LOCAL_READ_UPDATE_DROP;
+
+        self.track_ver.inc();
+        LOCAL_READ_UPDATE_DROP.inc();
+        tikv_util::info!("dbg read delegate dropped"; "tag" => &self.tag, "location" => %self.location);
+    }
+}
+
 pub struct StoreMeta {
     pub store_id: Option<u64>,
     /// region_end_key -> region_id
@@ -151,7 +178,7 @@ pub struct StoreMeta {
     /// region_id -> region
     pub regions: HashMap<u64, Region>,
     /// region_id -> reader
-    pub readers: HashMap<u64, ReadDelegate>,
+    pub readers: HashMap<u64, (ReadDelegate, TrackVerWrapper)>,
     /// `MsgRequestPreVote`, `MsgRequestVote` or `MsgAppend` messages from newly
     /// split Regions shouldn't be dropped if there is no such Region in this
     /// store now. So the messages are recorded temporarily and will be handled
@@ -228,7 +255,7 @@ impl StoreRegionMeta for StoreMeta {
 
     #[inline]
     fn reader(&self, region_id: u64) -> Option<&ReadDelegate> {
-        self.readers.get(&region_id)
+        self.readers.get(&region_id).map(|(d, _)| d)
     }
 }
 
@@ -267,7 +294,7 @@ impl StoreMeta {
             panic!("{} region corrupted", peer.tag);
         }
         let reader = self.readers.get_mut(&region.get_id()).unwrap();
-        peer.set_region(host, reader, region, reason);
+        peer.set_region(host, &mut reader.0, region, reason);
     }
 
     /// Update damaged ranges and return true if overlap exists.
@@ -1886,8 +1913,9 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
             let mut meta = builder.store_meta.lock().unwrap();
             for (_, peer_fsm) in &region_peers {
                 let peer = peer_fsm.get_peer();
-                meta.readers
-                    .insert(peer_fsm.region_id(), ReadDelegate::from_peer(peer));
+                let (delegate, ver) = ReadDelegate::from_peer(peer);
+                let ver = TrackVerWrapper::new(ver, peer_fsm.peer.tag.clone());
+                meta.readers.insert(peer_fsm.region_id(), (delegate, ver));
             }
         }
 
@@ -3269,6 +3297,8 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
 
         let start_key = keys::enc_start_key(&region);
         let end_key = keys::enc_end_key(&region);
+        let (delegate, ver) = ReadDelegate::from_peer(peer.get_peer());
+        let ver = TrackVerWrapper::new(ver, peer.peer.tag.clone());
         if meta
             .regions
             .insert(region.get_id(), region.clone())
@@ -3279,7 +3309,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
                 .is_some()
             || meta
                 .readers
-                .insert(region.get_id(), ReadDelegate::from_peer(peer.get_peer()))
+                .insert(region.get_id(), (delegate, ver))
                 .is_some()
             || meta
                 .region_read_progress

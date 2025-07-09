@@ -78,7 +78,7 @@ use crate::{
         entry_storage::MAX_WARMED_UP_CACHE_KEEP_TIME,
         fsm::{
             apply,
-            store::{PollContext, StoreMeta},
+            store::{PollContext, StoreMeta, TrackVerWrapper},
             ApplyMetrics, ApplyTask, ApplyTaskRes, CatchUpLogs, ChangeObserver, ChangePeer,
             ExecResult, SwitchWitness,
         },
@@ -4629,8 +4629,9 @@ where
                 .insert(enc_end_key(&new_region), new_region_id)
                 .is_none();
             assert!(not_exist, "[region {}] should not exist", new_region_id);
-            meta.readers
-                .insert(new_region_id, ReadDelegate::from_peer(new_peer.get_peer()));
+            let (delegate, ver) = ReadDelegate::from_peer(new_peer.get_peer());
+            let ver = TrackVerWrapper::new(ver, new_peer.peer.tag.clone());
+            meta.readers.insert(new_region_id, (delegate, ver));
             meta.region_read_progress
                 .insert(new_region_id, new_peer.peer.read_progress.clone());
             let mailbox = BasicMailbox::new(sender, new_peer, self.ctx.router.state_cnt().clone());
@@ -5120,7 +5121,7 @@ where
             RegionChangeReason::CommitMerge,
         );
         if let Some(d) = meta.readers.get_mut(&source.get_id()) {
-            d.mark_pending_remove();
+            d.0.mark_pending_remove();
         }
 
         // After the region commit merged, the region's key range is extended and the
@@ -5357,10 +5358,10 @@ where
             "prev_region" => ?prev_region,
         );
 
-        meta.readers.insert(
-            self.fsm.region_id(),
-            ReadDelegate::from_peer(&self.fsm.peer),
-        );
+        let (delegate, ver) = ReadDelegate::from_peer(&self.fsm.peer);
+        let ver = TrackVerWrapper::new(ver, self.fsm.peer.tag.clone());
+
+        meta.readers.insert(self.fsm.region_id(), (delegate, ver));
 
         // Remove this region's snapshot region from the `pending_snapshot_regions`
         // The `pending_snapshot_regions` is only used to occupy the key range, so if
@@ -5375,7 +5376,7 @@ where
             assert_eq!(prev, Some(r.get_id()));
             assert!(meta.regions.remove(&r.get_id()).is_some());
             if let Some(d) = meta.readers.get_mut(&r.get_id()) {
-                d.mark_pending_remove();
+                d.0.mark_pending_remove();
             }
         }
         // Remove the data from `atomic_snap_regions` and `destroyed_region_for_snap`
@@ -6478,7 +6479,9 @@ where
         let version = region_buckets.meta.version;
         let mut store_meta = self.ctx.store_meta.lock().unwrap();
         if let Some(reader) = store_meta.readers.get_mut(&self.fsm.region_id()) {
-            reader.update(ReadProgress::region_buckets(region_buckets.meta.clone()));
+            reader
+                .0
+                .update(ReadProgress::region_buckets(region_buckets.meta.clone()));
         }
 
         // Notify followers to refresh their buckets version
@@ -6523,7 +6526,9 @@ where
 
         let mut store_meta = self.ctx.store_meta.lock().unwrap();
         if let Some(reader) = store_meta.readers.get_mut(&self.region_id()) {
-            reader.update(ReadProgress::region_buckets(Arc::new(meta)));
+            reader
+                .0
+                .update(ReadProgress::region_buckets(Arc::new(meta)));
         }
     }
 

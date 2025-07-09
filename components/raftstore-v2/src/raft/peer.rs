@@ -786,19 +786,20 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     pub fn generate_read_delegate(&self) -> ReadDelegate {
         let peer_id = self.peer().get_id();
 
-        ReadDelegate::new(
-            peer_id,
-            self.term(),
-            self.region().clone(),
-            self.storage().entry_storage().applied_term(),
-            self.txn_context.extra_op().clone(),
-            self.txn_context.ext().clone(),
-            self.read_progress().clone(),
-            self.region_buckets_info()
-                .bucket_stat()
-                .as_ref()
-                .map(|b| b.meta.clone()),
-        )
+        unreachable!()
+        // ReadDelegate::new(
+        //     peer_id,
+        //     self.term(),
+        //     self.region().clone(),
+        //     self.storage().entry_storage().applied_term(),
+        //     self.txn_context.extra_op().clone(),
+        //     self.txn_context.ext().clone(),
+        //     self.read_progress().clone(),
+        //     self.region_buckets_info()
+        //         .bucket_stat()
+        //         .as_ref()
+        //         .map(|b| b.meta.clone()),
+        // )
     }
 
     #[inline]

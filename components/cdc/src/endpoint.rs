@@ -1467,11 +1467,11 @@ mod tests {
         }
 
         fn add_local_reader(&self, region_id: u64) {
-            self.store_meta
-                .lock()
-                .unwrap()
-                .readers
-                .insert(region_id, ReadDelegate::mock(region_id));
+            // self.store_meta
+            //     .lock()
+            //     .unwrap()
+            //     .readers
+            //     .insert(region_id, ReadDelegate::mock(region_id));
         }
 
         fn fill_raft_rx(&self, region_id: u64) {

@@ -3689,7 +3689,7 @@ where
             let progress = ReadProgress::applied_term(applied_term);
             let mut meta = ctx.store_meta.lock().unwrap();
             let reader = meta.readers.get_mut(&self.region_id).unwrap();
-            self.maybe_update_read_progress(reader, progress);
+            self.maybe_update_read_progress(&mut reader.0, progress);
         }
         has_ready
     }
@@ -3737,12 +3737,12 @@ where
         if let Some(progress) = progress {
             let mut meta = ctx.store_meta.lock().unwrap();
             let reader = meta.readers.get_mut(&self.region_id).unwrap();
-            self.maybe_update_read_progress(reader, progress);
+            self.maybe_update_read_progress(&mut reader.0, progress);
         }
         if let Some(progress) = read_progress {
             let mut meta = ctx.store_meta.lock().unwrap();
             let reader = meta.readers.get_mut(&self.region_id).unwrap();
-            self.maybe_update_read_progress(reader, progress);
+            self.maybe_update_read_progress(&mut reader.0, progress);
         }
     }
 
@@ -3766,7 +3766,7 @@ where
     ) {
         let mut meta = ctx.store_meta.lock().unwrap();
         let reader = meta.readers.get_mut(&self.region_id).unwrap();
-        self.maybe_update_read_progress(reader, progress);
+        self.maybe_update_read_progress(&mut reader.0, progress);
     }
 
     pub fn maybe_campaign(&mut self, parent_is_leader: bool) -> bool {

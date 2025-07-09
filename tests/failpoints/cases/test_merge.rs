@@ -1300,6 +1300,7 @@ fn test_source_peer_read_delegate_after_apply() {
             .readers
             .get(&source.get_id())
             .unwrap()
+            .0
             .pending_remove
     );
 
