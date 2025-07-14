@@ -256,6 +256,11 @@ lazy_static! {
         "Total number of local read update leader lease."
     )
     .unwrap();
+    pub static ref LOCAL_READ_UPDATE_LEADER_LEASE_NONE: IntGauge = register_int_gauge!(
+        "tikv_raftstore_local_read_update_leader_lease_none",
+        "Total number of local read unset leader lease."
+    )
+    .unwrap();
     pub static ref LOCAL_READ_UPDATE_REGION_BUCKETS: IntGauge = register_int_gauge!(
         "tikv_raftstore_local_read_update_region_buckets",
         "Total number of local read update region buckets."

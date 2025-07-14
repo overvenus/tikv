@@ -232,6 +232,12 @@ def P99() -> Dashboard:
                     ),
                     target(
                         expr=expr_sum_rate(
+                            "tikv_raftstore_local_read_update_leader_lease_none",
+                        ),
+                        legend_format="leader_lease_unset-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
                             "tikv_raftstore_local_read_update_region_buckets",
                         ),
                         legend_format="region_buckets-{{instance}}",
@@ -247,6 +253,49 @@ def P99() -> Dashboard:
                             "tikv_raftstore_local_read_update_drop",
                         ),
                         legend_format="drop-{{instance}}",
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Hibernate Peers",
+                description="The number of peers in hibernated state",
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "tikv_raftstore_hibernated_peer_state",
+                            by_labels=["instance", "state"],
+                        ),
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Async snapshot op/s",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_storage_engine_async_request_duration_seconds_count",
+                            label_selectors=['type="snapshot"'],
+                        ),
+                        legend_format="total-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_storage_engine_async_request_duration_seconds_count",
+                            label_selectors=['type="snapshot_local_read"'],
+                        ),
+                        legend_format="local-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_storage_engine_async_request_duration_seconds_count",
+                            label_selectors=['type="snapshot_read_index_propose_wait"'],
+                        ),
+                        legend_format="read_index-{{instance}}",
                     ),
                 ],
             ),

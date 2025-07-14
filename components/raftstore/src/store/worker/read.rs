@@ -548,8 +548,12 @@ impl ReadDelegate {
                 LOCAL_READ_UPDATE_APPLIED_TERM.inc();
             }
             Progress::LeaderLease(leader_lease) => {
+                if leader_lease.is_some() {
+                    LOCAL_READ_UPDATE_LEADER_LEASE.inc();
+                } else {
+                    LOCAL_READ_UPDATE_LEADER_LEASE_NONE.inc();
+                }
                 self.leader_lease = leader_lease;
-                LOCAL_READ_UPDATE_LEADER_LEASE.inc();
             }
             Progress::RegionBuckets(bucket_meta) => {
                 LOCAL_READ_UPDATE_REGION_BUCKETS.inc();
