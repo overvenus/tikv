@@ -45,7 +45,7 @@ use txn_types::WriteBatchFlags;
 use super::{metrics::PEER_ADMIN_CMD_COUNTER_VEC, peer_storage, Config};
 use crate::{
     coprocessor::CoprocessorHost,
-    store::{simple_write::SimpleWriteReqDecoder, snap::SNAPSHOT_VERSION},
+    store::{metrics::*, simple_write::SimpleWriteReqDecoder, snap::SNAPSHOT_VERSION},
     Error, Result,
 };
 
@@ -522,6 +522,16 @@ pub enum LeaseState {
     Expired,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ExpireLeaseReason {
+    SetRegion,
+    Expired,
+    TransferLeader,
+    BecameFollower,
+    RegionMerge,
+    FlushBack,
+}
+
 impl Lease {
     pub fn new(max_lease: Duration, advance_renew_lease: Duration) -> Lease {
         Lease {
@@ -569,8 +579,8 @@ impl Lease {
     }
 
     /// Suspect the lease to the bound.
-    pub fn suspect(&mut self, send_ts: Timespec) {
-        self.expire_remote_lease();
+    pub fn suspect(&mut self, send_ts: Timespec, reason: ExpireLeaseReason) {
+        self.expire_remote_lease(reason);
         let bound = self.next_expired_time(send_ts);
         self.bound = Some(Either::Left(bound));
     }
@@ -594,15 +604,35 @@ impl Lease {
         }
     }
 
-    pub fn expire(&mut self) {
-        self.expire_remote_lease();
+    pub fn expire(&mut self, reason: ExpireLeaseReason) {
+        self.expire_remote_lease(reason);
         self.bound = None;
     }
 
-    pub fn expire_remote_lease(&mut self) {
+    pub fn expire_remote_lease(&mut self, reason: ExpireLeaseReason) {
         // Expire remote lease if there is any.
         if let Some(r) = self.remote.take() {
             r.expire();
+            match reason {
+                ExpireLeaseReason::SetRegion => {
+                    LEADER_LEASE_EXPIRE_REGION_CHANGE.inc();
+                }
+                ExpireLeaseReason::Expired => {
+                    LEADER_LEASE_EXPIRE_EXPIRED.inc();
+                }
+                ExpireLeaseReason::TransferLeader => {
+                    LEADER_LEASE_EXPIRE_TRANSFER_LEADER.inc();
+                }
+                ExpireLeaseReason::BecameFollower => {
+                    LEADER_LEASE_EXPIRE_BECAME_FOLLOWER.inc();
+                }
+                ExpireLeaseReason::RegionMerge => {
+                    LEADER_LEASE_EXPIRE_REGION_MERGE.inc();
+                }
+                ExpireLeaseReason::FlushBack => {
+                    LEADER_LEASE_EXPIRE_FLASH_BACK.inc();
+                }
+            }
         }
     }
 
@@ -2048,7 +2078,7 @@ mod tests {
         inspect_test(&lease, None, LeaseState::Expired);
 
         // Transit to the Suspect state.
-        lease.suspect(monotonic_raw_now());
+        lease.suspect(monotonic_raw_now(), ExpireLeaseReason::TransferLeader);
         inspect_test(&lease, Some(monotonic_raw_now()), LeaseState::Suspect);
         inspect_test(&lease, None, LeaseState::Suspect);
 
@@ -2057,7 +2087,7 @@ mod tests {
         inspect_test(&lease, Some(monotonic_raw_now()), LeaseState::Suspect);
 
         // Clear lease.
-        lease.expire();
+        lease.expire(ExpireLeaseReason::TransferLeader);
         inspect_test(&lease, Some(monotonic_raw_now()), LeaseState::Expired);
         inspect_test(&lease, None, LeaseState::Expired);
 

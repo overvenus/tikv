@@ -999,4 +999,40 @@ lazy_static! {
             "Is raft process busy or not",
             &["type"]
         ).unwrap();
+
+    pub static ref LEADER_LEASE_EXPIRE_REGION_CHANGE: IntCounter =
+        register_int_counter!(
+            "tikv_raftstore_leader_lease_expire_region_change",
+            "Total number of leader lease expired due to region change."
+        ).unwrap();
+
+    pub static ref LEADER_LEASE_EXPIRE_EXPIRED: IntCounter =
+        register_int_counter!(
+            "tikv_raftstore_leader_lease_expire_expired",
+            "Total number of leader lease expired."
+        ).unwrap();
+
+    pub static ref LEADER_LEASE_EXPIRE_TRANSFER_LEADER: IntCounter =
+        register_int_counter!(
+            "tikv_raftstore_leader_lease_expire_transfer_leader",
+            "Total number of leader lease expired due to transfer leader."
+        ).unwrap();
+
+    pub static ref LEADER_LEASE_EXPIRE_BECAME_FOLLOWER: IntCounter =
+        register_int_counter!(
+            "tikv_raftstore_leader_lease_expire_became_follower",
+            "Total number of leader lease expired due to became follower."
+        ).unwrap();
+
+    pub static ref LEADER_LEASE_EXPIRE_REGION_MERGE: IntCounter =
+        register_int_counter!(
+            "tikv_raftstore_leader_lease_expire_region_merge",
+            "Total number of leader lease expired due to region merge."
+        ).unwrap();
+
+    pub static ref LEADER_LEASE_EXPIRE_FLASH_BACK: IntCounter =
+        register_int_counter!(
+            "tikv_raftstore_leader_lease_expire_flash_back",
+            "Total number of leader lease expired due to flash_back."
+        ).unwrap();
 }

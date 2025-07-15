@@ -22,7 +22,7 @@ use raftstore::{
     store::{
         fsm::ApplyMetrics,
         metrics::RAFT_PEER_PENDING_DURATION,
-        util::{Lease, RegionReadProgress},
+        util::{ExpireLeaseReason, Lease, RegionReadProgress},
         BucketStatsInfo, Config, EntryStorage, ForceLeaderState, PeerStat, ProposalQueue,
         ReadDelegate, ReadIndexQueue, ReadProgress, TabletSnapManager, UnsafeRecoveryState,
         WriteTask,
@@ -292,7 +292,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         if self.region().get_region_epoch().get_version() < region.get_region_epoch().get_version()
         {
             // Epoch version changed, disable read on the local reader for this region.
-            self.leader_lease.expire_remote_lease();
+            self.leader_lease
+                .expire_remote_lease(ExpireLeaseReason::SetRegion);
         }
 
         self.storage_mut()

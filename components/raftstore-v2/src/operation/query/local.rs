@@ -669,8 +669,9 @@ mod tests {
     use kvproto::{kvrpcpb::ExtraOp as TxnExtraOp, metapb, raft_cmdpb::*};
     use pd_client::BucketMeta;
     use raftstore::store::{
-        util::Lease, worker_metrics::TLS_LOCAL_READ_METRICS, ReadCallback, ReadProgress,
-        RegionReadProgress, TrackVer, TxnExt,
+        util::{ExpireLeaseReason, Lease},
+        worker_metrics::TLS_LOCAL_READ_METRICS,
+        ReadCallback, ReadProgress, RegionReadProgress, TrackVer, TxnExt,
     };
     use slog::o;
     use tempfile::Builder;
@@ -924,7 +925,7 @@ mod tests {
         rx = ch_rx.recv().unwrap();
 
         // Case: Expire lease to make the local reader lease check fail.
-        lease.expire_remote_lease();
+        lease.expire_remote_lease(ExpireLeaseReason::SetRegion);
         let remote = lease.maybe_new_remote_lease(term6).unwrap();
         let meta = store_meta.clone();
         // Send what we want to do to mock raftstore

@@ -99,7 +99,7 @@ use crate::{
             UnsafeRecoveryFillOutReportSyncer, UnsafeRecoveryForceLeaderSyncer,
             UnsafeRecoveryState, UnsafeRecoveryWaitApplySyncer,
         },
-        util::{self, compare_region_epoch, KeysInfoFormatter, LeaseState},
+        util::{self, compare_region_epoch, ExpireLeaseReason, KeysInfoFormatter, LeaseState},
         worker::{
             Bucket, BucketRange, CleanupTask, ConsistencyCheckTask, GcSnapshotTask, RaftlogGcTask,
             ReadDelegate, ReadProgress, RegionTask, SplitCheckTask,
@@ -7100,7 +7100,10 @@ where
             region
         })());
         // Let the leader lease to None to ensure that local reads are not executed.
-        self.fsm.peer.leader_lease_mut().expire_remote_lease();
+        self.fsm
+            .peer
+            .leader_lease_mut()
+            .expire_remote_lease(ExpireLeaseReason::FlushBack);
         let mut pessimistic_locks = self.fsm.peer.txn_ext.pessimistic_locks.write();
         pessimistic_locks.status = if self.region().is_in_flashback {
             // To prevent the insertion of any new pessimistic locks, set the lock status

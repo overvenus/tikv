@@ -16,7 +16,7 @@ use raftstore::{
         msg::{ErrorCallback, ReadCallback},
         propose_read_index, should_renew_lease,
         simple_write::SimpleWriteEncoder,
-        util::{check_req_region_epoch, LeaseState},
+        util::{check_req_region_epoch, ExpireLeaseReason, LeaseState},
         InstrumentedMutex, ReadDelegate, ReadIndexRequest, ReadProgress, Transport,
     },
     Error, Result,
@@ -275,7 +275,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         &mut self,
         store_meta: &InstrumentedMutex<StoreMeta<EK>>,
     ) {
-        self.leader_lease_mut().expire();
+        self.leader_lease_mut()
+            .expire(ExpireLeaseReason::BecameFollower);
         let mut meta = store_meta.lock().unwrap();
         if let Some((reader, _)) = meta.readers.get_mut(&self.region_id()) {
             self.maybe_update_read_progress(reader, ReadProgress::unset_leader_lease());
@@ -308,7 +309,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 self.leader_lease(),
             );
             // The lease is expired, call `expire` explicitly.
-            self.leader_lease_mut().expire();
+            self.leader_lease_mut().expire(ExpireLeaseReason::Expired);
         }
         state
     }

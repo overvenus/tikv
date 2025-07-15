@@ -1013,10 +1013,13 @@ pub struct RaftPoller<EK: KvEngine + 'static, ER: RaftEngine + 'static, T: 'stat
 
 impl<EK: KvEngine, ER: RaftEngine, T: Transport> RaftPoller<EK, ER, T> {
     fn flush_events(&mut self) {
+        let sw = tikv_sync::StopWatch::end("flush_events");
         self.flush_ticks();
+        sw.lap();
         self.poll_ctx.raft_metrics.maybe_flush();
+        sw.lap();
         self.poll_ctx.store_stat.flush();
-
+        sw.lap();
         MEMTRACE_PEERS.trace(mem::take(&mut self.trace_event));
     }
 

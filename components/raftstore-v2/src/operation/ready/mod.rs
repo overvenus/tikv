@@ -45,7 +45,7 @@ use raftstore::{
         fsm::store::StoreRegionMeta,
         local_metrics::IoType,
         needs_evict_entry_cache,
-        util::{self, is_first_append_entry, is_initial_msg},
+        util::{self, is_first_append_entry, is_initial_msg, ExpireLeaseReason},
         worker_metrics::SNAP_COUNTER,
         FetchedLogs, ReadProgress, Transport, WriteCallback, WriteTask,
     },
@@ -674,7 +674,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             // network partition from the new leader.
             // For lease safety during leader transfer, transit `leader_lease`
             // to suspect.
-            self.leader_lease_mut().suspect(monotonic_raw_now());
+            self.leader_lease_mut()
+                .suspect(monotonic_raw_now(), ExpireLeaseReason::TransferLeader);
         }
         self.send_raft_message(ctx, msg)
     }
@@ -1178,7 +1179,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             // merges majority of this region, also it can not know when the target
             // region writes new values.
             // To prevent unsafe local read, we suspect its leader lease.
-            self.leader_lease_mut().suspect(monotonic_raw_now());
+            self.leader_lease_mut()
+                .suspect(monotonic_raw_now(), ExpireLeaseReason::RegionMerge);
             // Stop updating `safe_ts`
             self.read_progress_mut().discard();
         }

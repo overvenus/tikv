@@ -108,7 +108,7 @@ use crate::{
         snapshot_backup::{AbortReason, SnapshotBrState},
         txn_ext::LocksStatus,
         unsafe_recovery::{ForceLeaderState, UnsafeRecoveryState},
-        util::{admin_cmd_epoch_lookup, RegionReadProgress},
+        util::{admin_cmd_epoch_lookup, ExpireLeaseReason, RegionReadProgress},
         worker::{
             CleanupTask, CompactTask, HeartbeatTask, RaftlogGcTask, ReadDelegate, ReadExecutor,
             ReadProgress, RegionTask, SplitCheckTask,
@@ -1600,7 +1600,8 @@ where
         if self.region().get_region_epoch().get_version() < region.get_region_epoch().get_version()
         {
             // Epoch version changed, disable read on the local reader for this region.
-            self.leader_lease.expire_remote_lease();
+            self.leader_lease
+                .expire_remote_lease(ExpireLeaseReason::SetRegion);
         }
         self.mut_store().set_region(region.clone());
         let progress = ReadProgress::region(region);
@@ -1767,7 +1768,10 @@ where
                 // network partition from the new leader.
                 // For lease safety during leader transfer, transit `leader_lease`
                 // to suspect.
-                self.leader_lease.suspect(*now.insert(monotonic_raw_now()));
+                self.leader_lease.suspect(
+                    *now.insert(monotonic_raw_now()),
+                    ExpireLeaseReason::TransferLeader,
+                );
             }
 
             let to_peer_id = msg.get_to_peer().get_id();
@@ -2309,7 +2313,7 @@ where
                     }
                 }
                 StateRole::Follower => {
-                    self.leader_lease.expire();
+                    self.leader_lease.expire(ExpireLeaseReason::BecameFollower);
                     sw.lap();
                     self.mut_store().cancel_generating_snap(None);
                     self.clear_disk_full_peers(ctx);
@@ -2401,7 +2405,8 @@ where
                     // merges majority of this region, also it can not know when the target
                     // region writes new values.
                     // To prevent unsafe local read, we suspect its leader lease.
-                    self.leader_lease.suspect(monotonic_raw_now());
+                    self.leader_lease
+                        .suspect(monotonic_raw_now(), ExpireLeaseReason::RegionMerge);
                     // Stop updating `safe_ts`
                     self.read_progress.discard();
                 }
@@ -6048,7 +6053,7 @@ where
                 "lease" => ?self.leader_lease,
             );
             // The lease is expired, call `expire` explicitly.
-            self.leader_lease.expire();
+            self.leader_lease.expire(ExpireLeaseReason::Expired);
         }
         state
     }
