@@ -261,6 +261,51 @@ def P99() -> Dashboard:
     layout.row(
         [
             graph_panel(
+                title="Leader Lease Expire Reason",
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_leader_lease_expire_region_change",
+                        ),
+                        legend_format="region_change-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_leader_lease_expire_expired",
+                        ),
+                        legend_format="expired-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_leader_lease_expire_transfer_leader",
+                        ),
+                        legend_format="transfer_leader-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_leader_lease_expire_became_leader",
+                        ),
+                        legend_format="became_leader-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_leader_lease_expire_region_merge",
+                        ),
+                        legend_format="region_merge-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_leader_lease_expire_flash_back",
+                        ),
+                        legend_format="flash_back-{{instance}}",
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
                 title="Hibernate Peers",
                 description="The number of peers in hibernated state",
                 targets=[
