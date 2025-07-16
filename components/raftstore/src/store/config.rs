@@ -214,6 +214,8 @@ pub struct Config {
     // It will be set to raft_store_max_leader_lease/4 by default.
     pub renew_leader_lease_advance_duration: ReadableDuration,
 
+    pub leader_lease_keepalive_time: ReadableDuration,
+
     // Set true to allow handling request vote messages within one election time
     // after TiKV start.
     //
@@ -537,6 +539,7 @@ impl Default for Config {
             report_min_resolved_ts_interval: ReadableDuration::secs(1),
             check_leader_lease_interval: ReadableDuration::secs(0),
             renew_leader_lease_advance_duration: ReadableDuration::secs(0),
+            leader_lease_keepalive_time: ReadableDuration::secs(60),
             allow_unsafe_vote_after_start: false,
             report_region_buckets_tick_interval: ReadableDuration::secs(10),
             gc_peer_check_interval: ReadableDuration::secs(60),

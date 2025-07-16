@@ -6198,7 +6198,13 @@ where
     }
 
     fn on_check_leader_lease_tick(&mut self) {
-        if !self.fsm.peer.is_leader() || self.fsm.hibernate_state.group_state() == GroupState::Idle
+        if !self.fsm.peer.is_leader()
+            || (self.fsm.hibernate_state.group_state() == GroupState::Idle
+                && self
+                    .fsm
+                    .peer
+                    .leader_lease_keepalive_time
+                    .map_or(true, |deadline| Instant::now() > deadline))
         {
             return;
         }

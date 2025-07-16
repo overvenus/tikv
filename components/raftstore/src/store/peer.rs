@@ -727,6 +727,8 @@ where
     leader_missing_time: Option<Instant>,
     #[getset(get = "pub", get_mut = "pub")]
     leader_lease: Lease,
+    // The keep alive time is renewed when renew a expired leader lease.
+    pub leader_lease_keepalive_time: Option<Instant>,
     pending_reads: ReadIndexQueue<Callback<EK::Snapshot>>,
     /// Threshold of long uncommitted proposals.
     ///
@@ -1030,6 +1032,7 @@ where
                 cfg.raft_store_max_leader_lease(),
                 cfg.renew_leader_lease_advance_duration(),
             ),
+            leader_lease_keepalive_time: None,
             peer_stat: PeerStat::default(),
             catch_up_logs: None,
             bcast_wake_up_time: None,
@@ -3735,9 +3738,13 @@ where
         } else {
             self.leader_lease.renew(ts);
             let term = self.term();
-            self.leader_lease
-                .maybe_new_remote_lease(term)
-                .map(ReadProgress::set_leader_lease)
+            if let Some(remote_lease) = self.leader_lease.maybe_new_remote_lease(term) {
+                self.leader_lease_keepalive_time =
+                    Some(Instant::now() + ctx.cfg.leader_lease_keepalive_time.0);
+                Some(ReadProgress::set_leader_lease(remote_lease))
+            } else {
+                None
+            }
         };
         if let Some(progress) = progress {
             let mut meta = ctx.store_meta.lock().unwrap();
