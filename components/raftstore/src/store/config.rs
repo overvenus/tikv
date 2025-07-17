@@ -539,7 +539,7 @@ impl Default for Config {
             report_min_resolved_ts_interval: ReadableDuration::secs(1),
             check_leader_lease_interval: ReadableDuration::secs(0),
             renew_leader_lease_advance_duration: ReadableDuration::secs(0),
-            leader_lease_keepalive_time: ReadableDuration::secs(60),
+            leader_lease_keepalive_time: ReadableDuration::secs(0),
             allow_unsafe_vote_after_start: false,
             report_region_buckets_tick_interval: ReadableDuration::secs(10),
             gc_peer_check_interval: ReadableDuration::secs(60),
