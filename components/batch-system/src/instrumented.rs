@@ -37,6 +37,7 @@ impl<'a, K: 'a + Eq + Hash, V: 'a> InstrumentedDashMap<K, V, RandomState> {
     }
 }
 
+#[cfg(skip)]
 #[track_caller]
 fn instrument<F, Out, K>(f: F, key: Option<K>, method: &str) -> Out
 where
@@ -58,6 +59,14 @@ where
         );
     }
     result
+}
+
+fn instrument<F, Out, K>(f: F, _key: Option<K>, _method: &str) -> Out
+where
+    F: FnOnce() -> Out,
+    K: Debug,
+{
+    f()
 }
 
 impl<'a, K: 'a + Eq + Hash + Debug + Copy, V: 'a, S: BuildHasher + Clone>
