@@ -10,8 +10,8 @@ use tikv_util::time::Instant;
 use tracker::{Tracker, TrackerToken, GLOBAL_TRACKERS};
 
 use crate::{
-    perf_context_metrics::*, set_perf_flags, set_perf_level, util, PerfContext as RawPerfContext,
-    PerfFlag, PerfFlags,
+    perf_context_metrics::*, set_perf_flags, set_perf_level, util,
+    IOStatsContext as RawIoStatsContext, PerfContext as RawPerfContext, PerfFlag, PerfFlags,
 };
 
 macro_rules! report_write_perf_context {
@@ -79,6 +79,9 @@ lazy_static! {
         | PerfFlag::BloomFilterFullPositive
         | PerfFlag::BloomFilterUseful
         | PerfFlag::BloomFilterFullTruePositive
+        | PerfFlag::OpenNanos
+        | PerfFlag::ReadNanos
+        // | PerfFlag::CpuReadNanos
         | PerfFlag::BytesRead;
 }
 
@@ -157,12 +160,27 @@ pub struct WritePerfContext {
     pub write_delay_time: u64,
 }
 
+#[derive(Default, Debug, Clone, Copy, Add, AddAssign, Sub, SubAssign, KV)]
+pub struct IoContext {
+    pub bytes_written: u64,
+    pub bytes_read: u64,
+    pub open_nanos: u64,
+    pub allocate_nanos: u64,
+    pub write_nanos: u64,
+    pub read_nanos: u64,
+    pub range_sync_nanos: u64,
+    pub fsync_nanos: u64,
+    pub prepare_write_nanos: u64,
+    pub logger_nanos: u64,
+}
+
 #[derive(Debug)]
 pub struct PerfContextStatistics {
     perf_level: PerfLevel,
     kind: PerfContextKind,
     read: ReadPerfContext,
     write: WritePerfContext,
+    io_stats: IoContext,
     last_flush_time: Instant,
 }
 
@@ -177,6 +195,7 @@ impl PerfContextStatistics {
             kind,
             read: Default::default(),
             write: Default::default(),
+            io_stats: Default::default(),
             last_flush_time: Instant::now_coarse(),
         }
     }
@@ -202,6 +221,8 @@ impl PerfContextStatistics {
         }
         let mut ctx = RawPerfContext::get();
         ctx.reset();
+        let mut io_ctx = RawIoStatsContext::get();
+        io_ctx.reset();
         self.apply_perf_settings();
     }
 
@@ -231,10 +252,12 @@ impl PerfContextStatistics {
             }
             PerfContextKind::Storage(_) | PerfContextKind::Coprocessor(_) => {
                 let perf_context = ReadPerfContext::capture();
+                let io_context = IoContext::capture();
                 for token in trackers {
                     GLOBAL_TRACKERS.with_tracker(*token, |t| perf_context.report_to_tracker(t));
                 }
                 self.read += perf_context;
+                self.io_stats += io_context;
                 self.flush_read_metrics();
             }
         }
@@ -246,11 +269,21 @@ impl PerfContextStatistics {
         }
         self.last_flush_time = Instant::now_coarse();
         let ctx = mem::take(&mut self.read);
+        let io_ctx = mem::take(&mut self.io_stats);
         let (v, tag) = match self.kind {
             PerfContextKind::Storage(tag) => (&*STORAGE_ROCKSDB_PERF_COUNTER, tag),
             PerfContextKind::Coprocessor(tag) => (&*COPR_ROCKSDB_PERF_COUNTER, tag),
             _ => unreachable!(),
         };
+        v.get_metric_with_label_values(&[tag, "bytes_read"])
+            .unwrap()
+            .inc_by(io_ctx.bytes_read);
+        v.get_metric_with_label_values(&[tag, "open_nanos"])
+            .unwrap()
+            .inc_by(io_ctx.open_nanos);
+        v.get_metric_with_label_values(&[tag, "read_nanos"])
+            .unwrap()
+            .inc_by(io_ctx.read_nanos);
         v.get_metric_with_label_values(&[tag, "user_key_comparison_count"])
             .unwrap()
             .inc_by(ctx.user_key_comparison_count);
@@ -516,6 +549,24 @@ impl PerfContextFields for WritePerfContext {
                 .write_scheduling_flushes_compactions_time(),
             db_condition_wait_nanos: perf_context.db_condition_wait_nanos(),
             write_delay_time: perf_context.write_delay_time(),
+        }
+    }
+}
+
+impl PerfContextFields for IoContext {
+    fn capture() -> Self {
+        let io_stats_context = RawIoStatsContext::get();
+        IoContext {
+            bytes_written: io_stats_context.bytes_written(),
+            bytes_read: io_stats_context.bytes_read(),
+            open_nanos: io_stats_context.open_nanos(),
+            allocate_nanos: io_stats_context.allocate_nanos(),
+            write_nanos: io_stats_context.write_nanos(),
+            read_nanos: io_stats_context.read_nanos(),
+            range_sync_nanos: io_stats_context.range_sync_nanos(),
+            fsync_nanos: io_stats_context.fsync_nanos(),
+            prepare_write_nanos: io_stats_context.prepare_write_nanos(),
+            logger_nanos: io_stats_context.logger_nanos(),
         }
     }
 }
