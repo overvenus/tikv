@@ -5,6 +5,8 @@ use std::{
     time::Duration,
 };
 
+mod metrics;
+
 trait InstantExt {
     fn saturating_elapsed(&self) -> Duration;
 }
@@ -19,17 +21,21 @@ impl InstantExt for std::time::Instant {
 // #[derive(Eq, Hash, PartialEq, Debug)]
 pub struct InstrumentedMutex<T> {
     inner: Mutex<T>,
+
+    acquire_histogram: Histogram,
+    hold_histogram: Histogram,
 }
 
 impl<T> InstrumentedMutex<T> {
-    pub fn new(inner: T) -> Self {
+    pub fn new(inner: T, name: &str) -> Self {
         InstrumentedMutex {
             inner: Mutex::new(inner),
+            acquire_histogram: metrics::MUTEX_ACQUIRE_HISTOGRAM.with_label_values(&[name]),
+            hold_histogram: metrics::MUTEX_HOLD_HISTOGRAM.with_label_values(&[name]),
         }
     }
 }
 
-#[cfg(skip)]
 mod trace {
     use super::*;
 
@@ -47,10 +53,12 @@ mod trace {
                     "location" => %caller,
                 );
             }
+            self.acquire_histogram.observe(elapsed.as_nanos() as f64);
             Ok(MutexGuard {
                 guard,
                 location: caller,
                 start: std::time::Instant::now(),
+                hold_histogram: &self.hold_histogram,
             })
         }
     }
@@ -59,12 +67,14 @@ mod trace {
         pub(super) guard: std::sync::MutexGuard<'a, T>,
         location: &'a Location<'a>,
         start: std::time::Instant,
+        hold_histogram: &'a Histogram,
     }
 
     impl<T: ?Sized> Drop for MutexGuard<'_, T> {
         #[inline]
         fn drop(&mut self) {
             let elapsed = self.start.saturating_elapsed();
+            self.hold_histogram.observe(elapsed.as_nanos() as f64);
             if elapsed.as_millis() > 2 {
                 slog_global::warn!(
                     "dbg mutex lock hold too long";
@@ -75,9 +85,10 @@ mod trace {
         }
     }
 }
-#[cfg(skip)]
+use prometheus::Histogram;
 pub use trace::MutexGuard;
 
+#[cfg(skip)]
 mod no_trace {
     use super::*;
 
@@ -92,6 +103,7 @@ mod no_trace {
         pub(super) guard: std::sync::MutexGuard<'a, T>,
     }
 }
+#[cfg(skip)]
 pub use no_trace::MutexGuard;
 
 impl<T: ?Sized> Deref for MutexGuard<'_, T> {

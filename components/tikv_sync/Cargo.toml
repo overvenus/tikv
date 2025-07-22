@@ -7,3 +7,5 @@ publish = false
 [dependencies]
 slog = { workspace = true }
 slog-global = { workspace = true }
+prometheus = { version = "0.13", features = ["nightly"] }
+lazy_static = "1.3"
