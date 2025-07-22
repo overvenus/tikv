@@ -2791,7 +2791,7 @@ mod tests {
                     Duration::default(),
                     WrappedScheduler(scheduler),
                 );
-                let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
+                let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0), "test"));
                 let region_read_progress = store_meta.lock().unwrap().region_read_progress.clone();
                 if let Err(e) = stats_monitor.start(
                     AutoSplitController::default(),
@@ -3045,7 +3045,7 @@ mod tests {
             Duration::default(),
             WrappedScheduler(pd_worker.scheduler()),
         );
-        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0), "test"));
         let region_read_progress = store_meta.lock().unwrap().region_read_progress.clone();
         stats_monitor
             .start(

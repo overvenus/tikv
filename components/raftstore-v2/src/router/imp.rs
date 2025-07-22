@@ -141,7 +141,10 @@ where
 
 impl<EK: KvEngine, ER: RaftEngine> RaftRouter<EK, ER> {
     pub fn new(store_id: u64, router: StoreRouter<EK, ER>) -> Self {
-        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(store_id)));
+        let store_meta = Arc::new(InstrumentedMutex::new(
+            StoreMeta::new(store_id),
+            "store_meta",
+        ));
 
         let logger = router.logger().clone();
         RaftRouter {

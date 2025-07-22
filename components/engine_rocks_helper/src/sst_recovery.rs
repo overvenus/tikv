@@ -250,7 +250,7 @@ mod tests {
         add_region_to_store_meta(&mut store_meta, 4, b"7".to_vec());
         add_region_to_store_meta(&mut store_meta, 5, b"8".to_vec());
 
-        let meta = Arc::new(InstrumentedMutex::new(store_meta));
+        let meta = Arc::new(InstrumentedMutex::new(store_meta, "test"));
         let runner = RecoveryRunner::new(
             db,
             meta.clone(),

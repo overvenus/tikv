@@ -290,7 +290,10 @@ impl<T: Simulator> Cluster<T> {
 
             let engines = self.dbs.last().unwrap().clone();
             let key_mgr = self.key_managers.last().unwrap().clone();
-            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(PENDING_MSG_CAP)));
+            let store_meta = Arc::new(InstrumentedMutex::new(
+                StoreMeta::new(PENDING_MSG_CAP),
+                "test",
+            ));
 
             let props = GroupProperties::default();
             tikv_util::thread_group::set_properties(Some(props.clone()));
@@ -369,9 +372,10 @@ impl<T: Simulator> Cluster<T> {
                 o.get().clone()
             }
             MapEntry::Vacant(v) => v
-                .insert(Arc::new(InstrumentedMutex::new(StoreMeta::new(
-                    PENDING_MSG_CAP,
-                ))))
+                .insert(Arc::new(InstrumentedMutex::new(
+                    StoreMeta::new(PENDING_MSG_CAP),
+                    "test",
+                )))
                 .clone(),
         };
         let props = GroupProperties::default();
@@ -670,7 +674,10 @@ impl<T: Simulator> Cluster<T> {
         for (i, engines) in self.dbs.iter().enumerate() {
             let id = i as u64 + 1;
             self.engines.insert(id, engines.clone());
-            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(PENDING_MSG_CAP)));
+            let store_meta = Arc::new(InstrumentedMutex::new(
+                StoreMeta::new(PENDING_MSG_CAP),
+                "test",
+            ));
             self.store_metas.insert(id, store_meta);
             self.key_managers_map
                 .insert(id, self.key_managers[i].clone());
@@ -704,7 +711,10 @@ impl<T: Simulator> Cluster<T> {
         for (i, engines) in self.dbs.iter().enumerate() {
             let id = i as u64 + 1;
             self.engines.insert(id, engines.clone());
-            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(PENDING_MSG_CAP)));
+            let store_meta = Arc::new(InstrumentedMutex::new(
+                StoreMeta::new(PENDING_MSG_CAP),
+                "test",
+            ));
             self.store_metas.insert(id, store_meta);
             self.key_managers_map
                 .insert(id, self.key_managers[i].clone());

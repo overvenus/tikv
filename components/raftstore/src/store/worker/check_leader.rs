@@ -170,7 +170,7 @@ mod tests {
             kr
         }
 
-        let meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
+        let meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0), "test"));
         let coprocessor_host = CoprocessorHost::<KvTestEngine>::default();
         let runner = Runner::new(meta.clone(), coprocessor_host);
         assert_eq!(0, runner.get_range_safe_ts(key_range(b"", b"")));

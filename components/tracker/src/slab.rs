@@ -36,10 +36,10 @@ pub struct ShardedSlab {
 impl ShardedSlab {
     pub fn new(capacity_per_shard: usize) -> ShardedSlab {
         let shards = array::from_fn(|shard_id| {
-            CachePadded::new(InstrumentedMutex::new(TrackerSlab::with_capacity(
-                shard_id as u32,
-                capacity_per_shard,
-            )))
+            CachePadded::new(InstrumentedMutex::new(
+                TrackerSlab::with_capacity(shard_id as u32, capacity_per_shard),
+                "global_trackers",
+            ))
         });
         ShardedSlab { shards }
     }

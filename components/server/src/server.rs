@@ -480,7 +480,10 @@ where
     }
 
     fn init_engines(&mut self, engines: Engines<RocksEngine, ER>) {
-        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(PENDING_MSG_CAP)));
+        let store_meta = Arc::new(InstrumentedMutex::new(
+            StoreMeta::new(PENDING_MSG_CAP),
+            "store_meta",
+        ));
         let engine = RaftKv::new(
             ServerRaftStoreRouter::new(
                 self.router.clone(),

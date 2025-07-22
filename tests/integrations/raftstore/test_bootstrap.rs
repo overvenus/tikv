@@ -116,7 +116,7 @@ fn test_node_bootstrap_with_prepared_data() {
         simulate_trans,
         snap_mgr,
         pd_worker,
-        Arc::new(InstrumentedMutex::new(StoreMeta::new(0))),
+        Arc::new(InstrumentedMutex::new(StoreMeta::new(0), "test")),
         coprocessor_host,
         importer,
         split_check_scheduler,

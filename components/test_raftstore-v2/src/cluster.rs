@@ -511,7 +511,7 @@ impl<T: Simulator<EK>, EK: KvEngine> Cluster<T, EK> {
             let (tablet_registry, raft_engine) = self.engines.last().unwrap().clone();
 
             let key_mgr = self.key_managers.last().unwrap().clone();
-            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(id)));
+            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(id), "test"));
 
             let props = GroupProperties::default();
             tikv_util::thread_group::set_properties(Some(props.clone()));
@@ -556,7 +556,10 @@ impl<T: Simulator<EK>, EK: KvEngine> Cluster<T, EK> {
                 o.get().clone()
             }
             MapEntry::Vacant(v) => v
-                .insert(Arc::new(InstrumentedMutex::new(StoreMeta::new(node_id))))
+                .insert(Arc::new(InstrumentedMutex::new(
+                    StoreMeta::new(node_id),
+                    "test",
+                )))
                 .clone(),
         };
 
@@ -628,7 +631,7 @@ impl<T: Simulator<EK>, EK: KvEngine> Cluster<T, EK> {
             let id = i as u64 + 1;
             self.tablet_registries.insert(id, tablet_registry.clone());
             self.raft_engines.insert(id, raft_engine.clone());
-            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(id)));
+            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(id), "test"));
             self.store_metas.insert(id, store_meta);
             self.key_managers_map
                 .insert(id, self.key_managers[i].clone());
@@ -664,7 +667,7 @@ impl<T: Simulator<EK>, EK: KvEngine> Cluster<T, EK> {
             let id = i as u64 + 1;
             self.tablet_registries.insert(id, tablet_registry.clone());
             self.raft_engines.insert(id, raft_engine.clone());
-            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(id)));
+            let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(id), "test"));
             self.store_metas.insert(id, store_meta);
             self.key_managers_map
                 .insert(id, self.key_managers[i].clone());

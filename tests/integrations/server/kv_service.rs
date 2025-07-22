@@ -1397,7 +1397,7 @@ fn test_double_run_node() {
     };
     let (split_check_scheduler, _) = dummy_scheduler();
 
-    let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(20)));
+    let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(20), "test"));
     let e = node
         .start(
             engines,

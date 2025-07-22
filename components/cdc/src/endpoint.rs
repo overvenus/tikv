@@ -1551,7 +1551,7 @@ mod tests {
                     .unwrap()
             })),
             CdcObserver::new(task_sched),
-            Arc::new(InstrumentedMutex::new(store_meta)),
+            Arc::new(InstrumentedMutex::new(store_meta, "test")),
             ConcurrencyManager::new(1.into()),
             env,
             security_mgr,

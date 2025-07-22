@@ -1467,7 +1467,7 @@ mod tests {
     #[test]
     fn test_read() {
         let store_id = 2;
-        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0), "test"));
         let (_tmp, mut reader, rx) = new_reader("test-local-reader", store_id, store_meta.clone());
 
         // region: 1,
@@ -1809,7 +1809,7 @@ mod tests {
     #[test]
     fn test_read_delegate_cache_update() {
         let store_id = 2;
-        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0), "test"));
         let (_tmp, mut reader, _) = new_reader("test-local-reader", store_id, store_meta.clone());
         let mut region = metapb::Region::default();
         region.set_id(1);
@@ -1890,7 +1890,7 @@ mod tests {
         let kv_engine =
             engine_test::kv::new_engine(path.path().to_str().unwrap(), ALL_CFS).unwrap();
         let store_meta = StoreMetaDelegate::new(
-            Arc::new(InstrumentedMutex::new(StoreMeta::new(0))),
+            Arc::new(InstrumentedMutex::new(StoreMeta::new(0), "test")),
             kv_engine.clone(),
         );
 
@@ -1989,7 +1989,7 @@ mod tests {
     #[test]
     fn test_snap_across_regions() {
         let store_id = 2;
-        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0), "test"));
         let (_tmp, mut reader, rx) = new_reader("test-local-reader", store_id, store_meta.clone());
 
         let epoch13 = {
@@ -2166,7 +2166,7 @@ mod tests {
     #[test]
     fn test_snap_release_for_not_using_cache() {
         let store_id = 2;
-        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0), "test"));
         let (_tmp, mut reader, rx) = new_reader("test-local-reader", store_id, store_meta.clone());
         reader.kv_engine.put(b"key", b"value").unwrap();
 
@@ -2257,7 +2257,7 @@ mod tests {
     #[test]
     fn test_stale_read_notify() {
         let store_id = 2;
-        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0), "test"));
         let (_tmp, mut reader, rx) = new_reader("test-local-reader", store_id, store_meta.clone());
         reader.kv_engine.put(b"key", b"value").unwrap();
 
@@ -2357,7 +2357,7 @@ mod tests {
     #[test]
     fn test_stale_read_local_leader_fallback() {
         let store_id = 2;
-        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(0), "test"));
         let (_tmp, mut reader, rx) = new_reader(
             "test-stale-local-leader-fallback",
             store_id,

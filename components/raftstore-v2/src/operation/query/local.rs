@@ -795,7 +795,7 @@ mod tests {
         let factory = Box::new(TestTabletFactory::new(ops, cf_opts));
         let reg = TabletRegistry::new(factory, path.path()).unwrap();
 
-        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(store_id)));
+        let store_meta = Arc::new(InstrumentedMutex::new(StoreMeta::new(store_id), "test"));
         let addresses: Arc<Mutex<HashSet<u64>>> = Arc::default();
         let (mut reader, mut rx) = new_reader(store_id, store_meta.clone(), addresses.clone());
         let (mix_tx, mix_rx) = sync_channel(1);
@@ -1026,7 +1026,7 @@ mod tests {
         let reg = TabletRegistry::new(factory, path.path()).unwrap();
 
         let store_meta =
-            StoreMetaDelegate::new(Arc::new(InstrumentedMutex::new(StoreMeta::new(1))));
+            StoreMetaDelegate::new(Arc::new(InstrumentedMutex::new(StoreMeta::new(1), "test")));
 
         let tablet1;
         let tablet2;
