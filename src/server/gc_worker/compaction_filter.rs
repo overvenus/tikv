@@ -550,9 +550,9 @@ impl WriteCompactionFilter {
         Ok(())
     }
 
-    fn flush_pending_writes_if_need(&mut self, force: bool) -> Result<(), engine_traits::Error> {
+    fn flush_pending_writes_if_need(&mut self, force: bool) -> Result<bool, engine_traits::Error> {
         if self.write_batch.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
 
         fn do_flush(
@@ -608,7 +608,7 @@ impl WriteCompactionFilter {
                     match do_flush(wb, &wopts) {
                         Ok(()) => {
                             wb.clear();
-                            return Ok(());
+                            return Ok(true);
                         }
                         Err(e) => Some(e),
                     }
@@ -636,7 +636,7 @@ impl WriteCompactionFilter {
                 return Err(err);
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn switch_key_metrics(&mut self) {
@@ -722,11 +722,19 @@ impl Drop for WriteCompactionFilter {
         }
         self.gc_mvcc_deletions();
 
-        if let Err(e) = self.flush_pending_writes_if_need(true) {
-            error!("compaction filter flush writes fail"; "err" => ?e);
-        }
-        if let Some(engine) = &self.engine {
-            engine.sync_wal().unwrap();
+        match self.flush_pending_writes_if_need(true) {
+            Ok(flushed) => {
+                if flushed {
+                    if let Some(engine) = &self.engine {
+                        // If the write batch is flushed, sync the WAL to ensure that
+                        // the writes are durable.
+                        engine.sync_wal().unwrap();
+                    }
+                }
+            }
+            Err(e) => {
+                error!("compaction filter flush writes fail"; "err" => ?e);
+            }
         }
 
         self.switch_key_metrics();
