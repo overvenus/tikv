@@ -382,6 +382,83 @@ def P99() -> Dashboard:
         ]
     )
     layout.row(
+        [
+            graph_panel(
+                title="Store writer CPU + IO",
+                description="The CPU utilization and IO utilization of store writer thread",
+                yaxes=yaxes(left_format=UNITS.PERCENT_UNIT),
+                stack=True,
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_thread_cpu_seconds_total",
+                            label_selectors=['name=~"store_write.*"'],
+                        ),
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "raft_engine_write_leader_duration_seconds_sum",
+                        ),
+                        legend_format="{{instance}}-raft-io",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_store_write_kvdb_duration_seconds_sum",
+                        ),
+                        legend_format="{{instance}}-kv-io",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Mutex acquire and hold duration per second",
+                yaxes=yaxes(left_format=UNITS.NANO_SECONDS),
+                stack=True,
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_sync_instrumented_mutex_acquire_nanoseconds_sum",
+                            by_labels=["name"],
+                        ),
+                        legend_format="{{name}}-acquire",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_sync_instrumented_mutex_hold_nanoseconds_sum",
+                            by_labels=["name"],
+                        ),
+                        legend_format="{{name}}-hold",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Store meta mutex acquire duration",
+            heatmap_description="The wait time of store meta mutex acquire",
+            graph_title="99% Store meta mutex acquire duration per server",
+            graph_description="The wait time of store meta mutex acquire in each TiKV instance",
+            graph_by_labels=["instance"],
+            graph_hides=["count", "avg"],
+            yaxis_format=UNITS.NANO_SECONDS,
+            metric="tikv_sync_instrumented_mutex_acquire_nanoseconds",
+        )
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Store meta mutex hold duration",
+            heatmap_description="The wait time of store meta mutex hold",
+            graph_title="99% Store meta mutex hold duration per server",
+            graph_description="The wait time of store meta mutex hold in each TiKV instance",
+            graph_by_labels=["instance"],
+            graph_hides=["count", "avg"],
+            yaxis_format=UNITS.NANO_SECONDS,
+            metric="tikv_sync_instrumented_mutex_hold_nanoseconds",
+        )
+    )
+    layout.row(
         heatmap_panel_graph_panel_histogram_quantile_pairs(
             heatmap_title="Propose wait duration",
             heatmap_description="The wait time of each proposal",
