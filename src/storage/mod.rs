@@ -97,7 +97,7 @@ use tikv_util::{
     deadline::Deadline,
     future::try_poll,
     quota_limiter::QuotaLimiter,
-    time::{duration_to_ms, duration_to_sec, Instant, ThreadReadId},
+    time::{duration_to_ms, duration_to_sec, Instant, Limiter, ThreadReadId},
 };
 use tokio::sync::Semaphore;
 use tracker::{
@@ -214,7 +214,7 @@ pub struct Storage<E: Engine, L: LockManager, F: KvFormat> {
     quota_limiter: Arc<QuotaLimiter>,
     resource_manager: Option<Arc<ResourceGroupManager>>,
 
-    scan_lock_concurrency_semaphore: Arc<Semaphore>,
+    scan_lock_rate_limiter: Limiter,
     _phantom: PhantomData<F>,
 }
 
@@ -239,7 +239,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Clone for Storage<E, L, F> {
             resource_tag_factory: self.resource_tag_factory.clone(),
             quota_limiter: self.quota_limiter.clone(),
             resource_manager: self.resource_manager.clone(),
-            scan_lock_concurrency_semaphore: self.scan_lock_concurrency_semaphore.clone(),
+            scan_lock_rate_limiter: self.scan_lock_rate_limiter.clone(),
             _phantom: PhantomData,
         }
     }
@@ -279,6 +279,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         causal_ts_provider: Option<Arc<CausalTsProviderImpl>>,
         resource_ctl: Option<Arc<ResourceController>>,
         resource_manager: Option<Arc<ResourceGroupManager>>,
+        scan_lock_rate_limiter: Limiter,
     ) -> Result<Self> {
         assert_eq!(config.api_version(), F::TAG, "Api version not match");
 
@@ -298,15 +299,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             resource_manager.clone(),
         );
 
-        // TiDB sets scan lock concurrency to the number of alive
-        // TiKV nodes[^1] which means it tends to scan lock 1 region at a time
-        // for each TiKV nodes.
-        //
-        // We harden the limit by setting a concurrency semaphore.
-        //
-        // [^1]: https://github.com/pingcap/tidb/blob/v8.5.0/pkg/store/gcworker/gc_worker.go#L603-L639
-        let scan_lock_concurrency_semaphore = Arc::new(Semaphore::new(1));
-
         info!("Storage started.");
 
         Ok(Storage {
@@ -321,7 +313,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             resource_tag_factory,
             quota_limiter,
             resource_manager,
-            scan_lock_concurrency_semaphore,
+            scan_lock_rate_limiter,
             _phantom: PhantomData,
         })
     }
@@ -1386,13 +1378,14 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             )],
         );
         let concurrency_manager = self.concurrency_manager.clone();
-        let scan_lock_concurrency_semaphore = self.scan_lock_concurrency_semaphore.clone();
+        let scan_lock_rate_limiter = self.scan_lock_rate_limiter.clone();
         // Do not allow replica read for scan_lock.
         ctx.set_replica_read(false);
 
         let res = self.read_pool.spawn_handle(
             async move {
-                let scan_lock_permit = scan_lock_concurrency_semaphore.acquire_owned();
+                scan_lock_rate_limiter.consume(1).await;
+
                 if let Some(start_key) = &start_key {
                     let end_key = match &end_key {
                         Some(k) => k.as_encoded().as_slice(),
@@ -1501,7 +1494,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         now.saturating_duration_since(command_duration),
                     ));
 
-                    drop(scan_lock_permit);
                     Ok(locks)
                 })
             }
@@ -3388,6 +3380,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> TestStorageBuilder<E, L, F> {
             ts_provider,
             Some(resource_ctl),
             Some(manager),
+            Limiter::new(f64::INFINITY),
         )
     }
 
@@ -3421,6 +3414,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> TestStorageBuilder<E, L, F> {
             None,
             Some(resource_ctl),
             Some(manager),
+            Limiter::new(f64::INFINITY),
         )
     }
 
@@ -3457,6 +3451,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> TestStorageBuilder<E, L, F> {
             None,
             Some(resource_controller),
             Some(resource_manager),
+            Limiter::new(f64::INFINITY),
         )
     }
 }

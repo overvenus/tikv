@@ -40,7 +40,7 @@ use engine_traits::{
     CF_DEFAULT, CF_WRITE,
 };
 use file_system::{get_io_rate_limiter, BytesFetcher, MetricsManager as IoMetricsManager};
-use futures::executor::block_on;
+use futures::{executor::block_on, future};
 use grpcio::{EnvBuilder, Environment};
 use grpcio_health::HealthService;
 use hyper::{Body, Request};
@@ -121,7 +121,7 @@ use tikv_util::{
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
     sys::{disk, path_in_diff_mount_point, register_memory_usage_high_water, SysQuota},
     thread_group::GroupProperties,
-    time::{Instant, Monitor},
+    time::{Instant, Limiter, Monitor},
     worker::{Builder as WorkerBuilder, LazyWorker, Scheduler, Worker},
     yatp_pool::CleanupMethod,
     Either,
@@ -161,6 +161,7 @@ fn run_impl<CER: ConfiguredRaftEngine, F: KvFormat>(
     let (engines, engines_info) = tikv.init_raw_engines(listener);
     tikv.init_engines(engines.clone());
     let server_config = tikv.init_servers();
+    tikv.init_scan_lock_rate_limit_updater();
     tikv.register_services();
     tikv.init_metrics_flusher(fetcher, engines_info);
     tikv.init_storage_stats_task(engines.clone());
@@ -274,6 +275,7 @@ struct TikvServer<ER: RaftEngine, F: KvFormat> {
     sst_worker: Option<Box<LazyWorker<String>>>,
     quota_limiter: Arc<QuotaLimiter>,
     resource_manager: Option<Arc<ResourceGroupManager>>,
+    scan_lock_rate_limiter: tikv_util::time::Limiter, // used for scan lock
     causal_ts_provider: Option<Arc<CausalTsProviderImpl>>, // used for rawkv apiv2
     tablet_registry: Option<TabletRegistry<RocksEngine>>,
     br_snap_recovery_mode: bool, // use for br snapshot recovery
@@ -440,6 +442,8 @@ where
         // and crucial to TiCDC replication lag.
         let check_leader_worker = WorkerBuilder::new("check-leader").thread_count(1).create();
 
+        let scan_lock_rate_limiter = Limiter::new(f64::INFINITY);
+
         TikvServer {
             core: TikvServerCore {
                 config,
@@ -470,6 +474,7 @@ where
             sst_worker: None,
             quota_limiter,
             resource_manager,
+            scan_lock_rate_limiter,
             causal_ts_provider,
             tablet_registry: None,
             br_snap_recovery_mode: is_recovering_marked,
@@ -686,6 +691,7 @@ where
                 .as_ref()
                 .map(|m| m.derive_controller("scheduler-worker-pool".to_owned(), true)),
             self.resource_manager.clone(),
+            self.scan_lock_rate_limiter.clone(),
         )
         .unwrap_or_else(|e| fatal!("failed to create raft storage: {}", e));
         cfg_controller.register(
@@ -1153,6 +1159,33 @@ where
                     }
                 }
             });
+    }
+
+    fn init_scan_lock_rate_limit_updater(&self) {
+        let scan_lock_update_interval = Duration::from_secs(60);
+        let region_info_accessor = self.region_info_accessor.clone();
+        let scan_lock_rate_limiter = self.scan_lock_rate_limiter.clone();
+        let config_controller = self.cfg_controller.as_ref().unwrap().clone();
+
+        self.core.background_worker.spawn_interval_async_task(
+            scan_lock_update_interval,
+            move || {
+                let leader_count = match region_info_accessor.region_leaders().read() {
+                    Ok(leaders) => leaders.len(),
+                    Err(e) => {
+                        warn!("failed to get region leaders for scan lock rate limit update");
+                        return future::ready(());
+                    }
+                };
+                let smooth_period = config_controller
+                    .get_current()
+                    .storage
+                    .scan_lock_smooth_rate_period;
+                let scan_lock_ops = (leader_count as f64 / smooth_period.as_secs_f64()).max(10.0);
+                scan_lock_rate_limiter.set_speed_limit(scan_lock_ops);
+                future::ready(())
+            },
+        );
     }
 
     fn register_services(&mut self) {
