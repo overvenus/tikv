@@ -578,6 +578,11 @@ where
             self.resource_manager.clone(),
         )
         .unwrap_or_else(|e| fatal!("failed to create raft storage: {}", e));
+        storage.init_scan_lock_rate_limit_updater(
+            &self.core.background_worker,
+            self.region_info_accessor.clone().unwrap(),
+            cfg_controller.clone(),
+        );
         cfg_controller.register(
             tikv::config::Module::Storage,
             Box::new(StorageConfigManger::new(

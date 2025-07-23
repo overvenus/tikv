@@ -88,7 +88,10 @@ use kvproto::{
     pdpb::QueryKind,
 };
 use pd_client::FeatureGate;
-use raftstore::store::{util::build_key_range, ReadStats, TxnExt, WriteStats};
+use raftstore::{
+    store::{util::build_key_range, ReadStats, TxnExt, WriteStats},
+    RegionInfoAccessor,
+};
 use rand::prelude::*;
 use resource_control::{ResourceController, ResourceGroupManager, ResourceLimiter, TaskMetadata};
 use resource_metering::{FutureExt, ResourceTagFactory};
@@ -97,7 +100,8 @@ use tikv_util::{
     deadline::Deadline,
     future::try_poll,
     quota_limiter::QuotaLimiter,
-    time::{duration_to_ms, duration_to_sec, Instant, ThreadReadId},
+    time::{duration_to_ms, duration_to_sec, Instant, InstantExt, Limiter, ThreadReadId},
+    worker::Worker,
 };
 use tokio::sync::Semaphore;
 use tracker::{
@@ -121,6 +125,7 @@ pub use self::{
 };
 use self::{kv::SnapContext, test_util::latest_feature_gate};
 use crate::{
+    config::ConfigController,
     read_pool::{ReadPool, ReadPoolHandle},
     server::lock_manager::waiter_manager,
     storage::{
@@ -138,6 +143,10 @@ use crate::{
         types::StorageCallbackType,
     },
 };
+
+const SCAN_LOCK_RATE_LIMIT_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
+// The minimum scan lock rate limit, 50 requests per second.
+const MIN_SCAN_LOCK_RATE_LIMIT: f64 = 50.0;
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub type Callback<T> = Box<dyn FnOnce(Result<T>) + Send>;
@@ -214,7 +223,8 @@ pub struct Storage<E: Engine, L: LockManager, F: KvFormat> {
     quota_limiter: Arc<QuotaLimiter>,
     resource_manager: Option<Arc<ResourceGroupManager>>,
 
-    scan_lock_concurrency_semaphore: Arc<Semaphore>,
+    scan_lock_rate_limiter: Limiter,
+
     _phantom: PhantomData<F>,
 }
 
@@ -239,7 +249,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Clone for Storage<E, L, F> {
             resource_tag_factory: self.resource_tag_factory.clone(),
             quota_limiter: self.quota_limiter.clone(),
             resource_manager: self.resource_manager.clone(),
-            scan_lock_concurrency_semaphore: self.scan_lock_concurrency_semaphore.clone(),
+            scan_lock_rate_limiter: self.scan_lock_rate_limiter.clone(),
             _phantom: PhantomData,
         }
     }
@@ -297,6 +307,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             resource_ctl,
             resource_manager.clone(),
         );
+        let scan_lock_rate_limiter = Limiter::new(f64::INFINITY);
 
         // TiDB sets scan lock concurrency to the number of alive
         // TiKV nodes[^1] which means it tends to scan lock 1 region at a time
@@ -321,7 +332,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             resource_tag_factory,
             quota_limiter,
             resource_manager,
-            scan_lock_concurrency_semaphore,
+            scan_lock_rate_limiter,
             _phantom: PhantomData,
         })
     }
@@ -1386,13 +1397,21 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             )],
         );
         let concurrency_manager = self.concurrency_manager.clone();
-        let scan_lock_concurrency_semaphore = self.scan_lock_concurrency_semaphore.clone();
+        let scan_lock_rate_limiter = self.scan_lock_rate_limiter.clone();
         // Do not allow replica read for scan_lock.
         ctx.set_replica_read(false);
 
         let res = self.read_pool.spawn_handle(
             async move {
-                let scan_lock_permit = scan_lock_concurrency_semaphore.acquire_owned();
+                // Before GC, TiDB rapidly sends scan_lock requests to all
+                // region leaders.
+                // These requests wake up hibernated peers, degrading performance
+                // by slowing down foreground requests processing and increasing
+                // the p99 latency.
+                // To mitigate this impact, we implement rate limiting for
+                // scan_lock requests.
+                scan_lock_rate_limiter.consume(1).await;
+
                 if let Some(start_key) = &start_key {
                     let end_key = match &end_key {
                         Some(k) => k.as_encoded().as_slice(),
@@ -1501,7 +1520,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         now.saturating_duration_since(command_duration),
                     ));
 
-                    drop(scan_lock_permit);
                     Ok(locks)
                 })
             }
@@ -3029,6 +3047,54 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                 .map_err(|_| Error::from(ErrorInner::SchedTooBusy))
                 .and_then(|res| future::ready(res)),
         )
+    }
+
+    pub fn init_scan_lock_rate_limit_updater(
+        &self,
+        background_worker: &Worker,
+        region_info_accessor: RegionInfoAccessor,
+        cfg_controller: ConfigController,
+    ) {
+        let scan_lock_rate_limiter = self.scan_lock_rate_limiter.clone();
+
+        background_worker.spawn_interval_async_task(
+            SCAN_LOCK_RATE_LIMIT_UPDATE_INTERVAL,
+            move || {
+                let leader_count = match region_info_accessor.region_leaders().read() {
+                    Ok(leaders) => leaders.len(),
+                    Err(e) => {
+                        warn!(
+                            "failed to get region leaders for scan lock rate limit update";
+                            "error" => %e,
+                        );
+                        return future::ready(());
+                    }
+                };
+                update_scan_lock_rate_limit(&scan_lock_rate_limiter, leader_count, &cfg_controller);
+                future::ready(())
+            },
+        );
+    }
+}
+
+fn update_scan_lock_rate_limit(
+    scan_lock_rate_limiter: &Limiter,
+    leader_count: usize,
+    cfg_controller: &ConfigController,
+) {
+    let smooth_period = cfg_controller
+        .get_current()
+        .storage
+        .scan_lock_rate_limit_period
+        .as_secs_f64();
+    let scan_lock_ops = if smooth_period <= 0.0 {
+        f64::INFINITY
+    } else {
+        (leader_count as f64 / smooth_period).max(MIN_SCAN_LOCK_RATE_LIMIT)
+    };
+    if scan_lock_ops != scan_lock_rate_limiter.speed_limit() {
+        SCHED_SCAN_LOCK_RATE_LIMIT.set(scan_lock_ops);
+        scan_lock_rate_limiter.set_speed_limit(scan_lock_ops);
     }
 }
 
@@ -7681,6 +7747,72 @@ mod tests {
         .unwrap();
         assert_eq!(res, vec![lock_b, lock_c, lock_x, lock_y]);
         drop(guard);
+    }
+
+    #[test]
+    fn test_scan_lock_rate_limit() {
+        let storage = TestStorageBuilderApiV1::new(MockLockManager::new())
+            .build()
+            .unwrap();
+
+        storage.scan_lock_rate_limiter.set_speed_limit(2.0);
+
+        let start = Instant::now();
+        let res =
+            block_on(storage.scan_lock(Context::default(), 99.into(), None, None, 10)).unwrap();
+        assert_eq!(res, vec![]);
+        let res =
+            block_on(storage.scan_lock(Context::default(), 99.into(), None, None, 10)).unwrap();
+        assert_eq!(res, vec![]);
+        let res =
+            block_on(storage.scan_lock(Context::default(), 99.into(), None, None, 10)).unwrap();
+        assert_eq!(res, vec![]);
+        let elapsed = start.saturating_elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(1000),
+            "elapsed time: {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_update_scan_lock_rate_limiter() {
+        let scan_lock_rate_limiter = Limiter::new(1.0);
+        let cfg_controller = ConfigController::default();
+
+        // Test min rate limit.
+        let leader_count = 0;
+        update_scan_lock_rate_limit(&scan_lock_rate_limiter, leader_count, &cfg_controller);
+        assert_eq!(
+            scan_lock_rate_limiter.speed_limit(),
+            MIN_SCAN_LOCK_RATE_LIMIT
+        );
+
+        // Test zero scan_lock_rate_limit_period.
+        let mut change = std::collections::HashMap::default();
+        change.insert(
+            "storage.scan-lock-rate-limit-period".to_string(),
+            "0s".to_string(),
+        );
+        cfg_controller.update_without_persist(change).unwrap();
+        let leader_count = 1000;
+        update_scan_lock_rate_limit(&scan_lock_rate_limiter, leader_count, &cfg_controller);
+        assert_eq!(scan_lock_rate_limiter.speed_limit(), f64::INFINITY);
+
+        // Test normal rate limit.
+        let leader_count = 2 * MIN_SCAN_LOCK_RATE_LIMIT as usize * 60; // 60s.
+        let mut change = std::collections::HashMap::default();
+        change.insert(
+            "storage.scan-lock-rate-limit-period".to_string(),
+            "1m".to_string(),
+        );
+        cfg_controller.update_without_persist(change).unwrap();
+        update_scan_lock_rate_limit(&scan_lock_rate_limiter, leader_count, &cfg_controller);
+        assert!(
+            scan_lock_rate_limiter.speed_limit() > MIN_SCAN_LOCK_RATE_LIMIT,
+            "{}",
+            scan_lock_rate_limiter.speed_limit()
+        );
     }
 
     #[test]

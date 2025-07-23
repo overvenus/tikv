@@ -616,4 +616,10 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
+
+    pub static ref SCHED_SCAN_LOCK_RATE_LIMIT: Gauge = register_gauge!(
+        "tikv_scheduler_scan_lock_rate_limit",
+        "The scan lock rate limit in ops per second"
+    )
+    .unwrap();
 }
