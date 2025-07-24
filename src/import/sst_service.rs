@@ -351,22 +351,22 @@ impl<E: Engine> ImportSstService<E> {
             )
             .build()
             .unwrap();
-        if let LocalTablets::Singleton(tablet) = &tablets {
-            importer.start_switch_mode_check(threads.handle(), Some(tablet.clone()));
-        } else {
-            importer.start_switch_mode_check::<E::Local>(threads.handle(), None);
-        }
+        // if let LocalTablets::Singleton(tablet) = &tablets {
+        //     importer.start_switch_mode_check(threads.handle(), Some(tablet.clone()));
+        // } else {
+        //     importer.start_switch_mode_check::<E::Local>(threads.handle(), None);
+        // }
 
         let writer = raft_writer::ThrottledTlsEngineWriter::default();
-        let gc_handle = writer.clone();
-        threads.spawn(async move {
-            while gc_handle.try_gc() {
-                tokio::time::sleep(WRITER_GC_INTERVAL).await;
-            }
-        });
+        // let gc_handle = writer.clone();
+        // threads.spawn(async move {
+        //     while gc_handle.try_gc() {
+        //         tokio::time::sleep(WRITER_GC_INTERVAL).await;
+        //     }
+        // });
 
         let cfg_mgr = ConfigManager::new(cfg);
-        threads.spawn(Self::tick(importer.clone(), cfg_mgr.clone()));
+        // threads.spawn(Self::tick(importer.clone(), cfg_mgr.clone()));
 
         ImportSstService {
             cfg: cfg_mgr,
