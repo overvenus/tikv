@@ -114,6 +114,9 @@ pub const ENGINE_TICKER_TYPES: &[TickerType] = &[
     TickerType::FlushWriteBytes,
     TickerType::ReadAmpEstimateUsefulBytes,
     TickerType::ReadAmpTotalReadBytes,
+    TickerType::NumberSuperversionAcquires,
+    TickerType::NumberSuperversionCleanups,
+    TickerType::NumberSuperversionReleases,
 ];
 
 pub const TITAN_ENGINE_TICKER_TYPES: &[TickerType] = &[

@@ -1287,6 +1287,8 @@ pub struct DbConfig {
     #[online_config(skip)]
     pub enable_unordered_write: bool,
     #[online_config(skip)]
+    pub enable_avoid_unnecessary_blocking_io: bool,
+    #[online_config(skip)]
     pub allow_concurrent_memtable_write: Option<bool>,
     pub write_buffer_limit: Option<ReadableSize>,
     #[online_config(skip)]
@@ -1358,6 +1360,7 @@ impl Default for DbConfig {
             enable_pipelined_write: false,
             enable_multi_batch_write: None, // deprecated
             enable_unordered_write: false,
+            enable_avoid_unnecessary_blocking_io: true,
             allow_concurrent_memtable_write: None,
             write_buffer_limit: None,
             write_buffer_stall_ratio: 0.0,
@@ -1517,6 +1520,7 @@ impl DbConfig {
         opts.enable_multi_batch_write(enable_multi_batch_write);
         opts.enable_unordered_write(self.enable_unordered_write);
         opts.allow_concurrent_memtable_write(self.allow_concurrent_memtable_write.unwrap_or(true));
+        opts.enable_avoid_unnecessary_blocking_io(self.enable_avoid_unnecessary_blocking_io);
         if let Some(b) = self.paranoid_checks {
             opts.set_paranoid_checks(b);
         }

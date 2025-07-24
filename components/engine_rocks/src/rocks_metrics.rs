@@ -94,6 +94,9 @@ make_auto_flush_static_metric! {
         failure,
         success,
         trigger_next,
+        number_superversion_acquires,
+        number_superversion_cleanups,
+        number_superversion_releases,
     }
 
     pub struct EngineTickerMetrics : LocalIntCounter {
@@ -604,6 +607,24 @@ pub fn flush_engine_ticker_metrics(t: TickerType, value: u64, name: &str) {
             STORE_ENGINE_BLOB_GC_ACTION
                 .get(name_enum)
                 .trigger_next
+                .inc_by(value);
+        }
+        TickerType::NumberSuperversionAcquires => {
+            STORE_ENGINE_SUPER_VERSION_ACQUIRES
+                .get(name_enum)
+                .number_superversion_acquires
+                .inc_by(value);
+        }
+        TickerType::NumberSuperversionCleanups => {
+            STORE_ENGINE_SUPER_VERSION_CLEANUPS
+                .get(name_enum)
+                .number_superversion_cleanups
+                .inc_by(value);
+        }
+        TickerType::NumberSuperversionReleases => {
+            STORE_ENGINE_SUPER_VERSION_RELEASES
+                .get(name_enum)
+                .number_superversion_releases
                 .inc_by(value);
         }
         // TODO: Some tickers are ignored.
@@ -1557,6 +1578,30 @@ lazy_static! {
     ).unwrap();
     pub static ref STORE_ENGINE_BLOB_CACHE_EFFICIENCY: EngineTickerMetrics =
         auto_flush_from!(STORE_ENGINE_BLOB_CACHE_EFFICIENCY_VEC, EngineTickerMetrics);
+
+    pub static ref STORE_ENGINE_SUPER_VERSION_ACQUIRES_VEC: IntCounterVec = register_int_counter_vec!(
+        "tikv_engine_super_version_acquires",
+        "Efficiency of rocksdb's block cache",
+        &["db", "type"]
+    ).unwrap();
+    pub static ref STORE_ENGINE_SUPER_VERSION_ACQUIRES: EngineTickerMetrics =
+        auto_flush_from!(STORE_ENGINE_SUPER_VERSION_ACQUIRES_VEC, EngineTickerMetrics);
+
+    pub static ref STORE_ENGINE_SUPER_VERSION_CLEANUPS_VEC: IntCounterVec = register_int_counter_vec!(
+        "tikv_engine_super_version_cleanups",
+        "Efficiency of rocksdb's block cache",
+        &["db", "type"]
+    ).unwrap();
+    pub static ref STORE_ENGINE_SUPER_VERSION_CLEANUPS: EngineTickerMetrics =
+        auto_flush_from!(STORE_ENGINE_SUPER_VERSION_CLEANUPS_VEC, EngineTickerMetrics);
+
+    pub static ref STORE_ENGINE_SUPER_VERSION_RELEASES_VEC: IntCounterVec = register_int_counter_vec!(
+        "tikv_engine_super_version_releases",
+        "Efficiency of rocksdb's block cache",
+        &["db", "type"]
+    ).unwrap();
+    pub static ref STORE_ENGINE_SUPER_VERSION_RELEASES: EngineTickerMetrics =
+        auto_flush_from!(STORE_ENGINE_SUPER_VERSION_RELEASES_VEC, EngineTickerMetrics);
 }
 
 // For histogram type

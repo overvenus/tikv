@@ -57,10 +57,10 @@ tracker = { workspace = true }
 txn_types = { workspace = true }
 
 [dependencies.rocksdb]
-git = "https://github.com/Connor1996/rust-rocksdb.git"
+git = "https://github.com/overvenus/rust-rocksdb.git"
 package = "rocksdb"
 features = ["encryption"]
-branch = "seperate-lock"
+branch = "p99/optimization"
 
 [dev-dependencies]
 rand = "0.8"
