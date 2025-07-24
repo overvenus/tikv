@@ -270,9 +270,17 @@ impl PerfContextStatistics {
         self.last_flush_time = Instant::now_coarse();
         let ctx = mem::take(&mut self.read);
         let io_ctx = mem::take(&mut self.io_stats);
-        let (v, tag) = match self.kind {
-            PerfContextKind::Storage(tag) => (&*STORAGE_ROCKSDB_PERF_COUNTER, tag),
-            PerfContextKind::Coprocessor(tag) => (&*COPR_ROCKSDB_PERF_COUNTER, tag),
+        let (v, histogram, tag) = match self.kind {
+            PerfContextKind::Storage(tag) => (
+                &*STORAGE_ROCKSDB_PERF_COUNTER,
+                &*STORAGE_ROCKSDB_PERF_HISTOGRAM,
+                tag,
+            ),
+            PerfContextKind::Coprocessor(tag) => (
+                &*COPR_ROCKSDB_PERF_COUNTER,
+                &*COPR_ROCKSDB_PERF_HISTOGRAM,
+                tag,
+            ),
             _ => unreachable!(),
         };
         v.get_metric_with_label_values(&[tag, "bytes_read"])
@@ -281,9 +289,17 @@ impl PerfContextStatistics {
         v.get_metric_with_label_values(&[tag, "open_nanos"])
             .unwrap()
             .inc_by(io_ctx.open_nanos);
+        histogram
+            .get_metric_with_label_values(&[tag, "open_nanos"])
+            .unwrap()
+            .observe(io_ctx.open_nanos as f64);
         v.get_metric_with_label_values(&[tag, "read_nanos"])
             .unwrap()
             .inc_by(io_ctx.read_nanos);
+        histogram
+            .get_metric_with_label_values(&[tag, "read_nanos"])
+            .unwrap()
+            .observe(io_ctx.read_nanos as f64);
         v.get_metric_with_label_values(&[tag, "user_key_comparison_count"])
             .unwrap()
             .inc_by(ctx.user_key_comparison_count);
@@ -299,6 +315,10 @@ impl PerfContextStatistics {
         v.get_metric_with_label_values(&[tag, "block_read_time"])
             .unwrap()
             .inc_by(ctx.block_read_time);
+        histogram
+            .get_metric_with_label_values(&[tag, "block_read_time"])
+            .unwrap()
+            .observe(ctx.block_read_time as f64);
         v.get_metric_with_label_values(&[tag, "block_cache_index_hit_count"])
             .unwrap()
             .inc_by(ctx.block_cache_index_hit_count);
@@ -335,6 +355,10 @@ impl PerfContextStatistics {
         v.get_metric_with_label_values(&[tag, "get_snapshot_time"])
             .unwrap()
             .inc_by(ctx.get_snapshot_time);
+        histogram
+            .get_metric_with_label_values(&[tag, "get_snapshot_time"])
+            .unwrap()
+            .observe(ctx.get_snapshot_time as f64);
         v.get_metric_with_label_values(&[tag, "get_from_memtable_time"])
             .unwrap()
             .inc_by(ctx.get_from_memtable_time);
@@ -377,6 +401,10 @@ impl PerfContextStatistics {
         v.get_metric_with_label_values(&[tag, "db_mutex_lock_nanos"])
             .unwrap()
             .inc_by(ctx.db_mutex_lock_nanos);
+        histogram
+            .get_metric_with_label_values(&[tag, "db_mutex_lock_nanos"])
+            .unwrap()
+            .observe(ctx.db_mutex_lock_nanos as f64);
         v.get_metric_with_label_values(&[tag, "db_condition_wait_nanos"])
             .unwrap()
             .inc_by(ctx.db_condition_wait_nanos);

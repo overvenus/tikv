@@ -21,6 +21,30 @@ make_auto_flush_static_metric! {
     }
 }
 
+const PERF_BUCKETS: &[f64] = &[
+    4.0,
+    16.0,
+    32.0,
+    64.0,
+    128.0,
+    256.0,
+    512.0,
+    1000.0,
+    2000.0,
+    4000.0,
+    8000.0,
+    16000.0,
+    32000.0,
+    64000.0,
+    128000.0,
+    256000.0,
+    512000.0,
+    1000000.0,
+    10000000.0,
+    100000000.0,
+    1000000000.0,
+];
+
 lazy_static! {
     pub static ref APPLY_PERF_CONTEXT_TIME_HISTOGRAM: HistogramVec = register_histogram_vec!(
         "tikv_raftstore_apply_perf_context_time_duration_secs",
@@ -46,6 +70,20 @@ lazy_static! {
         "tikv_coprocessor_rocksdb_perf",
         "Total number of RocksDB internal operations from PerfContext",
         &["req", "metric"]
+    )
+    .unwrap();
+    pub static ref STORAGE_ROCKSDB_PERF_HISTOGRAM: HistogramVec = register_histogram_vec!(
+        "tikv_storage_rocksdb_perf_histogram",
+        "Total number of RocksDB internal operations from PerfContext",
+        &["req", "metric"],
+        PERF_BUCKETS.to_vec()
+    )
+    .unwrap();
+    pub static ref COPR_ROCKSDB_PERF_HISTOGRAM: HistogramVec = register_histogram_vec!(
+        "tikv_coprocessor_rocksdb_perf_histogram",
+        "Total number of RocksDB internal operations from PerfContext",
+        &["req", "metric"],
+        PERF_BUCKETS.to_vec()
     )
     .unwrap();
     pub static ref APPLY_PERF_CONTEXT_TIME_HISTOGRAM_STATIC: PerfContextTimeDuration =
