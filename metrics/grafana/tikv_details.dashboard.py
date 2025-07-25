@@ -190,6 +190,39 @@ def P99() -> Dashboard:
         ]
     )
     layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Storage async write duration",
+            heatmap_description="The time consumed by processing asynchronous write requests",
+            graph_title="Storage async write duration",
+            graph_description="The storage async write duration",
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_storage_engine_async_request_duration_seconds",
+            label_selectors=['type="write"'],
+        ),
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Storage async snapshot duration",
+            heatmap_description="The time consumed by processing asynchronous snapshot requests",
+            graph_title="Storage async snapshot duration",
+            graph_description="The storage async snapshot duration",
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_storage_engine_async_request_duration_seconds",
+            label_selectors=['type="snapshot"'],
+        ),
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Storage async snapshot duration (pure local read)",
+            heatmap_description="The storage async snapshot duration without the involving of raftstore",
+            graph_title="Storage async snapshot duration (pure local read)",
+            graph_description="The storage async snapshot duration without the involving of raftstore",
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_storage_engine_async_request_duration_seconds",
+            label_selectors=['type="snapshot_local_read"'],
+        ),
+    )
+    layout.row(
         [
             graph_panel(
                 title="Local reader reject requests",
@@ -469,28 +502,6 @@ def P99() -> Dashboard:
             yaxis_format=UNITS.SECONDS,
             metric="tikv_raftstore_request_wait_time_duration_secs",
         )
-    )
-    layout.row(
-        heatmap_panel_graph_panel_histogram_quantile_pairs(
-            heatmap_title="Storage async snapshot duration",
-            heatmap_description="The time consumed by processing asynchronous snapshot requests",
-            graph_title="Storage async snapshot duration",
-            graph_description="The storage async snapshot duration",
-            yaxis_format=UNITS.SECONDS,
-            metric="tikv_storage_engine_async_request_duration_seconds",
-            label_selectors=['type="snapshot"'],
-        ),
-    )
-    layout.row(
-        heatmap_panel_graph_panel_histogram_quantile_pairs(
-            heatmap_title="Storage async snapshot duration (pure local read)",
-            heatmap_description="The storage async snapshot duration without the involving of raftstore",
-            graph_title="Storage async snapshot duration (pure local read)",
-            graph_description="The storage async snapshot duration without the involving of raftstore",
-            yaxis_format=UNITS.SECONDS,
-            metric="tikv_storage_engine_async_request_duration_seconds",
-            label_selectors=['type="snapshot_local_read"'],
-        ),
     )
     layout.row(
         heatmap_panel_graph_panel_histogram_quantile_pairs(
