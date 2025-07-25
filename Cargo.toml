@@ -450,7 +450,6 @@ rpath = false
 
 [profile.release]
 opt-level = 3
-debug = false
 codegen-units = 1
 lto = "thin"
 incremental = false

@@ -3004,7 +3004,7 @@ dependencies = [
 [[package]]
 name = "librocksdb_sys"
 version = "0.1.0"
-source = "git+https://github.com/overvenus/rust-rocksdb.git?branch=p99/optimization#3880c832d8c00c3728e1e811feee3e6e15c1125a"
+source = "git+https://github.com/overvenus/rust-rocksdb.git?branch=p99/optimization#6e387ca9e0ea40edc50663170760073d10e389f7"
 dependencies = [
  "bindgen 0.65.1",
  "bzip2-sys",
@@ -3023,7 +3023,7 @@ dependencies = [
 [[package]]
 name = "libtitan_sys"
 version = "0.0.1"
-source = "git+https://github.com/overvenus/rust-rocksdb.git?branch=p99/optimization#3880c832d8c00c3728e1e811feee3e6e15c1125a"
+source = "git+https://github.com/overvenus/rust-rocksdb.git?branch=p99/optimization#6e387ca9e0ea40edc50663170760073d10e389f7"
 dependencies = [
  "bzip2-sys",
  "cc",
@@ -4933,7 +4933,7 @@ dependencies = [
 [[package]]
 name = "rocksdb"
 version = "0.3.0"
-source = "git+https://github.com/overvenus/rust-rocksdb.git?branch=p99/optimization#3880c832d8c00c3728e1e811feee3e6e15c1125a"
+source = "git+https://github.com/overvenus/rust-rocksdb.git?branch=p99/optimization#6e387ca9e0ea40edc50663170760073d10e389f7"
 dependencies = [
  "libc 0.2.146",
  "librocksdb_sys",
