@@ -2,7 +2,6 @@
 
 // #[PerformanceCriticalPath]
 use std::{
-    fmt,
     num::NonZeroU64,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -19,50 +18,14 @@ use keys::DATA_PREFIX_KEY;
 use kvproto::{kvrpcpb::ExtraOp as TxnExtraOp, metapb::Region, raft_serverpb::RaftApplyState};
 use pd_client::BucketMeta;
 use tikv_util::{
-    box_err, error,
-    keybuilder::KeyBuilder,
-    metrics::CRITICAL_ERROR,
+    box_err, error, keybuilder::KeyBuilder, metrics::CRITICAL_ERROR,
     panic_when_unexpected_key_or_data, set_panic_mark,
-    worker::{Builder as WorkerBuilder, Runnable, Scheduler, Worker},
 };
 
 use crate::{
     store::{util, PeerStorage, TxnExt},
     Error, Result,
 };
-
-struct IterPurger;
-
-struct IterPurgerTask(Box<dyn FnOnce() + Send + 'static>);
-
-impl fmt::Display for IterPurgerTask {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "IterPurgerTask")
-    }
-}
-
-impl Runnable for IterPurger {
-    type Task = IterPurgerTask;
-
-    fn run(&mut self, task: IterPurgerTask) {
-        task.0();
-    }
-}
-
-fn new_scheduler() -> (Scheduler<IterPurgerTask>, Worker) {
-    let background_worker = WorkerBuilder::new("iter_purger").thread_count(1).create();
-
-    let iter_purger = IterPurger;
-    let scheduler = background_worker.start("iter_purger", iter_purger);
-
-    (scheduler, background_worker)
-}
-
-lazy_static::lazy_static! {
-    static ref BACKGROUND_ITER_PURGER: (Scheduler<IterPurgerTask>, Worker) = {
-        new_scheduler()
-    };
-}
 
 /// Snapshot of a region.
 ///
@@ -308,7 +271,7 @@ where
 /// iterate in the region. It behaves as if underlying
 /// db only contains one region.
 pub struct RegionIterator<S: Snapshot> {
-    iter: Option<<S as Iterable>::Iterator>,
+    iter: <S as Iterable>::Iterator,
     region: Arc<Region>,
 }
 
@@ -352,26 +315,15 @@ where
         let iter = snap
             .iterator_opt(cf, iter_opt)
             .expect("creating snapshot iterator"); // FIXME error handling
-        RegionIterator {
-            iter: Some(iter),
-            region,
-        }
+        RegionIterator { iter, region }
     }
 
     pub fn seek_to_first(&mut self) -> Result<bool> {
-        self.iter
-            .as_mut()
-            .unwrap()
-            .seek_to_first()
-            .map_err(Error::from)
+        self.iter.seek_to_first().map_err(Error::from)
     }
 
     pub fn seek_to_last(&mut self) -> Result<bool> {
-        self.iter
-            .as_mut()
-            .unwrap()
-            .seek_to_last()
-            .map_err(Error::from)
+        self.iter.seek_to_last().map_err(Error::from)
     }
 
     pub fn seek(&mut self, key: &[u8]) -> Result<bool> {
@@ -380,40 +332,36 @@ where
         });
         self.should_seekable(key)?;
         let key = keys::data_key(key);
-        self.iter.as_mut().unwrap().seek(&key).map_err(Error::from)
+        self.iter.seek(&key).map_err(Error::from)
     }
 
     pub fn seek_for_prev(&mut self, key: &[u8]) -> Result<bool> {
         self.should_seekable(key)?;
         let key = keys::data_key(key);
-        self.iter
-            .as_mut()
-            .unwrap()
-            .seek_for_prev(&key)
-            .map_err(Error::from)
+        self.iter.seek_for_prev(&key).map_err(Error::from)
     }
 
     pub fn prev(&mut self) -> Result<bool> {
-        self.iter.as_mut().unwrap().prev().map_err(Error::from)
+        self.iter.prev().map_err(Error::from)
     }
 
     pub fn next(&mut self) -> Result<bool> {
-        self.iter.as_mut().unwrap().next().map_err(Error::from)
+        self.iter.next().map_err(Error::from)
     }
 
     #[inline]
     pub fn key(&self) -> &[u8] {
-        keys::origin_key(self.iter.as_ref().unwrap().key())
+        keys::origin_key(self.iter.key())
     }
 
     #[inline]
     pub fn value(&self) -> &[u8] {
-        self.iter.as_ref().unwrap().value()
+        self.iter.value()
     }
 
     #[inline]
     pub fn valid(&self) -> Result<bool> {
-        self.iter.as_ref().unwrap().valid().map_err(Error::from)
+        self.iter.valid().map_err(Error::from)
     }
 
     #[inline]
@@ -422,20 +370,6 @@ where
             return handle_check_key_in_region_error(e);
         }
         Ok(())
-    }
-}
-
-impl<S> Drop for RegionIterator<S>
-where
-    S: Snapshot,
-{
-    fn drop(&mut self) {
-        let iter = self.iter.take();
-        let _ = BACKGROUND_ITER_PURGER
-            .0
-            .schedule(IterPurgerTask(Box::new(move || {
-                let _ = iter;
-            })));
     }
 }
 
