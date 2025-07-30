@@ -77,6 +77,7 @@ pub struct TikvServerCore {
     pub flow_info_receiver: Option<mpsc::Receiver<FlowInfo>>,
     pub to_stop: Vec<Box<dyn Stop>>,
     pub background_worker: Worker,
+    pub iter_purge_worker: Worker,
 }
 
 impl TikvServerCore {

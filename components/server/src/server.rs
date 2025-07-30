@@ -14,6 +14,7 @@
 use std::{
     collections::HashMap,
     convert::TryFrom,
+    fmt,
     path::{Path, PathBuf},
     str::FromStr,
     sync::{atomic::AtomicU64, mpsc, Arc, Mutex},
@@ -33,7 +34,10 @@ use concurrency_manager::{
     ActionOnInvalidMaxTs, ConcurrencyManager, DEFAULT_MAX_TS_DRIFT_ALLOWANCE,
     DEFAULT_MAX_TS_SYNC_INTERVAL, LIMIT_VALID_TIME_MULTIPLIER,
 };
-use engine_rocks::{from_rocks_compression_type, RocksEngine, RocksStatistics};
+use engine_rocks::{
+    from_rocks_compression_type, register_iter_destructor, RocksEngine, RocksEngineDroppedIterator,
+    RocksStatistics,
+};
 use engine_rocks_helper::sst_recovery::{RecoveryRunner, DEFAULT_CHECK_INTERVAL};
 use engine_traits::{
     Engines, KvEngine, MiscExt, RaftEngine, SingletonFactory, TabletContext, TabletRegistry,
@@ -122,7 +126,7 @@ use tikv_util::{
     sys::{disk, path_in_diff_mount_point, register_memory_usage_high_water, SysQuota},
     thread_group::GroupProperties,
     time::{Instant, Limiter, Monitor},
-    worker::{Builder as WorkerBuilder, LazyWorker, Scheduler, Worker},
+    worker::{Builder as WorkerBuilder, LazyWorker, Runnable, Scheduler, Worker},
     yatp_pool::CleanupMethod,
     Either,
 };
@@ -138,6 +142,24 @@ use crate::{
     signal_handler,
     tikv_util::sys::thread::ThreadBuildWrapper,
 };
+
+struct IterPurger;
+
+struct IterPurgerTask(RocksEngineDroppedIterator);
+
+impl fmt::Display for IterPurgerTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "IterPurgerTask")
+    }
+}
+
+impl Runnable for IterPurger {
+    type Task = IterPurgerTask;
+
+    fn run(&mut self, task: IterPurgerTask) {
+        drop(task);
+    }
+}
 
 #[inline]
 fn run_impl<CER: ConfiguredRaftEngine, F: KvFormat>(
@@ -375,6 +397,14 @@ where
         let background_worker = WorkerBuilder::new("background")
             .thread_count(thread_count)
             .create();
+        let iter_purge_worker = WorkerBuilder::new("iter_purger").thread_count(1).create();
+        let iter_purger = IterPurger;
+        let scheduler = iter_purge_worker.start("iter_purger", iter_purger);
+        register_iter_destructor(Box::new(move |iter| {
+            if let Err(e) = scheduler.schedule(IterPurgerTask(iter)) {
+                warn!("failed to schedule iter purger task"; "error" => ?e);
+            }
+        }));
 
         let resource_manager = if config.resource_control.enabled {
             let mgr = Arc::new(ResourceGroupManager::default());
@@ -454,6 +484,7 @@ where
                 flow_info_receiver: None,
                 to_stop: vec![],
                 background_worker,
+                iter_purge_worker,
             },
             cfg_controller: Some(cfg_controller),
             security_mgr,

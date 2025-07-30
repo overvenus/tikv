@@ -387,6 +387,7 @@ where
                 flow_info_sender: None,
                 flow_info_receiver: None,
                 to_stop: vec![],
+                iter_purge_worker: background_worker.clone(),
                 background_worker,
             },
             cfg_controller: Some(cfg_controller),
