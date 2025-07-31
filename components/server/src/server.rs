@@ -398,11 +398,11 @@ where
         let iter_purge_worker = WorkerBuilder::new("iter_purger").thread_count(1).create();
         let iter_purger = IterPurger;
         let scheduler = iter_purge_worker.start("iter_purger", iter_purger);
-        register_iter_destructor(Box::new(move |iter| {
-            if let Err(e) = scheduler.schedule(IterPurgerTask(iter)) {
-                warn!("failed to schedule iter purger task"; "error" => ?e);
-            }
-        }));
+        // register_iter_destructor(Box::new(move |iter| {
+        //     if let Err(e) = scheduler.schedule(IterPurgerTask(iter)) {
+        //         warn!("failed to schedule iter purger task"; "error" => ?e);
+        //     }
+        // }));
 
         let resource_manager = if config.resource_control.enabled {
             let mgr = Arc::new(ResourceGroupManager::default());
