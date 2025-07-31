@@ -85,7 +85,6 @@ pub struct Config {
     pub ttl_check_poll_interval: ReadableDuration,
     #[online_config(skip)]
     pub txn_status_cache_capacity: usize,
-    pub scan_lock_smooth_rate_period: ReadableDuration,
     #[online_config(submodule)]
     pub flow_control: FlowControlConfig,
     #[online_config(submodule)]
@@ -120,8 +119,6 @@ impl Default for Config {
             block_cache: BlockCacheConfig::default(),
             io_rate_limit: IoRateLimitConfig::default(),
             background_error_recovery_window: ReadableDuration::hours(1),
-            scan_lock_smooth_rate_period: ReadableDuration::minutes(6), /* Default gc time is 10
-                                                                         * minutes */
         }
     }
 }

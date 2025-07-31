@@ -534,7 +534,6 @@ impl<EK: KvEngine> ServerCluster<EK> {
                 .as_ref()
                 .map(|m| m.derive_controller("scheduler-worker-pool".to_owned(), true)),
             resource_manager.clone(),
-            tikv_util::time::Limiter::new(f64::INFINITY),
         )?;
         self.storages.insert(node_id, raft_kv_v2.clone());
 
